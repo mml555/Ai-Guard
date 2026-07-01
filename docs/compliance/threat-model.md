@@ -106,7 +106,7 @@ followed; where they are not, threats that they mitigate become residual.
 | Request flood exhausts the API | Per-IP rate limiting (`RATE_LIMIT_MAX`, default 120/min); Redis-shared across replicas; **fails closed** by default on limiter error | Tune limits; `RATE_LIMIT_FAIL_OPEN=true` trades safety for availability |
 | Oversized request bodies | `REQUEST_BODY_LIMIT_BYTES` (default 1 MiB) | Operator can raise it |
 | Global budget counter hot-row contention at high RPS | Per-transaction `lock_timeout` → fail-fast rather than pile-up | Throughput ceiling on the single global row (documented); shard if outgrown |
-| Slow/hung provider ties up workers | `LITELLM_TIMEOUT_MS` / `REQUEST_TIMEOUT_MS` (default 60s); fallback model on provider failure | No streaming in v1 → long completions hold a worker for their full duration |
+| Slow/hung provider ties up workers | `LITELLM_TIMEOUT_MS` / `REQUEST_TIMEOUT_MS` (default 60s); fallback model on provider failure; SSE streaming for features that do not require output PII protection | Non-streamed calls and PII-protected streamed requests still hold a worker until timeout/completion |
 | Backend dependency outage | Fail-closed on policy/safety (no unguarded calls); graceful degrade on Langfuse | Availability depends on operator HA (see [high-availability](../deployment/high-availability.md)) |
 | Budget exhaustion as financial DoS | Atomic caps (user/feature/global) block spend at the limit | Caps are the guard; set them deliberately |
 

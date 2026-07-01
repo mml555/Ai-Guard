@@ -6,7 +6,7 @@ import type Redis from "ioredis";
 import { type AiGuardConfig, resolveSafetyPlan } from "@ai-guard/policy-engine";
 import type { loadEnv } from "./config/env";
 import { loadConfigFromFile } from "./config/loadConfig";
-import { createPool, resolveSsl } from "./db/pool";
+import { assertPoolReachable, createPool, resolveSsl } from "./db/pool";
 import { createLiteLLMClient, type LiteLLMClient } from "./services/litellm";
 import { createObservability, type Observability } from "./services/observability";
 import { createSafetyGuard, type SafetyGuard } from "./services/safety";
@@ -105,7 +105,7 @@ export async function createDbPool(env: Env): Promise<Pool> {
   // Fail fast on an unreachable/misconfigured database rather than booting
   // "healthy" and failing every request.
   try {
-    await pool.query("SELECT 1");
+    await assertPoolReachable(pool);
   } catch (err) {
     await pool.end().catch(() => {});
     throw new Error(`database unreachable at startup: ${redactError(err)}`);

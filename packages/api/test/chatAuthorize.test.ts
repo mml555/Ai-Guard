@@ -10,17 +10,21 @@ const baseInput: ChatInput = {
   messages: [{ role: "user", content: "hi" }],
 };
 
+function ctx(patch: Omit<RequestContext, "requestId">): RequestContext {
+  return { requestId: "req_test", ...patch };
+}
+
 // Extracting authorization out of the route makes these rules unit-testable
 // without booting a server — the point of the layering split.
 describe("authorizeChatInput", () => {
   it("allows and defaults project/environment from the key", () => {
-    const ctx: RequestContext = {
+    const context = ctx({
       apiKeyName: "k",
       permissions: ["chat:create"],
       projectId: "proj_a",
       environment: "prod",
-    };
-    const res = authorizeChatInput(ctx, baseInput);
+    });
+    const res = authorizeChatInput(context, baseInput);
     expect(res.ok).toBe(true);
     if (res.ok) {
       expect(res.value.projectId).toBe("proj_a");
@@ -29,8 +33,8 @@ describe("authorizeChatInput", () => {
   });
 
   it("denies when the key lacks chat:create", () => {
-    const ctx: RequestContext = { apiKeyName: "k", permissions: ["usage:read"] };
-    const res = authorizeChatInput(ctx, baseInput);
+    const context = ctx({ apiKeyName: "k", permissions: ["usage:read"] });
+    const res = authorizeChatInput(context, baseInput);
     expect(res.ok).toBe(false);
     if (!res.ok) {
       expect(res.status).toBe(403);
@@ -39,30 +43,30 @@ describe("authorizeChatInput", () => {
   });
 
   it("denies a project mismatch", () => {
-    const ctx: RequestContext = { apiKeyName: "k", permissions: ["chat:create"], projectId: "proj_a" };
-    const res = authorizeChatInput(ctx, { ...baseInput, projectId: "proj_b" });
+    const context = ctx({ apiKeyName: "k", permissions: ["chat:create"], projectId: "proj_a" });
+    const res = authorizeChatInput(context, { ...baseInput, projectId: "proj_b" });
     expect(res.ok).toBe(false);
     if (!res.ok) expect(res.code).toBe("project_mismatch");
   });
 
   it("denies a user-type outside the key's allowlist", () => {
-    const ctx: RequestContext = {
+    const context = ctx({
       apiKeyName: "k",
       permissions: ["chat:create"],
       allowedUserTypes: ["admin"],
-    };
-    const res = authorizeChatInput(ctx, baseInput);
+    });
+    const res = authorizeChatInput(context, baseInput);
     expect(res.ok).toBe(false);
     if (!res.ok) expect(res.code).toBe("user_type_forbidden");
   });
 
   it("denies a userId outside the key's allowlist", () => {
-    const ctx: RequestContext = {
+    const context = ctx({
       apiKeyName: "k",
       permissions: ["chat:create"],
       allowedUserIds: ["user_2"],
-    };
-    const res = authorizeChatInput(ctx, baseInput);
+    });
+    const res = authorizeChatInput(context, baseInput);
     expect(res.ok).toBe(false);
     if (!res.ok) expect(res.code).toBe("user_forbidden");
   });

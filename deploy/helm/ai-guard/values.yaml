@@ -102,6 +102,12 @@ serviceMonitor:
   scrapeTimeout: 10s
   path: /metrics
   labels: {}
+  # If secret.metricsAuthToken is set and the chart creates the Secret, the
+  # ServiceMonitor is wired automatically. With secret.existingSecret, set this
+  # to the secret/key Prometheus should use for Authorization: Bearer.
+  bearerTokenSecret:
+    name: ""
+    key: METRICS_AUTH_TOKEN
 
 # DB migrations run once as a pre-install/pre-upgrade Job hook (never N replicas
 # racing). Matches the "run one migrator on deploy" operations guidance.

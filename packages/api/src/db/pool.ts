@@ -70,6 +70,10 @@ export function createPool(
   return pool;
 }
 
+export async function assertPoolReachable(pool: Pool): Promise<void> {
+  await pool.query("SELECT 1");
+}
+
 /**
  * Run `fn` inside a single transaction on one pooled client: BEGIN (with an
  * optional `SET LOCAL lock_timeout`), then COMMIT, rolling back and releasing

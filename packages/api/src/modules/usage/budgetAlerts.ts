@@ -1,6 +1,7 @@
 import { createHmac } from "node:crypto";
 import type { Pool } from "pg";
 import { monthWindowStart } from "../../services/windows";
+import { claimGlobalMonthlyBudgetAlert } from "./budgetAlertRepo";
 
 export interface BudgetAlertPayload {
   globalSpendUsd: number;
@@ -17,13 +18,6 @@ export interface BudgetAlertWebhookConfig {
   timeoutMs?: number;
 }
 
-const CLAIM_SQL = `
-  INSERT INTO budget_alert_sent (scope, window_start, alert_kind)
-  VALUES ('global_monthly', $1::date, 'threshold')
-  ON CONFLICT DO NOTHING
-  RETURNING scope
-`;
-
 /**
  * Log + optionally POST a webhook when global spend crosses alert_at_percent.
  * Webhook fires at most once per calendar month (atomic claim in Postgres).
@@ -39,8 +33,7 @@ export async function handleGlobalBudgetAlert(
 ): Promise<void> {
   const now = payload.now ?? new Date();
   const windowStart = monthWindowStart(now).slice(0, 10);
-  const claimed = await pool.query(CLAIM_SQL, [windowStart]);
-  const firstThisMonth = claimed.rowCount === 1;
+  const firstThisMonth = await claimGlobalMonthlyBudgetAlert(pool, windowStart);
 
   if (firstThisMonth) {
     log?.warn(

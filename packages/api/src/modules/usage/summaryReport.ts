@@ -1,4 +1,10 @@
 import type { Pool } from "pg";
+import {
+  getTopModelUsed,
+  getTopReasonCode,
+  getUsageAggregate,
+  type UsageSummaryFilters,
+} from "./summaryReportRepo";
 
 export interface UsageSummaryQuery {
   feature?: string;
@@ -28,53 +34,15 @@ export async function getUsageSummaryReport(
   query: UsageSummaryQuery,
 ): Promise<UsageSummaryReport> {
   const sinceDate = parseSince(query.since ?? "24h");
-  const conditions = ["created_at >= $1::timestamptz"];
-  const values: unknown[] = [sinceDate.toISOString()];
-
-  if (query.projectScope) {
-    values.push(query.projectScope);
-    conditions.push(`project_id = $${values.length}`);
-  }
-  if (query.feature) {
-    values.push(query.feature);
-    conditions.push(`feature = $${values.length}`);
-  }
-  if (query.userType) {
-    values.push(query.userType);
-    conditions.push(`user_type = $${values.length}`);
-  }
-
-  const where = conditions.join(" AND ");
-
-  const { rows } = await pool.query<{
-    requests: string;
-    completed: string;
-    blocked: string;
-    degraded: string;
-    fallbacks: string;
-    safety_blocked: string;
-    actual_cost: string;
-    estimated_cost: string;
-  }>(
-    `
-    SELECT
-      count(*)::text AS requests,
-      count(*) FILTER (WHERE status = 'ok')::text AS completed,
-      count(*) FILTER (WHERE status = 'failed')::text AS blocked,
-      count(*) FILTER (WHERE decision = 'degrade')::text AS degraded,
-      count(*) FILTER (WHERE decision = 'fallback')::text AS fallbacks,
-      count(*) FILTER (WHERE status = 'safety_blocked')::text AS safety_blocked,
-      coalesce(sum(actual_cost_usd), 0)::text AS actual_cost,
-      coalesce(sum(estimated_cost_usd), 0)::text AS estimated_cost
-    FROM request_logs
-    WHERE ${where}
-    `,
-    values,
-  );
-
-  const agg = rows[0];
-  const topReason = await topReasonCode(pool, where, values);
-  const topModel = await topModelUsed(pool, where, values);
+  const filters: UsageSummaryFilters = {
+    since: sinceDate,
+    projectScope: query.projectScope,
+    feature: query.feature,
+    userType: query.userType,
+  };
+  const agg = await getUsageAggregate(pool, filters);
+  const topReason = await mapTopReasonCode(pool, filters);
+  const topModel = await mapTopModel(pool, filters);
 
   return {
     since: sinceDate.toISOString(),
@@ -93,44 +61,14 @@ export async function getUsageSummaryReport(
   };
 }
 
-async function topReasonCode(
-  pool: Pool,
-  where: string,
-  values: unknown[],
-): Promise<{ code: string; count: number } | undefined> {
-  const { rows } = await pool.query<{ code: string; count: string }>(
-    `
-    SELECT coalesce(reason_code, 'unknown') AS code, count(*)::text AS count
-    FROM request_logs
-    WHERE ${where} AND status <> 'ok'
-    GROUP BY 1
-    ORDER BY count(*) DESC
-    LIMIT 1
-    `,
-    values,
-  );
-  const row = rows[0];
+async function mapTopReasonCode(pool: Pool, filters: UsageSummaryFilters) {
+  const row = await getTopReasonCode(pool, filters);
   if (!row || row.code === "unknown") return undefined;
   return { code: row.code, count: Number(row.count) };
 }
 
-async function topModelUsed(
-  pool: Pool,
-  where: string,
-  values: unknown[],
-): Promise<{ model: string; count: number } | undefined> {
-  const { rows } = await pool.query<{ model: string; count: string }>(
-    `
-    SELECT resolved_model AS model, count(*)::text AS count
-    FROM request_logs
-    WHERE ${where} AND resolved_model IS NOT NULL
-    GROUP BY 1
-    ORDER BY count(*) DESC
-    LIMIT 1
-    `,
-    values,
-  );
-  const row = rows[0];
+async function mapTopModel(pool: Pool, filters: UsageSummaryFilters) {
+  const row = await getTopModelUsed(pool, filters);
   return row ? { model: row.model, count: Number(row.count) } : undefined;
 }
 

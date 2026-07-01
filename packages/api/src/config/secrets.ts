@@ -15,7 +15,7 @@ import { readFileSync } from "node:fs";
  * safer than silently starting without a credential.
  */
 export function expandFileSecrets(
-  raw: NodeJS.ProcessEnv = process.env,
+  raw: NodeJS.ProcessEnv,
   readFile: (path: string) => string = (p) => readFileSync(p, "utf8"),
 ): NodeJS.ProcessEnv {
   const out = { ...raw };

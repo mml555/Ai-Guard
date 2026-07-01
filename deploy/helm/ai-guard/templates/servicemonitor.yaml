@@ -1,4 +1,9 @@
 {{- if .Values.serviceMonitor.enabled }}
+{{- $bearerSecretName := .Values.serviceMonitor.bearerTokenSecret.name -}}
+{{- if and (not $bearerSecretName) (not .Values.secret.existingSecret) .Values.secret.metricsAuthToken -}}
+{{- $bearerSecretName = include "ai-guard.secretName" . -}}
+{{- end -}}
+{{- $bearerSecretKey := default "METRICS_AUTH_TOKEN" .Values.serviceMonitor.bearerTokenSecret.key -}}
 apiVersion: monitoring.coreos.com/v1
 kind: ServiceMonitor
 metadata:
@@ -19,6 +24,9 @@ spec:
       path: {{ .Values.serviceMonitor.path | quote }}
       interval: {{ .Values.serviceMonitor.interval }}
       scrapeTimeout: {{ .Values.serviceMonitor.scrapeTimeout }}
-      # If api.metricsEnabled requires a token (secret.metricsAuthToken), add a
-      # bearerTokenSecret here pointing at that secret key.
+      {{- if $bearerSecretName }}
+      bearerTokenSecret:
+        name: {{ $bearerSecretName | quote }}
+        key: {{ $bearerSecretKey | quote }}
+      {{- end }}
 {{- end }}

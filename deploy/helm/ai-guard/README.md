@@ -85,7 +85,10 @@ Provision the managed data tier (and skip in-cluster Postgres/Redis) with the
 - Keep `redis.enabled=true` for multiple API replicas (shared, fail-closed rate
   limits). The atomic budget reserve is the real spend guard regardless.
 - Terminate TLS at the ingress; set `METRICS_AUTH_TOKEN` if `/metrics` is
-  reachable beyond an internal scrape network.
+  reachable beyond an internal scrape network. If the chart creates the secret,
+  `serviceMonitor.enabled=true` automatically wires the bearer token for
+  Prometheus; with `secret.existingSecret`, set
+  `serviceMonitor.bearerTokenSecret.name` to that secret.
 
 See [operations](../../../docs/operations.md) and
 [high-availability](../../../docs/deployment/high-availability.md).
