@@ -24,7 +24,20 @@ export function registerUsageRoute(
   pool: Pool,
   opts: { defaultProjectId: string },
 ): void {
-  app.get("/v1/usage", async (request, reply) => {
+  app.get("/v1/usage", {
+    schema: {
+      tags: ["usage"],
+      description: "Current budget counters for a user and/or feature.",
+      querystring: {
+        type: "object",
+        properties: {
+          userId: { type: "string" },
+          feature: { type: "string" },
+          projectId: { type: "string" },
+        },
+      },
+    },
+  }, async (request, reply) => {
     if (!request.ctx.permissions?.includes("usage:read")) {
       return sendError(
         reply,

@@ -163,54 +163,63 @@ export function buildServer(opts: BuildServerOptions): FastifyInstance {
     );
   }
 
-  registerHealthRoute(app, {
-    pool: opts.pool,
-    litellmBaseUrl: opts.health?.litellmBaseUrl,
-    litellmApiKey: opts.health?.litellmApiKey,
-    presidioAnalyzerUrl: opts.health?.presidioAnalyzerUrl,
-    presidioAnonymizerUrl: opts.health?.presidioAnonymizerUrl,
-    fetchImpl: opts.health?.fetchImpl,
-  });
-  registerUsageRoute(app, opts.pool, { defaultProjectId: opts.config.project.name });
-  registerRequestsRoute(app, opts.pool, { defaultProjectId: opts.config.project.name });
-  if (opts.keyResolver) {
-    // Clearing the resolver cache on any mutation makes revoke/rotate effective
-    // immediately rather than after the cache TTL.
-    // Best-effort audit append: a chain-write failure logs but never fails the
-    // mutation itself.
-    const recordAudit = async (event: {
-      actor: string;
-      action: string;
-      target?: string;
-      metadata?: Record<string, unknown>;
-    }): Promise<void> => {
-      try {
-        await appendAudit(opts.pool, event);
-      } catch (err) {
-        app.log.error({ err, action: event.action }, "audit append failed");
-      }
-    };
-    registerKeysRoutes(app, opts.pool, {
-      onKeysChanged: opts.keyResolver.clear,
-      recordAudit,
+  // Routes are registered inside a deferred `register(...)` so they are added
+  // AFTER @fastify/swagger's `onRoute` hook is attached (registerOpenApi above
+  // registers swagger, which is also deferred). Adding routes synchronously here
+  // would run before that hook and they'd be missing from the generated spec.
+  // The child scope inherits the root's auth/rate-limit hooks and error handler.
+  app.register(async (scope) => {
+    registerHealthRoute(scope, {
+      pool: opts.pool,
+      litellmBaseUrl: opts.health?.litellmBaseUrl,
+      litellmApiKey: opts.health?.litellmApiKey,
+      presidioAnalyzerUrl: opts.health?.presidioAnalyzerUrl,
+      presidioAnonymizerUrl: opts.health?.presidioAnonymizerUrl,
+      fetchImpl: opts.health?.fetchImpl,
     });
-    registerAuditRoutes(app, opts.pool);
-    registerGovernanceRoutes(app, opts.pool, { recordAudit });
-    registerPolicyRoutes(app, opts.pool, { recordAudit });
-  }
-  registerExplainRoute(app, { config: opts.config, pool: opts.pool });
-  registerChatRoute(app, {
-    config: opts.config,
-    pool: opts.pool,
-    litellm: opts.litellm,
-    safety: opts.safety,
-    observability: opts.observability,
-    budgetAlert: opts.budgetAlert,
-    idempotencyCaptureContent: opts.idempotencyCaptureContent,
-    hierarchicalBudgets: opts.hierarchicalBudgets,
-    policyMeta: opts.policyMeta,
+    registerUsageRoute(scope, opts.pool, { defaultProjectId: opts.config.project.name });
+    registerRequestsRoute(scope, opts.pool, { defaultProjectId: opts.config.project.name });
+    if (opts.keyResolver) {
+      // Clearing the resolver cache on any mutation makes revoke/rotate effective
+      // immediately rather than after the cache TTL.
+      // Best-effort audit append: a chain-write failure logs but never fails the
+      // mutation itself.
+      const recordAudit = async (event: {
+        actor: string;
+        action: string;
+        target?: string;
+        metadata?: Record<string, unknown>;
+      }): Promise<void> => {
+        try {
+          await appendAudit(opts.pool, event);
+        } catch (err) {
+          scope.log.error({ err, action: event.action }, "audit append failed");
+        }
+      };
+      registerKeysRoutes(scope, opts.pool, {
+        onKeysChanged: opts.keyResolver.clear,
+        recordAudit,
+      });
+      registerAuditRoutes(scope, opts.pool);
+      registerGovernanceRoutes(scope, opts.pool, { recordAudit });
+      registerPolicyRoutes(scope, opts.pool, { recordAudit });
+    }
+    registerExplainRoute(scope, { config: opts.config, pool: opts.pool });
+    registerChatRoute(scope, {
+      config: opts.config,
+      pool: opts.pool,
+      litellm: opts.litellm,
+      safety: opts.safety,
+      observability: opts.observability,
+      budgetAlert: opts.budgetAlert,
+      idempotencyCaptureContent: opts.idempotencyCaptureContent,
+      hierarchicalBudgets: opts.hierarchicalBudgets,
+      policyMeta: opts.policyMeta,
+    });
   });
 
+  // Kept on the root instance (not in the spec): /metrics is an ops endpoint,
+  // not part of the public API surface.
   if (opts.metrics) {
     registerMetrics(app, { pool: opts.pool });
   }

@@ -52,5 +52,9 @@ jobs:
             exit 1
           fi
       - run: pnpm --filter @ai-guard/api openapi:export
+      - name: OpenAPI spec is committed and current
+        run: |
+          git diff --exit-code packages/api/openapi.json \
+            || (echo "::error::openapi.json is stale — run 'pnpm --filter @ai-guard/api openapi:export' and commit the result" && exit 1)
       - name: API boot smoke test
         run: bash scripts/smoke-ci.sh

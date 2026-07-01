@@ -56,3 +56,12 @@ app.kubernetes.io/instance: {{ .Release.Name }}
 {{- .Values.redis.url -}}
 {{- end -}}
 {{- end -}}
+
+{{- /* ServiceAccount name for the API (created by the chart or supplied). */ -}}
+{{- define "ai-guard.serviceAccountName" -}}
+{{- if .Values.serviceAccount.create -}}
+{{- default (include "ai-guard.fullname" .) .Values.serviceAccount.name -}}
+{{- else -}}
+{{- default "default" .Values.serviceAccount.name -}}
+{{- end -}}
+{{- end -}}

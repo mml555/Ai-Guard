@@ -39,6 +39,25 @@ existing ConfigMap) and `helm upgrade`.
 - **Policy** — inline `config.aiGuardYaml` or `config.existingConfigMap`. The API
   pods roll automatically when the config checksum changes.
 
+## Security & resilience (hardened defaults)
+
+The chart ships enterprise-hardened defaults; no extra flags needed for the
+baseline:
+
+| Concern | Default | Value |
+| --- | --- | --- |
+| Non-root, no-priv-esc, read-only rootfs, drop ALL caps, `RuntimeDefault` seccomp | **on** | `api.podSecurityContext`, `api.containerSecurityContext` |
+| Dedicated `ServiceAccount`, token not mounted (API never calls the k8s API) | **on** | `serviceAccount.*` |
+| `PodDisruptionBudget` (survive drains/rollouts) | **on**, `minAvailable: 1` | `podDisruptionBudget.*` |
+| Node + zone topology spread (survive a node/zone loss) | **on** | `api.topologySpreadConstraints` (auto) |
+| Horizontal autoscaling (`autoscaling/v2` HPA) | off (needs metrics-server) | `autoscaling.enabled=true` |
+| `NetworkPolicy` (ingress to `:3000`; egress to DNS + deps + Postgres) | off (needs enforcing CNI) | `networkPolicy.enabled=true` |
+| Prometheus Operator `ServiceMonitor` | off (needs the CRD) | `serviceMonitor.enabled=true` |
+
+`readOnlyRootFilesystem` is verified against the image (a writable `emptyDir` is
+mounted at `/tmp`; nothing else is written). Set `nodeSelector` / `tolerations`
+/ `affinity` under `api.*` for placement.
+
 ## Production notes
 
 - Use **managed Postgres** (`postgres.enabled=false`) and set

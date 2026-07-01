@@ -29,6 +29,74 @@ api:
   # spend guard regardless. When redis.enabled, REDIS_URL is wired automatically.
   podAnnotations: {}
 
+  # ── Security hardening (defaults are the hardened baseline) ────────────────
+  # Pod-level context. The image already runs as the non-root `node` user
+  # (uid/gid 1000); these enforce it at the k8s admission layer too.
+  podSecurityContext:
+    runAsNonRoot: true
+    runAsUser: 1000
+    runAsGroup: 1000
+    fsGroup: 1000
+    seccompProfile:
+      type: RuntimeDefault
+  # Container-level context: no privilege escalation, read-only root fs (a
+  # writable emptyDir is mounted at /tmp), all Linux capabilities dropped.
+  containerSecurityContext:
+    allowPrivilegeEscalation: false
+    readOnlyRootFilesystem: true
+    capabilities:
+      drop: ["ALL"]
+
+  # ── Scheduling / spreading (survive a node or zone loss) ───────────────────
+  # Spread replicas across nodes (and zones if labeled). Empty = the chart
+  # injects a sensible hostname+zone spread; set to override entirely.
+  topologySpreadConstraints: []
+  nodeSelector: {}
+  tolerations: []
+  affinity: {}
+  # Give the scheduler a moment before killing a rolling pod's connections.
+  terminationGracePeriodSeconds: 30
+
+# API pods don't call the Kubernetes API, so the token isn't mounted.
+serviceAccount:
+  create: true
+  name: ""
+  annotations: {}
+  automountServiceAccountToken: false
+
+# Keep at least one API pod during voluntary disruptions (node drains, rollouts).
+podDisruptionBudget:
+  enabled: true
+  minAvailable: 1
+  # maxUnavailable: ""   # set one of minAvailable / maxUnavailable
+
+# Horizontal autoscaling. Off by default (needs metrics-server, and conflicts
+# with a static api.replicas); enable in clusters that have it.
+autoscaling:
+  enabled: false
+  minReplicas: 2
+  maxReplicas: 6
+  targetCPUUtilizationPercentage: 70
+  targetMemoryUtilizationPercentage: 0   # 0 = don't scale on memory
+
+# Default-deny-ish NetworkPolicy for the API. Off by default because it needs a
+# CNI that enforces policy and correct selectors; ship-ready when enabled.
+networkPolicy:
+  enabled: false
+  # Namespaces allowed to reach the API on the service port. Empty list = allow
+  # from within the release namespace only.
+  ingressNamespaceSelectors: []
+  # Extra egress rules (e.g. to a managed Postgres/Redis outside the cluster).
+  extraEgress: []
+
+# Prometheus Operator ServiceMonitor (needs the monitoring.coreos.com CRD).
+serviceMonitor:
+  enabled: false
+  interval: 30s
+  scrapeTimeout: 10s
+  path: /metrics
+  labels: {}
+
 # DB migrations run once as a pre-install/pre-upgrade Job hook (never N replicas
 # racing). Matches the "run one migrator on deploy" operations guidance.
 migrations:

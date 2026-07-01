@@ -26,4 +26,20 @@ export default tseslint.config(
       "@typescript-eslint/no-empty-object-type": "off",
     },
   },
+  {
+    // Plain-JS build/tooling scripts (e.g. Docker runtime-manifest generator)
+    // run under Node ESM. typescript-eslint disables no-undef for .ts, but
+    // these need Node globals declared explicitly.
+    files: ["**/*.{js,mjs,cjs}"],
+    languageOptions: {
+      globals: {
+        console: "readonly",
+        process: "readonly",
+        Buffer: "readonly",
+        URL: "readonly",
+        setTimeout: "readonly",
+        clearTimeout: "readonly",
+      },
+    },
+  },
 );

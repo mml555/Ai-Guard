@@ -195,13 +195,16 @@ offering Ai-Guard as an internal platform.
 
 **Not yet built / caveats:**
 
-- No turnkey HA Helm chart or Terraform module ships today — assemble the tiers
-  from the k8s sketch in [`deploy/k8s/`](../../deploy/k8s/) plus managed
-  Postgres/Redis.
+- The [Helm chart](../../deploy/helm/ai-guard/) ships HA-oriented defaults —
+  ≥2 replicas, a PodDisruptionBudget, node+zone topology spread, hardened
+  security contexts, and opt-in HPA / NetworkPolicy / ServiceMonitor — but you
+  still supply the data tier (managed Postgres/Redis recommended). No Terraform
+  module ships yet; provision the managed tiers with your own IaC.
 - The API does not split reads to a Postgres replica; the replica is for
   failover/reporting only.
-- No response streaming in v1, so long completions occupy a worker for their
-  full duration — size replica count and `REQUEST_TIMEOUT_MS` accordingly.
+- Whether streamed (SSE, `"stream": true`) or buffered, a completion occupies a
+  worker for its full duration — size replica count and `REQUEST_TIMEOUT_MS`
+  accordingly.
 
 See [benchmarks](./benchmarks.md) to size replicas from measured overhead, and
 [disaster recovery](../runbooks/disaster-recovery.md) for backup/restore and

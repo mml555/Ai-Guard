@@ -45,10 +45,21 @@ describe("OpenAPI", () => {
 
     const res = await app.inject({ method: "GET", url: "/openapi.json" });
     expect(res.statusCode).toBe(200);
-    expect(res.json().paths["/v1/chat"].post).toBeTruthy();
-    expect(res.json().paths["/v1/explain"].post).toBeTruthy();
-    expect(res.json().paths["/v1/requests"].get).toBeTruthy();
-    expect(res.json().paths["/v1/usage/summary"].get).toBeTruthy();
+    const spec = res.json();
+    expect(spec.paths["/v1/chat"].post).toBeTruthy();
+    expect(spec.paths["/v1/explain"].post).toBeTruthy();
+    expect(spec.paths["/v1/requests"].get).toBeTruthy();
+    expect(spec.paths["/v1/usage/summary"].get).toBeTruthy();
+
+    // The spec is GENERATED from route schemas, not hand-written: the chat body
+    // schema and its 200 response must have been lifted off the route.
+    expect(spec.paths["/v1/chat"].post.requestBody.content["application/json"].schema)
+      .toBeTruthy();
+    expect(spec.paths["/v1/chat"].post.responses["200"]).toBeTruthy();
+    // Global bearer auth applies; health opts out (security: []).
+    expect(spec.security).toEqual([{ bearerAuth: [] }]);
+    expect(spec.components.securitySchemes.bearerAuth.scheme).toBe("bearer");
+    expect(spec.paths["/health"].get.security).toEqual([]);
     await app.close();
   });
 });

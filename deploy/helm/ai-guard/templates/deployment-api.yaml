@@ -23,10 +23,56 @@ spec:
         {{- toYaml . | nindent 8 }}
         {{- end }}
     spec:
+      serviceAccountName: {{ include "ai-guard.serviceAccountName" . }}
+      automountServiceAccountToken: {{ .Values.serviceAccount.automountServiceAccountToken }}
+      terminationGracePeriodSeconds: {{ .Values.api.terminationGracePeriodSeconds }}
+      {{- with .Values.api.podSecurityContext }}
+      securityContext:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.api.nodeSelector }}
+      nodeSelector:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.api.tolerations }}
+      tolerations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.api.affinity }}
+      affinity:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- if .Values.api.topologySpreadConstraints }}
+      topologySpreadConstraints:
+        {{- toYaml .Values.api.topologySpreadConstraints | nindent 8 }}
+      {{- else }}
+      # Default: spread replicas across nodes (and zones where labeled) so the
+      # loss of one node/zone can't take out every API pod. ScheduleAnyway keeps
+      # scheduling possible on small/single-zone clusters.
+      topologySpreadConstraints:
+        - maxSkew: 1
+          topologyKey: kubernetes.io/hostname
+          whenUnsatisfiable: ScheduleAnyway
+          labelSelector:
+            matchLabels:
+              {{- include "ai-guard.selectorLabels" . | nindent 14 }}
+              app.kubernetes.io/component: api
+        - maxSkew: 1
+          topologyKey: topology.kubernetes.io/zone
+          whenUnsatisfiable: ScheduleAnyway
+          labelSelector:
+            matchLabels:
+              {{- include "ai-guard.selectorLabels" . | nindent 14 }}
+              app.kubernetes.io/component: api
+      {{- end }}
       containers:
         - name: api
           image: "{{ .Values.image.repository }}:{{ .Values.image.tag }}"
           imagePullPolicy: {{ .Values.image.pullPolicy }}
+          {{- with .Values.api.containerSecurityContext }}
+          securityContext:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
           ports:
             - containerPort: 3000
           envFrom:
@@ -61,6 +107,9 @@ spec:
             - name: config
               mountPath: /config
               readOnly: true
+            # readOnlyRootFilesystem needs a writable scratch dir.
+            - name: tmp
+              mountPath: /tmp
           # /health is process-only (a DB blip must not restart pods);
           # /ready gates on the DB and drives traffic routing.
           livenessProbe:
@@ -79,3 +128,5 @@ spec:
         - name: config
           configMap:
             name: {{ include "ai-guard.configMapName" . }}
+        - name: tmp
+          emptyDir: {}
