@@ -15,7 +15,7 @@ production: false
 
 image:
   repository: ghcr.io/ai-guard/ai-guard/ai-guard-api
-  tag: v0.5.0
+  tag: v0.6.0
   pullPolicy: IfNotPresent
 
 api:

@@ -10,7 +10,7 @@ on:
   workflow_dispatch:
     inputs:
       tag:
-        description: "Tag to release (e.g. v0.5.0); manual runs only"
+        description: "Tag to release (e.g. v0.6.0); manual runs only"
         required: true
 
 permissions:
@@ -34,9 +34,16 @@ jobs:
           echo "version=$VERSION" >> "$GITHUB_OUTPUT"
           ROOT="$(node -p "require('./package.json').version")"
           PY="$(grep -m1 '^version' packages/sdk-python/pyproject.toml | sed -E 's/.*"([^"]+)".*/\1/')"
-          echo "tag=$VERSION root=$ROOT python=$PY"
-          if [ "$VERSION" != "$ROOT" ] || [ "$VERSION" != "$PY" ]; then
-            echo "::error::tag $VERSION does not match package versions (root=$ROOT, python=$PY) — bump versions before tagging"
+          PY_INIT="$(grep -m1 '__version__' packages/sdk-python/ai_guard/__init__.py | sed -E 's/.*"([^"]+)".*/\1/')"
+          HELM="$(grep -m1 '^appVersion' deploy/helm/ai-guard/Chart.yaml | sed -E 's/.*"([^"]+)".*/\1/')"
+          OPENAPI_PLUGIN="$(grep -m1 'OPENAPI_VERSION' packages/api/src/plugins/openApi.ts | sed -E 's/.*"([^"]+)".*/\1/')"
+          echo "tag=$VERSION root=$ROOT python=$PY py_init=$PY_INIT helm=$HELM openapi_plugin=$OPENAPI_PLUGIN"
+          if [ "$VERSION" != "$ROOT" ] || [ "$VERSION" != "$PY" ] || [ "$VERSION" != "$PY_INIT" ]; then
+            echo "::error::tag $VERSION does not match package versions (root=$ROOT, python=$PY, py_init=$PY_INIT) — bump versions before tagging"
+            exit 1
+          fi
+          if [ "$VERSION" != "$HELM" ] || [ "$VERSION" != "$OPENAPI_PLUGIN" ]; then
+            echo "::error::tag $VERSION does not match helm appVersion ($HELM) or OPENAPI_VERSION ($OPENAPI_PLUGIN)"
             exit 1
           fi
 

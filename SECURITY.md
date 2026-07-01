@@ -4,7 +4,8 @@
 
 | Version | Supported |
 | --- | --- |
-| 0.5.x | Yes (active development) |
+| 0.6.x | Yes (active development) |
+| 0.5.x | No (superseded by 0.6.x) |
 
 ## Reporting a vulnerability
 

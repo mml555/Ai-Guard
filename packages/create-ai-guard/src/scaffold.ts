@@ -25,7 +25,7 @@ const LITELLM_MAP: Record<string, { model: string; keyEnv?: string; apiBase?: st
   "ollama/llama3.2:3b": { model: "ollama/llama3.2:3b", apiBase: "http://host.docker.internal:11434" },
 };
 
-const API_IMAGE = "ghcr.io/ai-guard/ai-guard/ai-guard-api:v0.5.0"; // set to your published image
+const API_IMAGE = "ghcr.io/ai-guard/ai-guard/ai-guard-api:v0.6.0"; // set to your published image
 
 /** LiteLLM params for a model string — derives provider wiring from the prefix. */
 function litellmParamsFor(m: string): string[] {

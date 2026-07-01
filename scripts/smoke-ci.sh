@@ -9,6 +9,11 @@ cd "$ROOT"
 
 pnpm build >/dev/null
 
+# Migrate before boot — mirrors the production image (migrate.js && index.js) and
+# proves cold-start on an empty DB. CI must not rely on integration tests having
+# already applied the schema to the shared Postgres service.
+node packages/api/dist/migrate.js
+
 export PORT="${SMOKE_PORT:-3099}"
 export HOST="127.0.0.1"
 export AI_GUARD_API_KEY="${SMOKE_API_KEY:-smoke-test-key}"

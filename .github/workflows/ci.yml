@@ -61,6 +61,19 @@ jobs:
       - name: API boot smoke test
         run: bash scripts/smoke-ci.sh
 
+  terraform:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: 1.9.8
+      - name: Validate AWS module
+        working-directory: deploy/terraform/aws
+        run: |
+          terraform init -backend=false
+          terraform validate
+
   python-sdk:
     runs-on: ubuntu-latest
     steps:
