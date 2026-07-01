@@ -10,7 +10,9 @@ import type { BudgetAlertWebhookConfig } from "../usage/budgetAlerts";
 import { requestHash, withIdempotency } from "../idempotency/service";
 import { chatBodyJsonSchema, chatBodySchema, chatSuccessJsonSchema, errorJsonSchema } from "./schemas";
 import { handleChat } from "./service";
-import type { ChatInput, ChatResult } from "./types";
+import { prepareStream, releaseStream, settleStream } from "./stream";
+import type { ChatInput, ChatResult, ChatServiceDeps } from "./types";
+import type { FastifyReply, FastifyRequest } from "fastify";
 
 export interface ChatRouteDeps {
   config: AiGuardConfig;
@@ -62,12 +64,26 @@ export function registerChatRoute(
       return sendError(reply, auth.status, auth.code, auth.details, auth.message);
     }
     const input = auth.value;
+    const rawKey = request.headers["idempotency-key"];
+    const idempotencyKey = readIdempotencyKey(rawKey);
+
+    if (input.stream) {
+      if (idempotencyKey) {
+        return sendError(
+          reply,
+          400,
+          "idempotency_not_supported",
+          {},
+          "Idempotency-Key is not supported with stream: true",
+        );
+      }
+      return streamChat({ ...deps, log: request.log }, input, request, reply);
+    }
+
     const run = (): Promise<ChatResult> =>
       handleChat({ ...deps, log: request.log }, input);
 
     let result: ChatResult;
-    const rawKey = request.headers["idempotency-key"];
-    const idempotencyKey = readIdempotencyKey(rawKey);
     if (idempotencyKey) {
       const outcome = await withIdempotency(
         deps.pool,
@@ -107,6 +123,113 @@ export function registerChatRoute(
     }
     return reply.code(200).send(result.body);
   });
+}
+
+/**
+ * Server-Sent Events streaming path. Runs all pre-call gates (which can still
+ * fail as normal JSON errors), pulls the first chunk BEFORE committing a 200 so
+ * a pre-first-byte provider failure returns a real HTTP error, then streams
+ * `data:` frames and settles cost when the stream completes. Client disconnect
+ * aborts the upstream and releases the reservation.
+ */
+async function streamChat(
+  deps: ChatServiceDeps,
+  input: ChatInput,
+  request: FastifyRequest,
+  reply: FastifyReply,
+): Promise<void> {
+  if (!deps.litellm.chatStream) {
+    sendError(reply, 501, "not_implemented", {}, "Streaming is not supported by this deployment");
+    return;
+  }
+
+  const prep = await prepareStream(deps, input);
+  if (!prep.ok) {
+    sendError(reply, prep.status, prep.code, prep.details, prep.message, {
+      ...(prep.policy ? { policy: prep.policy } : {}),
+    });
+    return;
+  }
+  const ctx = prep.ctx;
+
+  const controller = new AbortController();
+  let finished = false;
+  const releaseOnce = async (): Promise<void> => {
+    if (finished) return;
+    finished = true;
+    await releaseStream(deps, ctx);
+  };
+
+  const gen = deps.litellm.chatStream({
+    model: ctx.decision.resolvedModel,
+    messages: ctx.messages,
+    maxTokens: ctx.decision.maxOutputTokens,
+    temperature: ctx.temperature,
+    signal: controller.signal,
+  });
+
+  // Pull the first event before committing headers: a connection/5xx failure
+  // here is still a normal HTTP error (no SSE started, budget released).
+  let first: IteratorResult<{ delta: string }, import("../../services/litellm").LiteLLMStreamFinal>;
+  try {
+    first = await gen.next();
+  } catch (err) {
+    await releaseOnce();
+    request.log.error({ err }, "stream provider failure before first token");
+    sendError(reply, 502, "provider_unavailable", {}, "Provider unavailable");
+    return;
+  }
+
+  // Commit the SSE response, preserving the security headers already staged on
+  // the reply by the onRequest hook.
+  reply.hijack();
+  const raw = reply.raw;
+  raw.writeHead(200, {
+    ...(reply.getHeaders() as Record<string, string>),
+    "content-type": "text/event-stream",
+    "cache-control": "no-cache, no-transform",
+    connection: "keep-alive",
+    "x-accel-buffering": "no",
+  });
+
+  const onClose = (): void => {
+    if (finished) return;
+    controller.abort();
+    void releaseOnce();
+  };
+  request.raw.on("close", onClose);
+
+  try {
+    let next = first;
+    while (!next.done) {
+      raw.write(`data: ${JSON.stringify({ delta: next.value.delta })}\n\n`);
+      next = await gen.next();
+    }
+    const final = next.value;
+    finished = true; // settled below owns the reservation now
+    request.raw.off("close", onClose);
+    const requestId = await settleStream(deps, ctx, final);
+    raw.write(
+      `data: ${JSON.stringify({
+        done: true,
+        model: final.model,
+        usage: { inputTokens: final.inputTokens ?? null, outputTokens: final.outputTokens ?? null },
+        requestId: requestId ?? "req_unknown",
+      })}\n\n`,
+    );
+    raw.write("data: [DONE]\n\n");
+    raw.end();
+  } catch (err) {
+    request.raw.off("close", onClose);
+    await releaseOnce();
+    request.log.error({ err }, "stream failed after first token");
+    if (!raw.writableEnded) {
+      raw.write(
+        `event: error\ndata: ${JSON.stringify({ code: "provider_unavailable", message: "Stream interrupted" })}\n\n`,
+      );
+      raw.end();
+    }
+  }
 }
 
 function authorizeChatInput(

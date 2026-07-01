@@ -20,6 +20,8 @@ export const chatBodySchema = z.object({
   messages: z.array(messageSchema).min(1).max(MAX_MESSAGES),
   inputTokensEstimate: z.number().int().positive().optional(),
   temperature: z.number().min(0).max(2).optional(),
+  /** Stream the completion as SSE. Requires the feature's output PII mode to be off. */
+  stream: z.boolean().optional(),
   projectId: z.string().optional(),
   environment: z.string().optional(),
   metadata: z
@@ -55,6 +57,7 @@ export const chatBodyJsonSchema = {
     },
     inputTokensEstimate: { type: "integer", minimum: 1 },
     temperature: { type: "number", minimum: 0, maximum: 2 },
+    stream: { type: "boolean" },
     projectId: { type: "string" },
     environment: { type: "string" },
     metadata: { type: "object", additionalProperties: true, maxProperties: 32 },

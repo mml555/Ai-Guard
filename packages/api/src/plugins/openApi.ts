@@ -58,6 +58,9 @@ export function buildOpenApiDocument() {
       "/v1/chat": {
         post: {
           tags: ["chat"],
+          description:
+            "Guarded chat completion. Set `stream: true` for an SSE token stream " +
+            "(text/event-stream); requires the feature's output PII protection to be off.",
           security: [{ bearerAuth: [] }],
           parameters: [
             {
@@ -226,6 +229,35 @@ export function buildOpenApiDocument() {
             401: { description: "Unauthorized", content: json(errorJsonSchema) },
             403: { description: "Forbidden", content: json(errorJsonSchema) },
             404: { description: "Not found", content: json(errorJsonSchema) },
+          },
+        },
+      },
+      "/v1/admin/audit": {
+        get: {
+          tags: ["admin"],
+          description: "Read the tamper-evident admin audit log. Requires audit:read.",
+          security: [{ bearerAuth: [] }],
+          parameters: [
+            { name: "action", in: "query", schema: { type: "string" } },
+            { name: "actor", in: "query", schema: { type: "string" } },
+            { name: "limit", in: "query", schema: { type: "integer" } },
+          ],
+          responses: {
+            200: { description: "Audit records (hash-chained)" },
+            401: { description: "Unauthorized", content: json(errorJsonSchema) },
+            403: { description: "Forbidden", content: json(errorJsonSchema) },
+          },
+        },
+      },
+      "/v1/admin/audit/verify": {
+        get: {
+          tags: ["admin"],
+          description: "Re-walk the audit hash chain and report whether it is intact. Requires audit:read.",
+          security: [{ bearerAuth: [] }],
+          responses: {
+            200: { description: "Chain verification result" },
+            401: { description: "Unauthorized", content: json(errorJsonSchema) },
+            403: { description: "Forbidden", content: json(errorJsonSchema) },
           },
         },
       },

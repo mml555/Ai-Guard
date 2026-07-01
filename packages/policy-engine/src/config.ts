@@ -66,12 +66,24 @@ const featureSchema = z
     model_class: z.string(),
     max_tokens: z.number().int().positive(),
     budget: z.object({ monthly_usd: z.number().nonnegative() }).optional(),
+    data_sensitivity: z.string().optional(),
   })
   .transform((f) => ({
     safety: normalizeFeatureSafety(f.safety),
     modelClass: f.model_class,
     maxTokens: f.max_tokens,
     budget: f.budget ? { monthlyUsd: f.budget.monthly_usd } : undefined,
+    dataSensitivity: f.data_sensitivity,
+  }));
+
+const dataClassSchema = z
+  .object({
+    allowed_model_classes: z.array(z.string()).optional(),
+    allowed_providers: z.array(z.string()).optional(),
+  })
+  .transform((d) => ({
+    allowedModelClasses: d.allowed_model_classes,
+    allowedProviders: d.allowed_providers,
   }));
 
 const modelClassSchema = z.object({
@@ -114,6 +126,7 @@ const configSchema = z
     model_classes: z.record(z.string(), modelClassSchema),
     safety: safetySchema.optional(),
     observability: observabilitySchema.optional(),
+    data_classes: z.record(z.string(), dataClassSchema).optional(),
   })
   .transform((c) => ({
     project: c.project,
@@ -129,6 +142,7 @@ const configSchema = z
         injectionModel: undefined,
       },
     observability: c.observability ?? { provider: "none" as const },
+    dataClasses: c.data_classes,
   }));
 
 function normalizeFeatureSafety(
@@ -157,6 +171,26 @@ function validateRefs(
       if (!config.modelClasses[cls]) {
         throw new PolicyConfigError(
           `user_type '${userType}' permits unknown model_class '${cls}'`,
+          "invalid_config",
+        );
+      }
+    }
+  }
+
+  // Data-sensitivity governance references must resolve.
+  for (const [name, feature] of Object.entries(config.features)) {
+    if (feature.dataSensitivity && !config.dataClasses?.[feature.dataSensitivity]) {
+      throw new PolicyConfigError(
+        `feature '${name}' references unknown data_sensitivity class '${feature.dataSensitivity}'`,
+        "invalid_config",
+      );
+    }
+  }
+  for (const [cls, dc] of Object.entries(config.dataClasses ?? {})) {
+    for (const mc of dc.allowedModelClasses ?? []) {
+      if (!config.modelClasses[mc]) {
+        throw new PolicyConfigError(
+          `data class '${cls}' allows unknown model_class '${mc}'`,
           "invalid_config",
         );
       }

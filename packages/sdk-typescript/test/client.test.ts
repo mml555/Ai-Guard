@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 import {
+  AiGuardError,
   createAiGuardClient,
   PolicyBlockedError,
   SafetyBlockedError,
@@ -9,6 +10,14 @@ function jsonResponse(body: unknown, status = 200): Response {
   return new Response(JSON.stringify(body), {
     status,
     headers: { "content-type": "application/json" },
+  });
+}
+
+function sseResponse(frames: string[]): Response {
+  const body = frames.map((f) => `data: ${f}\n\n`).join("");
+  return new Response(body, {
+    status: 200,
+    headers: { "content-type": "text/event-stream" },
   });
 }
 
@@ -83,6 +92,47 @@ describe("createAiGuardClient", () => {
     const client = createAiGuardClient({ baseUrl: "http://api", apiKey: "secret", fetchImpl });
     await client.chat(baseRequest);
     expect(auth).toBe("Bearer secret");
+  });
+
+  it("chatStream yields deltas and returns the terminal metadata", async () => {
+    let capturedBody: Record<string, unknown> = {};
+    const fetchImpl: typeof fetch = async (_url, init) => {
+      capturedBody = JSON.parse(String(init?.body));
+      return sseResponse([
+        JSON.stringify({ delta: "Hel" }),
+        JSON.stringify({ delta: "lo" }),
+        JSON.stringify({ done: true, model: "m", usage: { inputTokens: 5, outputTokens: 2 }, requestId: "req_9" }),
+        "[DONE]",
+      ]);
+    };
+    const client = createAiGuardClient({ baseUrl: "http://api", apiKey: "k", fetchImpl });
+
+    const chunks: string[] = [];
+    const it = client.chatStream(baseRequest);
+    let result = await it.next();
+    while (!result.done) {
+      chunks.push(result.value);
+      result = await it.next();
+    }
+    expect(capturedBody.stream).toBe(true);
+    expect(chunks.join("")).toBe("Hello");
+    expect(result.value?.requestId).toBe("req_9");
+  });
+
+  it("chatStream throws typed errors before streaming begins", async () => {
+    const fetchImpl: typeof fetch = async () =>
+      jsonResponse({ error: { code: "budget_exceeded", message: "x", details: {}, requestId: "r" } }, 403);
+    const client = createAiGuardClient({ baseUrl: "http://api", fetchImpl });
+    const it = client.chatStream(baseRequest);
+    await expect(it.next()).rejects.toBeInstanceOf(PolicyBlockedError);
+  });
+
+  it("chatStream surfaces the streaming_unsupported 400 as AiGuardError", async () => {
+    const fetchImpl: typeof fetch = async () =>
+      jsonResponse({ error: { code: "streaming_unsupported", message: "x", details: {}, requestId: "r" } }, 400);
+    const client = createAiGuardClient({ baseUrl: "http://api", fetchImpl });
+    const it = client.chatStream(baseRequest);
+    await expect(it.next()).rejects.toBeInstanceOf(AiGuardError);
   });
 
   it("posts to /v1/explain and returns the parsed response", async () => {

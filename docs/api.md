@@ -25,6 +25,8 @@ Authentication: **`Authorization: Bearer <API_KEY>`** on all routes except
 | `GET` | `/v1/admin/keys/:id` | `keys:admin` | Single key record |
 | `POST` | `/v1/admin/keys/:id/rotate` | `keys:admin` | New secret; old one invalid immediately |
 | `POST` | `/v1/admin/keys/:id/revoke` | `keys:admin` | Revoke (idempotent) |
+| `GET` | `/v1/admin/audit` | `audit:read` | Tamper-evident admin audit log |
+| `GET` | `/v1/admin/audit/verify` | `audit:read` | Re-walk the hash chain; report integrity |
 
 Default API keys include `chat:create` only. Add `usage:read` for the usage endpoint
 (see [Configuration](./configuration.md#scoped-api-keys-production)).
@@ -54,6 +56,7 @@ Default API keys include `chat:create` only. Add `usage:read` for the usage endp
   ],
   "inputTokensEstimate": 120,
   "temperature": 0.7,
+  "stream": false,
   "projectId": "optional",
   "environment": "optional",
   "metadata": {}
@@ -61,6 +64,40 @@ Default API keys include `chat:create` only. Add `usage:read` for the usage endp
 ```
 
 `feature` is **required** and must exist in `ai-guard.yaml`.
+
+### Streaming (`stream: true`)
+
+Set `stream: true` to receive the completion incrementally as
+`text/event-stream`. All pre-call gates (policy, input safety, budget
+reservation) run first: if any fails, you get the **normal JSON error** with its
+status code — no stream is opened. Once tokens start flowing the response is a
+`200` SSE stream:
+
+```text
+data: {"delta":"Hel"}
+
+data: {"delta":"lo"}
+
+data: {"done":true,"model":"openai/gpt-4o-mini","usage":{"inputTokens":5,"outputTokens":2},"requestId":"req_42"}
+
+data: [DONE]
+```
+
+Constraints:
+
+- **Output PII protection must be off** for the feature — a streamed token
+  can't be masked after it's sent. Features whose resolved plan sets `pii` to
+  `mask`/`block` return `400 streaming_unsupported`. (Input PII/injection checks
+  still run before the stream.)
+- **`Idempotency-Key` is not supported** with streaming (`400`).
+- **No mid-stream provider fallback** — a provider failure *before* the first
+  token returns `502` (JSON); a failure *after* streaming starts emits an SSE
+  `event: error` frame and ends the stream.
+- Cost is reserved up front and settled from the terminal usage; a client
+  disconnect aborts the upstream call and releases the reservation.
+
+Budget is settled after the stream completes; the terminal frame carries the
+`requestId` for the audit record.
 
 ### Success `200`
 

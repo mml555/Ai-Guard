@@ -1,5 +1,5 @@
 import { parseConfigObject } from "@ai-guard/policy-engine";
-import { createLocalJWKSet, exportJWK, generateKeyPair, SignJWT } from "jose";
+import { createLocalJWKSet, exportJWK, generateKeyPair, SignJWT, type KeyLike } from "jose";
 import { beforeAll, describe, expect, it } from "vitest";
 import { createOidcVerifier } from "../src/modules/authz/oidc";
 import {
@@ -15,12 +15,12 @@ import { mockPool } from "./mockPool";
 const ISSUER = "https://idp.example.com/";
 const AUDIENCE = "ai-guard";
 
-let privateKey: CryptoKey;
+let privateKey: KeyLike;
 let jwks: ReturnType<typeof createLocalJWKSet>;
 
 beforeAll(async () => {
   const kp = await generateKeyPair("RS256");
-  privateKey = kp.privateKey as CryptoKey;
+  privateKey = kp.privateKey;
   const jwk = await exportJWK(kp.publicKey);
   jwk.alg = "RS256";
   jwk.kid = "test-key";
@@ -92,7 +92,9 @@ describe("OIDC verifier", () => {
   it("maps a viewer to read-only permissions", async () => {
     const token = await mint({ roles: ["viewer"] });
     const principal = await verifier().verify(token);
-    expect(principal?.permissions?.sort()).toEqual(["requests:read", "usage:read"].sort());
+    expect([...(principal?.permissions ?? [])].sort()).toEqual(
+      ["requests:read", "usage:read"].sort(),
+    );
   });
 
   it("rejects a token with the wrong audience", async () => {

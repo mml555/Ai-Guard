@@ -17,7 +17,8 @@ export type PolicyReasonCode =
   | "feature_monthly_budget_exceeded"
   | "global_monthly_budget_exceeded"
   | "global_budget_degraded"
-  | "provider_fallback";
+  | "provider_fallback"
+  | "data_sensitivity_not_permitted";
 
 // ── Parsed config (ai-guard.yaml) ───────────────────────────────────────────
 
@@ -71,6 +72,18 @@ export interface FeatureConfig {
   modelClass: string;
   maxTokens: number;
   budget?: FeatureBudget;
+  /** Data-sensitivity class this feature handles; gated by `dataClasses`. */
+  dataSensitivity?: string;
+}
+
+/**
+ * Governs which models/providers may process a given data-sensitivity class —
+ * e.g. restricted data may only route to approved (on-prem / region-pinned)
+ * model classes. An empty/undefined allow-list means "no restriction".
+ */
+export interface DataClassConfig {
+  allowedModelClasses?: string[];
+  allowedProviders?: string[];
 }
 
 export interface ModelClassConfig {
@@ -94,6 +107,8 @@ export interface AiGuardConfig {
   modelClasses: Record<string, ModelClassConfig>;
   safety: SafetyConfig;
   observability: { provider: ObservabilityProvider };
+  /** Optional data-sensitivity governance, keyed by class name. */
+  dataClasses?: Record<string, DataClassConfig>;
 }
 
 // ── Evaluator input ─────────────────────────────────────────────────────────

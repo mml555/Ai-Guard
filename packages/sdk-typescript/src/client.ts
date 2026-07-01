@@ -46,8 +46,25 @@ export interface ChatOptions {
   idempotencyKey?: string;
 }
 
+/** Terminal metadata frame emitted once a streamed completion finishes. */
+export interface ChatStreamDone {
+  done: true;
+  model: string;
+  usage: { inputTokens: number | null; outputTokens: number | null };
+  requestId: string;
+}
+
 export interface AiGuardClient {
   chat(request: ChatRequest, options?: ChatOptions): Promise<ChatResponse>;
+  /**
+   * Stream a completion as it is generated. Yields text deltas, then a final
+   * `ChatStreamDone` metadata frame. Pre-stream failures (policy/safety/budget/
+   * provider) throw the same typed errors as `chat()`. Requires the feature's
+   * output PII protection to be off (the server rejects otherwise).
+   */
+  chatStream(
+    request: ChatRequest,
+  ): AsyncGenerator<string, ChatStreamDone | undefined, void>;
   explain(request: ExplainRequest): Promise<ExplainResponse>;
 }
 
@@ -85,6 +102,54 @@ export function createAiGuardClient(
       }
 
       return body as unknown as ChatResponse;
+    },
+
+    async *chatStream(request) {
+      const res = await doFetch(`${baseUrl}/v1/chat`, {
+        method: "POST",
+        headers: {
+          "content-type": "application/json",
+          accept: "text/event-stream",
+          ...(options.apiKey ? { authorization: `Bearer ${options.apiKey}` } : {}),
+        },
+        body: JSON.stringify({ ...request, stream: true }),
+      });
+
+      if (!res.ok || !res.body) {
+        const body = (await res.json().catch(() => ({}))) as Record<string, unknown>;
+        const code = errorCode(body);
+        if (code === "safety_blocked") throw new SafetyBlockedError(res.status, code, body);
+        if (code === "policy_blocked" || code === "budget_exceeded") {
+          throw new PolicyBlockedError(res.status, code, body);
+        }
+        throw new AiGuardError(res.status, code, body);
+      }
+
+      const reader = res.body.getReader();
+      const decoder = new TextDecoder();
+      let buffer = "";
+      let done: ChatStreamDone | undefined;
+      for (;;) {
+        const chunk = await reader.read();
+        if (chunk.done) break;
+        buffer += decoder.decode(chunk.value, { stream: true });
+        let nl: number;
+        while ((nl = buffer.indexOf("\n")) !== -1) {
+          const line = buffer.slice(0, nl).trim();
+          buffer = buffer.slice(nl + 1);
+          if (!line.startsWith("data:")) continue;
+          const payload = line.slice(5).trim();
+          if (payload === "[DONE]") return done;
+          try {
+            const parsed = JSON.parse(payload) as Record<string, unknown>;
+            if (parsed.done === true) done = parsed as unknown as ChatStreamDone;
+            else if (typeof parsed.delta === "string") yield parsed.delta;
+          } catch {
+            // ignore keep-alive / comment frames
+          }
+        }
+      }
+      return done;
     },
 
     async explain(request) {

@@ -58,6 +58,13 @@ const issuedKeyJsonSchema = {
 /** Deps let the routes invalidate the auth cache the moment a key changes. */
 export interface KeysRouteDeps {
   onKeysChanged?: () => void;
+  /** Records a privileged mutation to the admin audit log (best-effort). */
+  recordAudit?: (event: {
+    actor: string;
+    action: string;
+    target?: string;
+    metadata?: Record<string, unknown>;
+  }) => Promise<void>;
 }
 
 function requireKeysAdmin(
@@ -107,6 +114,12 @@ export function registerKeysRoutes(
       createdBy: request.ctx.apiKeyName,
     });
     deps.onKeysChanged?.();
+    await deps.recordAudit?.({
+      actor: request.ctx.apiKeyName ?? "unknown",
+      action: "key.create",
+      target: issued.id,
+      metadata: { name: issued.name, permissions: issued.permissions, projectId: issued.projectId },
+    });
     return reply.code(201).send(issued);
   });
 
@@ -185,6 +198,11 @@ export function registerKeysRoutes(
     const issued = await rotateApiKey(pool, id);
     if (!issued) return sendError(reply, 404, "not_found", {}, "Key not found or revoked");
     deps.onKeysChanged?.();
+    await deps.recordAudit?.({
+      actor: request.ctx.apiKeyName ?? "unknown",
+      action: "key.rotate",
+      target: id,
+    });
     return reply.send(issued);
   });
 
@@ -209,6 +227,11 @@ export function registerKeysRoutes(
     const ok = await revokeApiKey(pool, id);
     if (!ok) return sendError(reply, 404, "not_found", {}, "Key not found");
     deps.onKeysChanged?.();
+    await deps.recordAudit?.({
+      actor: request.ctx.apiKeyName ?? "unknown",
+      action: "key.revoke",
+      target: id,
+    });
     return reply.send({ id, revoked: true });
   });
 }

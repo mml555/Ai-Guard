@@ -50,8 +50,30 @@ export class LiteLLMClientError extends Error {
   }
 }
 
+/** Terminal value of a streamed completion (returned by the chatStream generator). */
+export interface LiteLLMStreamFinal {
+  model: string;
+  actualCostUsd: number | null;
+  inputTokens?: number;
+  outputTokens?: number;
+}
+
+export interface LiteLLMStreamParams extends LiteLLMChatParams {
+  /** Aborts the upstream request (e.g. on client disconnect). */
+  signal?: AbortSignal;
+}
+
 export interface LiteLLMClient {
   chat(params: LiteLLMChatParams): Promise<LiteLLMChatResult>;
+  /**
+   * Stream a completion. Yields text deltas as they arrive and RETURNS the
+   * terminal usage/cost. Throws ProviderError before the first delta on a
+   * connection/5xx failure (fallback-eligible by the caller); an error after
+   * streaming has begun propagates from the generator (no mid-stream fallback).
+   */
+  chatStream?(
+    params: LiteLLMStreamParams,
+  ): AsyncGenerator<{ delta: string }, LiteLLMStreamFinal, void>;
 }
 
 export interface LiteLLMClientOptions {
@@ -168,6 +190,107 @@ export function createLiteLLMClient(
         outputTokens: usage?.completion_tokens,
         raw: json,
       };
+    },
+
+    async *chatStream(params) {
+      let res: Response;
+      try {
+        res = await doFetch(`${baseUrl}/chat/completions`, {
+          method: "POST",
+          headers: {
+            "content-type": "application/json",
+            accept: "text/event-stream",
+            ...(options.apiKey ? { authorization: `Bearer ${options.apiKey}` } : {}),
+          },
+          body: JSON.stringify({
+            model: params.model,
+            messages: params.messages,
+            max_tokens: params.maxTokens,
+            temperature: params.temperature,
+            stream: true,
+            // Ask LiteLLM to emit a final usage chunk so we can settle cost.
+            stream_options: { include_usage: true },
+          }),
+          signal: params.signal,
+        });
+      } catch (err) {
+        throw new ProviderError(
+          `LiteLLM stream request failed for model '${params.model}'`,
+          undefined,
+          { cause: err },
+        );
+      }
+
+      if (!res.ok || !res.body) {
+        const body = await res.text().catch(() => "");
+        if (!res.ok && (res.status >= 500 || res.status === 429)) {
+          throw new ProviderError(
+            `LiteLLM returned ${res.status} for model '${params.model}': ${body}`,
+            res.status,
+          );
+        }
+        throw new LiteLLMClientError(
+          `LiteLLM rejected stream request (${res.status})`,
+          res.status || 502,
+          body,
+        );
+      }
+
+      const reader = res.body.getReader();
+      const decoder = new TextDecoder();
+      let buffer = "";
+      let model = params.model;
+      let inputTokens: number | undefined;
+      let outputTokens: number | undefined;
+
+      // Parse an OpenAI-style SSE stream: lines of `data: {json}` terminated by
+      // `data: [DONE]`, chunks separated by blank lines.
+      for (;;) {
+        const { value, done } = await reader.read();
+        if (done) break;
+        buffer += decoder.decode(value, { stream: true });
+        let nl: number;
+        while ((nl = buffer.indexOf("\n")) !== -1) {
+          const line = buffer.slice(0, nl).trim();
+          buffer = buffer.slice(nl + 1);
+          if (!line.startsWith("data:")) continue;
+          const payload = line.slice(5).trim();
+          if (payload === "[DONE]") break;
+          let chunk: Record<string, unknown>;
+          try {
+            chunk = JSON.parse(payload);
+          } catch {
+            continue; // skip malformed keep-alive/comment frames
+          }
+          if (typeof chunk["model"] === "string") model = chunk["model"] as string;
+          const chunkUsage = chunk["usage"] as
+            | { prompt_tokens?: number; completion_tokens?: number }
+            | null
+            | undefined;
+          if (chunkUsage) {
+            inputTokens = chunkUsage.prompt_tokens ?? inputTokens;
+            outputTokens = chunkUsage.completion_tokens ?? outputTokens;
+          }
+          const choices = chunk["choices"] as
+            | Array<{ delta?: { content?: string } }>
+            | undefined;
+          const delta = choices?.[0]?.delta?.content;
+          if (delta) yield { delta };
+        }
+      }
+
+      const actualCostUsd =
+        inputTokens != null || outputTokens != null
+          ? (() => {
+              const price = getModelPrice(model);
+              return roundUsd(
+                ((inputTokens ?? 0) / 1000) * price.inputPer1k +
+                  ((outputTokens ?? 0) / 1000) * price.outputPer1k,
+              );
+            })()
+          : null;
+
+      return { model, actualCostUsd, inputTokens, outputTokens };
     },
   };
 }

@@ -106,8 +106,26 @@ export function evaluateAiRequest(input: EvaluateInput): PolicyDecision {
 
   // ── Fallback path (post provider-failure re-eval) ──────────────────────────
   // Resolve the fallback model for the (possibly degraded) class and return
-  // without re-running budget gates — the request is already in flight.
+  // without re-running budget gates — the request is already in flight. The
+  // data-sensitivity gate still applies: the fallback provider must be approved
+  // for the feature's data class.
   if (request.forceFallback) {
+    const fbInfo = resolveModelInfo(config, effectiveClass, true);
+    const sensitivityViolation = checkDataSensitivity(
+      config,
+      feature,
+      effectiveClass,
+      fbInfo.provider,
+    );
+    if (sensitivityViolation) {
+      return buildDecision(ctx, {
+        decision: "block",
+        reasonCode: "data_sensitivity_not_permitted",
+        reason: sensitivityViolation,
+        effectiveClass,
+        useFallback: false,
+      });
+    }
     return buildDecision(ctx, {
       decision: "fallback",
       reasonCode: "provider_fallback",
@@ -117,8 +135,29 @@ export function evaluateAiRequest(input: EvaluateInput): PolicyDecision {
     });
   }
 
+  // ── Data-sensitivity gate ──────────────────────────────────────────────────
+  // The resolved (possibly degraded) model class and its provider must be
+  // approved for the feature's data-sensitivity class. Runs before budget gates
+  // so a restricted-data request can't route to an unapproved model even if it
+  // has budget.
+  const { model, provider } = resolveModelInfo(config, effectiveClass, false);
+  const sensitivityViolation = checkDataSensitivity(
+    config,
+    feature,
+    effectiveClass,
+    provider,
+  );
+  if (sensitivityViolation) {
+    return buildDecision(ctx, {
+      decision: "block",
+      reasonCode: "data_sensitivity_not_permitted",
+      reason: sensitivityViolation,
+      effectiveClass,
+      useFallback: false,
+    });
+  }
+
   // ── Budget gates (block on any breach) ─────────────────────────────────────
-  const { model } = resolveModelInfo(config, effectiveClass, false);
   const estimate = estimateCostUsd(
     model,
     request.inputTokensEstimate,
@@ -182,6 +221,30 @@ export function evaluateAiRequest(input: EvaluateInput): PolicyDecision {
     effectiveClass,
     useFallback: false,
   });
+}
+
+/**
+ * Returns a human-readable reason if the resolved model class / provider is not
+ * permitted for the feature's data-sensitivity class, else null. No-op when the
+ * feature declares no sensitivity or the class has no allow-lists.
+ */
+function checkDataSensitivity(
+  config: AiGuardConfig,
+  feature: FeatureConfig,
+  modelClass: string,
+  provider: string,
+): string | null {
+  const className = feature.dataSensitivity;
+  if (!className) return null;
+  const dc = config.dataClasses?.[className];
+  if (!dc) return null;
+  if (dc.allowedModelClasses && !dc.allowedModelClasses.includes(modelClass)) {
+    return `data class '${className}' does not permit model_class '${modelClass}'`;
+  }
+  if (dc.allowedProviders && !dc.allowedProviders.includes(provider)) {
+    return `data class '${className}' does not permit provider '${provider}'`;
+  }
+  return null;
 }
 
 // ── Internal decision builder ────────────────────────────────────────────────

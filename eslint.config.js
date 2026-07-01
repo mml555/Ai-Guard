@@ -11,6 +11,8 @@ export default tseslint.config(
       "**/node_modules/**",
       "**/next-env.d.ts",
       "packages/sdk-typescript/src/generated/**",
+      // Python SDK — not TS/JS; its virtualenv contains vendored JS.
+      "packages/sdk-python/**",
     ],
   },
   {

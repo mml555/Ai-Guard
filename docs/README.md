@@ -23,6 +23,38 @@ model request reaches a provider.
 | [Integration debugging](./runbooks/integration-debugging.md) | On-call | Host app ↔ Ai-Guard correlation |
 | [Architecture](./ARCHITECTURE.md) | Engineers | Policy engine, budgets, authorization boundary |
 
+## Enterprise deployment
+
+| Doc | Who | What |
+| --- | --- | --- |
+| [High-availability architecture](./deployment/high-availability.md) | Platform / SRE | HA reference topology, component-failure matrix, SLO targets |
+| [Benchmarking methodology](./deployment/benchmarks.md) | Platform / SRE | How to measure gateway overhead + results template (placeholders) |
+
+## Operations & reliability
+
+| Doc | Who | What |
+| --- | --- | --- |
+| [Disaster recovery](./runbooks/disaster-recovery.md) | SRE / on-call | RTO/RPO, backups, tested-restore drill, multi-region |
+| [Incident response](./runbooks/incident-response.md) | On-call | SEV1–4 classification, escalation, comms + post-mortem templates |
+| [Versioning & compatibility](./versioning.md) | Integrators / operators | SemVer for API/SDK/config, support window, 1.0 checklist |
+
+## Security & compliance
+
+| Doc | Who | What |
+| --- | --- | --- |
+| [Threat model (STRIDE)](./compliance/threat-model.md) | Security | Trust boundaries, threats, mitigations, residual risk |
+| [SOC 2 control mapping](./compliance/soc2-controls.md) | Security / GRC | TSC controls, status, gaps, what a Type II audit needs |
+| [Data flow & DLP](./compliance/data-flow.md) | Security / privacy | Stored vs transient data, PII handling, retention, leak surfaces |
+
+## Commercial & procurement
+
+| Doc | Who | What |
+| --- | --- | --- |
+| [Commercial pack overview](./commercial/README.md) | Sales / procurement | How to use the templates below |
+| [SLA template](./commercial/sla.md) | Procurement | Uptime %, severity response/resolution, credits |
+| [Support tiers](./commercial/support-tiers.md) | Procurement | Community / Business / Enterprise + escalation |
+| [Security questionnaire](./commercial/security-questionnaire.md) | Security review | Pre-filled SIG/CAIQ-style answers + DPA/subprocessor outline |
+
 ## Quick links
 
 - Example apps: [`event_intake_app`](../examples/event_intake_app), [`support_chat`](../examples/support_chat), [`saas_tiers`](../examples/saas_tiers), [`document_extraction`](../examples/document_extraction), [`nextjs_support_chat`](../examples/nextjs_support_chat)

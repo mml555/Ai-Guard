@@ -30,6 +30,7 @@ export interface ChatInput {
   messages: ChatMessage[];
   inputTokensEstimate?: number;
   temperature?: number;
+  stream?: boolean;
   projectId?: string;
   environment?: string;
   metadata?: Record<string, unknown>;

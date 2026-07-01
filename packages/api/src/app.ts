@@ -10,6 +10,8 @@ import { registerUsageRoute } from "./modules/usage/routes";
 import { registerRequestsRoute } from "./modules/requests/routes";
 import { registerAuth, type ApiKeyPrincipal, type ResolvedPrincipal } from "./plugins/auth";
 import { registerKeysRoutes } from "./modules/keys/routes";
+import { registerAuditRoutes } from "./modules/audit/routes";
+import { appendAudit } from "./modules/audit/repo";
 import { registerMetrics } from "./plugins/metrics";
 import { registerOpenApi } from "./plugins/openApi";
 import { registerRequestContext } from "./plugins/requestContext";
@@ -172,7 +174,19 @@ export function buildServer(opts: BuildServerOptions): FastifyInstance {
   if (opts.keyResolver) {
     // Clearing the resolver cache on any mutation makes revoke/rotate effective
     // immediately rather than after the cache TTL.
-    registerKeysRoutes(app, opts.pool, { onKeysChanged: opts.keyResolver.clear });
+    registerKeysRoutes(app, opts.pool, {
+      onKeysChanged: opts.keyResolver.clear,
+      // Best-effort audit append: a chain-write failure logs but never fails the
+      // key mutation itself.
+      recordAudit: async (event) => {
+        try {
+          await appendAudit(opts.pool, event);
+        } catch (err) {
+          app.log.error({ err, action: event.action }, "audit append failed");
+        }
+      },
+    });
+    registerAuditRoutes(app, opts.pool);
   }
   registerExplainRoute(app, { config: opts.config, pool: opts.pool });
   registerChatRoute(app, {

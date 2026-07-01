@@ -298,7 +298,7 @@ Alert on: 5xx rate, p95 of `http_request_duration_seconds`, sustained `pg_pool_c
 - No hosted SaaS — self-host only
 - Single `ai-guard.yaml` per deployment
 - `user_daily` and `feature_monthly` budget counters are partitioned by `project_id` (from the API key or `ai-guard.yaml` `project.name`); global monthly remains one deployment-wide counter
-- **No response streaming** — `/v1/chat` returns the full completion in one response (cost is settled after the call). Interactive streaming (SSE) is not supported in v1.
+- **Streaming (SSE)** — `/v1/chat` supports `stream: true` (see [HTTP API](./api.md#streaming-stream-true)). Constraints: output PII protection must be off for the feature, no `Idempotency-Key`, and no mid-stream provider fallback. Non-streaming requests settle cost after the call as before.
 - **Global budget is a single counter row** — correct under concurrency (atomic, cap-safe) but a throughput ceiling at very high RPS. A per-transaction `lock_timeout` makes contention fail fast rather than pile up; shard the counter if you outgrow it.
 - **Fallback cost is pre-reserved** — when the primary provider fails, the API tops up the reservation to the fallback model's estimate before calling it, so caps are not marginally overshot on that path. Actual cost can still exceed the estimate if LiteLLM reports a higher real cost.
 - **Rate limiting requires Redis in multi-replica mode and fails closed by default** — a Redis outage rejects `/v1/chat` (429) unless `RATE_LIMIT_FAIL_OPEN=true`. The atomic budget reserve remains the real spend guard.
