@@ -1,6 +1,14 @@
 export * from "./types";
 export { parseConfig, parseConfigObject } from "./config";
 export { evaluateAiRequest } from "./evaluator";
+export {
+  evaluateBudgetPath,
+  type BudgetPathNode,
+  type BudgetPathDecision,
+  type BudgetPathReasonCode,
+  type EvaluateBudgetPathInput,
+  type NodeRemaining,
+} from "./budgetPath";
 export { resolveSafetyPlan, PRESET_DEFAULTS } from "./safety";
 export {
   CLASS_TIERS,

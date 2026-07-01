@@ -5,9 +5,14 @@ multi-tenant isolation with nested budgets (org → dept → team → user → f
 without weakening the concurrency guarantees the current budget engine already
 proves.
 
-> **Status:** this is a **design** for the full build. The foundations below
-> exist today; the hierarchy, counter-sharding, and tenant isolation are the
-> net-new work.
+> **Status:** the concurrency-critical **core is now built** (migration
+> `0011_budget_nodes`, `modules/budgets/repo.ts`): the `budget_nodes` tree,
+> `budget_node_counters`, path resolution, and the **atomic multi-level
+> reserve/settle/release** — with a concurrency test proving exact admission
+> against a shared ancestor cap (`budget-nodes.integration.test.ts`). It ships
+> **alongside** the flat path (still the default) and is **not yet wired into
+> `/v1/chat`**. Remaining: the engine path-walk, chat wiring behind a flag,
+> counter sharding, and tenant binding (see "Rollout").
 
 ## What exists today (foundations)
 
@@ -103,12 +108,21 @@ concurrency proof extend to the hierarchy.
 
 ## Rollout
 
-1. Ship `budget_nodes` + counter migration behind a flag; keep the flat path as
-   the default.
-2. Port `reserveBudget`/`recordActualCost`/`releaseBudget` to the path walk;
-   extend the concurrency test to a 3-level tree.
-3. Shard the top counter; publish the RPS benchmark (see
+1. ~~Ship `budget_nodes` + counter migration; keep the flat path as the
+   default.~~ **Done** — `0011_budget_nodes`, `modules/budgets/repo.ts`.
+2. ~~Atomic multi-level reserve/settle/release with a concurrency proof.~~
+   **Done** — `budget-nodes.integration.test.ts` (exact admission against a
+   shared ancestor cap; 3-level tree).
+3. ~~Pure engine path-walk.~~ **Done** — `evaluateBudgetPath()` in the policy
+   engine (`budgetPath.ts`): no I/O, decides allow/block against a resolved node
+   path with per-node used/reserved/requests, returns the outermost breaching
+   node. The rule is identical to the DB `reservePath` upsert, so the pre-check
+   and the concurrency-safe reservation agree. Unit-tested (`budget-path.test.ts`).
+   *Next:* wire `/v1/chat` to it behind a flag — resolve the caller's node path,
+   load the per-node snapshot, `evaluateBudgetPath` → `reservePath` →
+   `settlePath`/`releasePath`.
+4. Shard the top counter; publish the RPS benchmark (see
    [benchmarks](../deployment/benchmarks.md)).
-4. Add tenant binding to keys + policy versions; enable RLS.
+5. Add tenant binding to keys + policy versions; enable RLS.
 
 Each step is independently shippable and testable.

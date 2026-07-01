@@ -28,6 +28,7 @@ export default defineConfig({
         "packages/api/src/modules/authz/**/*.ts",
         "packages/api/src/modules/audit/**/*.ts",
         "packages/api/src/modules/governance/**/*.ts",
+        "packages/api/src/modules/budgets/**/*.ts",
         "packages/api/src/config/secrets.ts",
       ],
       exclude: ["**/*.test.ts", "**/index.ts"],
