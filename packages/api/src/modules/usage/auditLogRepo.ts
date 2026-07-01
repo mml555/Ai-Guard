@@ -1,6 +1,7 @@
 import type { Pool } from "pg";
 
 export interface RequestLogRow {
+  tenantId?: string;
   projectId?: string;
   environment?: string;
   userId: string;
@@ -35,13 +36,13 @@ export function formatAuditRequestId(id: number): string {
 
 const LOG_SQL = `
   INSERT INTO request_logs (
-    project_id, environment, user_id, user_type, feature, model_class,
+    tenant_id, project_id, environment, user_id, user_type, feature, model_class,
     requested_model_class, resolved_model, decision, status, estimated_cost_usd,
     actual_cost_usd, input_tokens, output_tokens, pii_masked, injection_blocked,
     error, reason_code, trace_tags, safety_findings, host_metadata,
     config_hash, policy_version
   ) VALUES (
-    $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21, $22, $23
+    $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21, $22, $23, $24
   )
   RETURNING id
 `;
@@ -120,6 +121,25 @@ const RECENT_STATS_SQL_SCOPED = `
     AND project_id = $2
 `;
 
+const RECENT_STATS_SQL_TENANT = `
+  SELECT
+    count(*)::text AS total,
+    count(*) FILTER (WHERE status <> 'ok')::text AS failed
+  FROM request_logs
+  WHERE created_at >= $1::timestamptz
+    AND tenant_id = $2
+`;
+
+const RECENT_STATS_SQL_TENANT_PROJECT = `
+  SELECT
+    count(*)::text AS total,
+    count(*) FILTER (WHERE status <> 'ok')::text AS failed
+  FROM request_logs
+  WHERE created_at >= $1::timestamptz
+    AND tenant_id = $2
+    AND project_id = $3
+`;
+
 /**
  * Count request_logs rows (total and failed) since `since`, optionally scoped to
  * a project partition. Powers the operator usage summary.
@@ -127,12 +147,21 @@ const RECENT_STATS_SQL_SCOPED = `
 export async function getRecentRequestStats(
   pool: Pool,
   since: Date,
-  projectId?: string,
+  scope?: { projectId?: string; tenantId?: string },
 ): Promise<{ total: number; failed: number }> {
-  const { rows } = await pool.query<{ total: string; failed: string }>(
-    projectId ? RECENT_STATS_SQL_SCOPED : RECENT_STATS_SQL,
-    projectId ? [since.toISOString(), projectId] : [since.toISOString()],
-  );
+  let sql = RECENT_STATS_SQL;
+  const values: unknown[] = [since.toISOString()];
+  if (scope?.tenantId && scope.projectId) {
+    sql = RECENT_STATS_SQL_TENANT_PROJECT;
+    values.push(scope.tenantId, scope.projectId);
+  } else if (scope?.tenantId) {
+    sql = RECENT_STATS_SQL_TENANT;
+    values.push(scope.tenantId);
+  } else if (scope?.projectId) {
+    sql = RECENT_STATS_SQL_SCOPED;
+    values.push(scope.projectId);
+  }
+  const { rows } = await pool.query<{ total: string; failed: string }>(sql, values);
   const row = rows[0];
   return {
     total: Number(row?.total ?? 0),
@@ -144,6 +173,7 @@ export async function getRecentRequestStats(
 export async function logRequest(pool: Pool, row: RequestLogRow): Promise<string | null> {
   try {
     const res = await pool.query<{ id: string }>(LOG_SQL, [
+      row.tenantId ?? null,
       row.projectId ?? null,
       row.environment ?? null,
       row.userId,

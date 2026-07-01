@@ -90,7 +90,10 @@ export function registerRequestsRoute(
       return sendError(reply, 400, "invalid_request", { detail: "invalid request id" });
     }
 
-    const record = await getRequestById(pool, numericId, auth.projectScope);
+    const record = await getRequestById(pool, numericId, {
+      projectScope: auth.projectScope,
+      tenantScope: auth.tenantScope,
+    });
     if (!record) {
       return sendError(reply, 404, "not_found", {}, "Request not found");
     }

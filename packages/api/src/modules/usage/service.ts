@@ -67,7 +67,10 @@ export async function getUsageSummary(
     : null;
 
   const dayAgo = new Date(now.getTime() - 24 * 60 * 60 * 1000);
-  const recent = await getRecentRequestStats(pool, dayAgo, query.projectScope);
+  const recent = await getRecentRequestStats(pool, dayAgo, {
+    projectId: query.projectScope,
+    tenantId: query.tenantScope,
+  });
   const summary: UsageSummary = {
     asOf: now.toISOString(),
     projectId: budgetProjectId,

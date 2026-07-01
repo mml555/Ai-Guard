@@ -11,6 +11,7 @@ export interface UsageSummaryQuery {
   userType?: string;
   since?: string;
   projectScope?: string;
+  tenantScope?: string;
 }
 
 export interface UsageSummaryReport {
@@ -37,6 +38,7 @@ export async function getUsageSummaryReport(
   const filters: UsageSummaryFilters = {
     since: sinceDate,
     projectScope: query.projectScope,
+    tenantScope: query.tenantScope,
     feature: query.feature,
     userType: query.userType,
   };

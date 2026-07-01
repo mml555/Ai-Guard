@@ -1,9 +1,11 @@
 import type { RequestContext } from "../../plugins/requestContext";
 import {
   checkProjectScope,
+  checkTenantScope,
   checkUserIdAllowedIfPresent,
   checkUserTypeAllowedIfPresent,
   resolveProjectScope,
+  resolveTenantScope,
 } from "../authz/scope";
 import type { UsageQuery } from "./service";
 
@@ -12,6 +14,8 @@ export interface AuthorizedUsageQuery extends UsageQuery {
   budgetProjectId: string;
   /** When set, recent request stats are filtered to this project. */
   projectScope?: string;
+  /** When set, request-log aggregates are filtered to this tenant. */
+  tenantScope?: string;
   includeGlobal: boolean;
 }
 
@@ -30,6 +34,9 @@ export function authorizeUsageQuery(
   const projectDenial = checkProjectScope(ctx, query.projectId);
   if (projectDenial) return deny(projectDenial.status, projectDenial.code, projectDenial.message);
 
+  const tenantDenial = checkTenantScope(ctx);
+  if (tenantDenial) return deny(tenantDenial.status, tenantDenial.code, tenantDenial.message);
+
   if (tenantScoped && query.userId === undefined && query.feature === undefined) {
     return deny(
       403,
@@ -46,6 +53,7 @@ export function authorizeUsageQuery(
       ...query,
       budgetProjectId,
       projectScope: resolveProjectScope(ctx, query.projectId),
+      tenantScope: resolveTenantScope(ctx),
       includeGlobal: !tenantScoped,
     },
   };
@@ -56,10 +64,13 @@ export function authorizeUsageSummary(
   query: { feature?: string; userType?: string; projectId?: string },
   defaultProjectId: string,
 ):
-  | { ok: true; projectScope?: string }
+  | { ok: true; projectScope?: string; tenantScope?: string }
   | { ok: false; status: number; code: string; message: string } {
   const projectDenial = checkProjectScope(ctx, query.projectId);
   if (projectDenial) return deny(projectDenial.status, projectDenial.code, projectDenial.message);
+
+  const tenantDenial = checkTenantScope(ctx);
+  if (tenantDenial) return deny(tenantDenial.status, tenantDenial.code, tenantDenial.message);
 
   const userTypeDenial = checkUserTypeAllowedIfPresent(ctx, query.userType);
   if (userTypeDenial) {
@@ -69,6 +80,7 @@ export function authorizeUsageSummary(
   return {
     ok: true,
     projectScope: resolveProjectScope(ctx, query.projectId, defaultProjectId),
+    tenantScope: resolveTenantScope(ctx),
   };
 }
 

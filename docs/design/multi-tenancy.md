@@ -169,7 +169,9 @@ The policy is **fail-closed**: with no `app.current_tenant` set, `current_settin
 is NULL and no rows match. Verified against a real non-owner role in
 `rls-tenant.integration.test.ts`.
 
-### Remaining polish (not blocking)
+### Remaining polish
 
-- Extend usage/requests read endpoints with explicit tenant scoping (they scope
-  by `project_id` today).
+- ~~Extend usage/requests read endpoints with explicit tenant scoping~~ **Done**
+  (v0.6.0): `request_logs.tenant_id` is stamped from the API key on every chat
+  audit row; `/v1/usage` and `/v1/requests` filter by `tenant_id` when the key is
+  tenant-bound (`tenant-read-scope.integration.test.ts`).

@@ -94,13 +94,21 @@ export function rowToRecord(row: RequestLogDbRow): RequestRecord {
 export async function getRequestById(
   pool: Pool,
   id: number,
-  projectScope?: string,
+  scope?: { projectScope?: string; tenantScope?: string },
 ): Promise<RequestRecord | null> {
+  const conditions = ["id = $1"];
+  const values: unknown[] = [id];
+  if (scope?.tenantScope) {
+    values.push(scope.tenantScope);
+    conditions.push(`tenant_id = $${values.length}`);
+  }
+  if (scope?.projectScope) {
+    values.push(scope.projectScope);
+    conditions.push(`project_id = $${values.length}`);
+  }
   const { rows } = await pool.query<RequestLogDbRow>(
-    projectScope
-      ? `SELECT ${SELECT_FIELDS} FROM request_logs WHERE id = $1 AND project_id = $2`
-      : `SELECT ${SELECT_FIELDS} FROM request_logs WHERE id = $1`,
-    projectScope ? [id, projectScope] : [id],
+    `SELECT ${SELECT_FIELDS} FROM request_logs WHERE ${conditions.join(" AND ")}`,
+    values,
   );
   const row = rows[0];
   return row ? rowToRecord(row) : null;
@@ -108,6 +116,7 @@ export async function getRequestById(
 
 export interface ListRequestsParams extends RequestListQuery {
   projectScope?: string;
+  tenantScope?: string;
 }
 
 export async function listRequests(
@@ -118,6 +127,10 @@ export async function listRequests(
   const conditions: string[] = [];
   const values: unknown[] = [];
 
+  if (params.tenantScope) {
+    values.push(params.tenantScope);
+    conditions.push(`tenant_id = $${values.length}`);
+  }
   if (params.projectScope) {
     values.push(params.projectScope);
     conditions.push(`project_id = $${values.length}`);

@@ -106,6 +106,7 @@ export function baseObs(
 export interface PolicyMeta {
   configHash?: string;
   policyVersion?: string;
+  tenantId?: string;
 }
 
 export function baseLog(
@@ -114,6 +115,7 @@ export function baseLog(
   meta?: PolicyMeta & { requestedModelClass?: string },
 ) {
   return {
+    tenantId: meta?.tenantId,
     projectId: request.projectId,
     environment: request.environment,
     userId: request.userId,

@@ -16,6 +16,26 @@ import type { ChatInput, ChatResult, ChatServiceDeps } from "./types";
 import type { TenantPolicyResolver } from "../policy/tenantResolver";
 import type { FastifyReply, FastifyRequest } from "fastify";
 
+function withRequestPolicyMeta(
+  deps: ChatRouteDeps,
+  tenantId?: string,
+): ChatRouteDeps["policyMeta"] {
+  if (!tenantId) return deps.policyMeta;
+  return { ...deps.policyMeta, tenantId };
+}
+
+function chatDepsForRequest(
+  deps: ChatRouteDeps,
+  request: FastifyRequest,
+  log: FastifyReply["log"] | FastifyRequest["log"],
+): ChatServiceDeps {
+  return {
+    ...deps,
+    log,
+    policyMeta: withRequestPolicyMeta(deps, request.ctx.tenantId),
+  };
+}
+
 export interface ChatRouteDeps {
   config: AiGuardConfig;
   pool: Pool;
@@ -28,7 +48,7 @@ export interface ChatRouteDeps {
   /** Opt-in hierarchical (node-tree) budgets for requests carrying a budgetNodeId. */
   hierarchicalBudgets?: boolean;
   /** Config identity stamped on every request log. */
-  policyMeta?: { configHash?: string; policyVersion?: string };
+  policyMeta?: { configHash?: string; policyVersion?: string; tenantId?: string };
   /**
    * When set (MULTI_TENANT_POLICY), the request is evaluated against its tenant's
    * active policy version instead of the boot config. Absent = single boot config.
@@ -95,17 +115,18 @@ export function registerChatRoute(
           "Idempotency-Key is not supported with stream: true",
         );
       }
-      return streamChat({ ...rdeps, log: request.log }, input, request, reply);
+      return streamChat(chatDepsForRequest(rdeps, request, request.log), input, request, reply);
     }
 
     // Hierarchical budgets (flag + a budgetNodeId from the request or the key)
     // route to the node-tree path; otherwise the default flat path runs.
     const leafNodeId = input.budgetNodeId ?? request.ctx.budgetNodeId;
     const useHierarchical = Boolean(deps.hierarchicalBudgets && leafNodeId);
+    const svc = chatDepsForRequest(rdeps, request, request.log);
     const run = (): Promise<ChatResult> =>
       useHierarchical
-        ? handleChatHierarchical({ ...rdeps, log: request.log }, input, leafNodeId as string)
-        : handleChat({ ...rdeps, log: request.log }, input);
+        ? handleChatHierarchical(svc, input, leafNodeId as string)
+        : handleChat(svc, input);
 
     let result: ChatResult;
     if (idempotencyKey) {

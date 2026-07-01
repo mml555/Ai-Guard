@@ -103,6 +103,25 @@ export function resolveProjectScope(
   return ctx.projectId ?? queryProjectId ?? defaultProjectId;
 }
 
+/** Tenant partition for read APIs when the API key is tenant-bound. */
+export function resolveTenantScope(ctx: RequestContext): string | undefined {
+  return ctx.tenantId;
+}
+
+/**
+ * Tenant-bound keys must scope usage/requests reads to their tenant. Returns a
+ * denial when an explicit query tenant disagrees with the key binding.
+ */
+export function checkTenantScope(
+  ctx: RequestContext,
+  queryTenantId?: string,
+): ScopeDenial | null {
+  if (ctx.tenantId && queryTenantId && queryTenantId !== ctx.tenantId) {
+    return denyScope(403, "tenant_mismatch", "API key is not permitted for this tenant");
+  }
+  return null;
+}
+
 /** Run scope checks in order; returns the first denial or null when all pass. */
 export function firstScopeDenial(...checks: Array<ScopeDenial | null>): ScopeDenial | null {
   for (const denial of checks) {

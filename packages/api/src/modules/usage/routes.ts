@@ -107,6 +107,7 @@ export function registerUsageRoute(
         userType: parsed.data.userType,
         since: parsed.data.since,
         projectScope: auth.projectScope,
+        tenantScope: auth.tenantScope,
       });
       return reply.send(report);
     } catch (err) {
