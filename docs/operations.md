@@ -5,7 +5,7 @@ Run Ai-Guard in production on your own infrastructure.
 ## Production checklist
 
 - [ ] TLS termination (nginx, ALB, Cloudflare) in front of the API
-- [ ] Strong `AI_GUARD_API_KEY` / scoped `AI_GUARD_API_KEYS` (include `usage:read` for ops)
+- [ ] One bootstrap `keys:admin` key in `AI_GUARD_API_KEYS`; issue all other keys via the [key store](#api-key-management)
 - [ ] Managed Postgres with automated backups
 - [ ] Pinned container images (see [Production deploy](#production-deploy))
 - [ ] Provider keys in a secrets manager, not git
@@ -71,12 +71,80 @@ Use **`/ready`** for load balancer readiness. It gates on the database and repor
 | `/health` | Process only | Liveness |
 | `/ready` | Database gates readiness; LiteLLM + Presidio are reported if configured | Readiness / traffic routing |
 
+## API key management
+
+Static keys in `AI_GUARD_API_KEYS` still work and are the recommended way to seed
+**one** bootstrap key with the `keys:admin` permission. Every other key should be
+issued from the **Postgres-backed key store**, so you can rotate and revoke live
+without redeploying the fleet.
+
+| Env | Default | Effect |
+| --- | --- | --- |
+| `API_KEYS_DB_ENABLED` | `true` | Consult the DB key store when no static key matches, and mount `/v1/admin/keys` |
+| `API_KEY_CACHE_TTL_MS` | `10000` | How long a resolved key is cached in-process. Bounds how long a revoked key could still be accepted; mutations via the admin API clear the cache immediately across the handling replica |
+
+Only the SHA-256 hash of each secret is stored — the plaintext is returned **once**
+at create/rotate time and is never retrievable again.
+
+Manage keys with the CLI (point `AI_GUARD_API_KEY` at a `keys:admin` key):
+
+```bash
+ai-guard keys create --name checkout-svc --permissions chat:create --project checkout
+ai-guard keys list
+ai-guard keys rotate <id>     # old secret stops working immediately
+ai-guard keys revoke <id>
+```
+
+Or over HTTP — `POST /v1/admin/keys`, `GET /v1/admin/keys`,
+`POST /v1/admin/keys/{id}/rotate`, `POST /v1/admin/keys/{id}/revoke` (all require
+`keys:admin`). See [HTTP API](./api.md).
+
+## Operator SSO (OIDC) & RBAC
+
+Human/automation access to the control plane can authenticate with a JWT from your
+corporate IdP instead of an API key. When `OIDC_ISSUER` + `OIDC_JWKS_URI` are set,
+a bearer token with JWT shape is verified against the IdP's JWKS (signature,
+issuer, audience, expiry), then its roles/groups claim is mapped to **operator
+roles**, which expand to permissions. Application traffic keeps using API keys.
+
+| Env | Purpose |
+| --- | --- |
+| `OIDC_ISSUER` | Expected `iss` (from your IdP) |
+| `OIDC_JWKS_URI` | IdP JWKS endpoint (from its discovery doc) |
+| `OIDC_AUDIENCE` | Expected `aud` (recommended) |
+| `OIDC_ROLES_CLAIM` | Claim holding roles/groups (default `roles`) |
+| `OIDC_NAME_CLAIM` | Claim used as display name (default `sub`) |
+| `OIDC_ROLE_MAP` | JSON mapping IdP group → Ai-Guard role(s) |
+
+Built-in operator roles (least privilege):
+
+| Role | Permissions |
+| --- | --- |
+| `viewer` | `usage:read`, `requests:read` |
+| `finops` | `viewer` + `audit:read` |
+| `key-admin` | `keys:admin` + reads |
+| `policy-admin` | `policy:read`, `policy:write` + reads |
+| `owner` | everything |
+
+Example: map an Okta/Entra group to `owner`:
+
+```bash
+OIDC_ISSUER=https://login.example.com/
+OIDC_JWKS_URI=https://login.example.com/.well-known/jwks.json
+OIDC_AUDIENCE=ai-guard
+OIDC_ROLE_MAP={"ai-guard-admins":"owner","ai-guard-finops":"finops"}
+```
+
+A verified token whose groups map to no role is authenticated but carries no
+permissions, so protected routes answer `403` (not `401`).
+
 ## Backups
 
 Back up the **Postgres** volume (or managed DB snapshots). Critical tables:
 
 - `budget_counters` — spend state
 - `request_logs` — audit trail
+- `api_keys` — issued API keys (hashes + scoping); losing this locks out DB-issued keys
 - `idempotency_keys` — short-lived; less critical
 
 Restore procedure: restore DB snapshot → restart API → verify `/ready`.

@@ -11,6 +11,8 @@ import {
 } from "./services/rateLimitRedis";
 import type Redis from "ioredis";
 import { resolveSafetyPlan } from "@ai-guard/policy-engine";
+import { createDbKeyResolver } from "./modules/keys/resolver";
+import { createOidcVerifier } from "./modules/authz/oidc";
 import { buildServer } from "./app";
 
 /**
@@ -151,6 +153,32 @@ async function main(): Promise<void> {
       }
     : undefined;
 
+  const keyResolver =
+    env.API_KEYS_DB_ENABLED === "true"
+      ? createDbKeyResolver(pool, { cacheTtlMs: env.API_KEY_CACHE_TTL_MS })
+      : undefined;
+
+  let jwtVerifier: { verify: (token: string) => Promise<import("./plugins/auth").ResolvedPrincipal | null> } | undefined;
+  if (env.OIDC_ISSUER && env.OIDC_JWKS_URI) {
+    let roleMap: Record<string, string | string[]> | undefined;
+    if (env.OIDC_ROLE_MAP) {
+      try {
+        roleMap = JSON.parse(env.OIDC_ROLE_MAP);
+      } catch {
+        throw new Error("OIDC_ROLE_MAP must be valid JSON");
+      }
+    }
+    jwtVerifier = createOidcVerifier({
+      issuer: env.OIDC_ISSUER,
+      jwksUri: env.OIDC_JWKS_URI,
+      audience: env.OIDC_AUDIENCE,
+      rolesClaim: env.OIDC_ROLES_CLAIM,
+      nameClaim: env.OIDC_NAME_CLAIM,
+      roleMap,
+    });
+    console.log(`operator SSO enabled (OIDC issuer ${env.OIDC_ISSUER})`);
+  }
+
   const app = buildServer({
     config,
     pool,
@@ -158,6 +186,8 @@ async function main(): Promise<void> {
     safety,
     observability,
     apiKeys: env.apiKeys,
+    keyResolver,
+    jwtVerifier,
     idempotencyCaptureContent: env.IDEMPOTENCY_CAPTURE_CONTENT === "true",
     metrics: env.METRICS_ENABLED === "true",
     metricsAuthToken: env.METRICS_AUTH_TOKEN,

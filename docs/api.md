@@ -20,6 +20,11 @@ Authentication: **`Authorization: Bearer <API_KEY>`** on all routes except
 | `GET` | `/v1/usage/summary` | `usage:read` | Aggregated cost/request summary |
 | `GET` | `/v1/requests` | `requests:read` | List audit records (metadata only) |
 | `GET` | `/v1/requests/:id` | `requests:read` | Single audit record |
+| `POST` | `/v1/admin/keys` | `keys:admin` | Issue a key (returns secret once) |
+| `GET` | `/v1/admin/keys` | `keys:admin` | List keys (metadata only) |
+| `GET` | `/v1/admin/keys/:id` | `keys:admin` | Single key record |
+| `POST` | `/v1/admin/keys/:id/rotate` | `keys:admin` | New secret; old one invalid immediately |
+| `POST` | `/v1/admin/keys/:id/revoke` | `keys:admin` | Revoke (idempotent) |
 
 Default API keys include `chat:create` only. Add `usage:read` for the usage endpoint
 (see [Configuration](./configuration.md#scoped-api-keys-production)).
@@ -280,3 +285,54 @@ Default: 120 requests / minute / IP (configurable via `RATE_LIMIT_MAX` and
 | `REDIS_URL` set | Shared counter across replicas (production compose includes Redis) |
 
 `/health` and `/ready` are excluded from rate limits.
+
+---
+
+## Admin: API keys
+
+DB-backed key lifecycle. All routes require the `keys:admin` permission — seed one
+bootstrap key with it via `AI_GUARD_API_KEYS`, then manage the rest here. Only the
+SHA-256 hash of each secret is stored; the plaintext `secret` is returned **once**
+on create/rotate and never again.
+
+### `POST /v1/admin/keys`
+
+```json
+{
+  "name": "checkout-svc",
+  "permissions": ["chat:create"],
+  "projectId": "checkout",
+  "environment": "production",
+  "expiresAt": "2027-01-01T00:00:00Z"
+}
+```
+
+`201` returns the key record plus a one-time `secret`:
+
+```json
+{
+  "id": "b0c1…",
+  "name": "checkout-svc",
+  "keyPrefix": "sk-ai-guard-a1b2c3",
+  "permissions": ["chat:create"],
+  "projectId": "checkout",
+  "createdAt": "2026-06-30T12:00:00Z",
+  "secret": "sk-ai-guard-…"
+}
+```
+
+### `GET /v1/admin/keys`
+
+Lists key metadata (never secrets or hashes). Query: `includeRevoked=true`,
+`projectId=<id>`.
+
+### `POST /v1/admin/keys/:id/rotate`
+
+Mints a new `secret` for the same key id; the previous secret is rejected
+immediately. `404` if the id is unknown or already revoked.
+
+### `POST /v1/admin/keys/:id/revoke`
+
+Revokes the key (idempotent) → `{ "id": "…", "revoked": true }`. Takes effect
+across replicas within `API_KEY_CACHE_TTL_MS` (default 10s), or immediately on the
+replica that handled the revoke.

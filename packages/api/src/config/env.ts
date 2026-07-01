@@ -12,6 +12,19 @@ const baseEnvSchema = z.object({
   DB_STATEMENT_TIMEOUT_MS: z.coerce.number().int().positive().default(30_000),
   AI_GUARD_API_KEY: z.string().min(1).optional(),
   AI_GUARD_API_KEYS: z.string().optional(),
+  // DB-backed key store (issue/rotate/revoke live via /v1/admin/keys). Static
+  // env keys above still work and are used to bootstrap the first keys:admin key.
+  API_KEYS_DB_ENABLED: z.enum(["true", "false"]).default("true"),
+  API_KEY_CACHE_TTL_MS: z.coerce.number().int().positive().default(10_000),
+  // Operator SSO (OIDC). When OIDC_ISSUER + OIDC_JWKS_URI are set, JWT bearer
+  // tokens are verified against the IdP and mapped to operator roles.
+  OIDC_ISSUER: z.string().url().optional(),
+  OIDC_JWKS_URI: z.string().url().optional(),
+  OIDC_AUDIENCE: z.string().min(1).optional(),
+  OIDC_ROLES_CLAIM: z.string().min(1).default("roles"),
+  OIDC_NAME_CLAIM: z.string().min(1).default("sub"),
+  // JSON map of IdP role/group value -> Ai-Guard role name(s).
+  OIDC_ROLE_MAP: z.string().optional(),
   AI_GUARD_CONFIG: z.string().min(1, "AI_GUARD_CONFIG is required"),
   LITELLM_BASE_URL: z.string().url("LITELLM_BASE_URL must be a URL"),
   LITELLM_MASTER_KEY: z.string().optional(),
@@ -96,6 +109,10 @@ const OPTIONAL_ENV_KEYS = [
   "REDIS_URL",
   "BUDGET_ALERT_WEBHOOK_URL",
   "BUDGET_ALERT_WEBHOOK_SECRET",
+  "OIDC_ISSUER",
+  "OIDC_JWKS_URI",
+  "OIDC_AUDIENCE",
+  "OIDC_ROLE_MAP",
 ] as const;
 
 function normalizeOptionalEmptyStrings(

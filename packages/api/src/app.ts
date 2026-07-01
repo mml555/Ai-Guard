@@ -8,7 +8,8 @@ import { registerHealthRoute } from "./modules/health/routes";
 import type { HealthDeps } from "./modules/health/service";
 import { registerUsageRoute } from "./modules/usage/routes";
 import { registerRequestsRoute } from "./modules/requests/routes";
-import { registerAuth, type ApiKeyPrincipal } from "./plugins/auth";
+import { registerAuth, type ApiKeyPrincipal, type ResolvedPrincipal } from "./plugins/auth";
+import { registerKeysRoutes } from "./modules/keys/routes";
 import { registerMetrics } from "./plugins/metrics";
 import { registerOpenApi } from "./plugins/openApi";
 import { registerRequestContext } from "./plugins/requestContext";
@@ -28,6 +29,20 @@ export interface BuildServerOptions extends ChatRouteDeps {
   /** Bearer token required for non-health endpoints. Omit only in tests. */
   apiKey?: string;
   apiKeys?: readonly ApiKeyPrincipal[];
+  /**
+   * Postgres-backed key store consulted when no static key matches. Providing it
+   * also registers the `/v1/admin/keys` management routes (guarded by the
+   * `keys:admin` permission).
+   */
+  keyResolver?: {
+    resolve: (token: string) => Promise<ResolvedPrincipal | null>;
+    clear: () => void;
+  };
+  /**
+   * Optional OIDC verifier for operator SSO. When set, JWT-shaped bearer tokens
+   * are verified against the IdP and mapped to operator roles/permissions.
+   */
+  jwtVerifier?: { verify: (token: string) => Promise<ResolvedPrincipal | null> };
   /**
    * Allow booting with NO authentication. Without this flag, and with neither
    * apiKey nor apiKeys configured, buildServer throws rather than silently
@@ -131,12 +146,16 @@ export function buildServer(opts: BuildServerOptions): FastifyInstance {
       ? [{ name: "default", key: opts.apiKey, permissions: ["chat:create"] }]
       : []
   );
-  if (apiKeys.length > 0) {
-    registerAuth(app, apiKeys, { metricsAuthToken: opts.metricsAuthToken });
+  if (apiKeys.length > 0 || opts.keyResolver || opts.jwtVerifier) {
+    registerAuth(app, apiKeys, {
+      metricsAuthToken: opts.metricsAuthToken,
+      resolveKey: opts.keyResolver?.resolve,
+      verifyJwt: opts.jwtVerifier?.verify,
+    });
   } else if (!opts.allowUnauthenticated) {
     throw new Error(
       "No API keys configured — refusing to start an unauthenticated server. " +
-        "Set apiKey/apiKeys, or pass allowUnauthenticated: true (tests only).",
+        "Set apiKey/apiKeys, provide a keyResolver, or pass allowUnauthenticated: true (tests only).",
     );
   }
 
@@ -150,6 +169,11 @@ export function buildServer(opts: BuildServerOptions): FastifyInstance {
   });
   registerUsageRoute(app, opts.pool, { defaultProjectId: opts.config.project.name });
   registerRequestsRoute(app, opts.pool, { defaultProjectId: opts.config.project.name });
+  if (opts.keyResolver) {
+    // Clearing the resolver cache on any mutation makes revoke/rotate effective
+    // immediately rather than after the cache TTL.
+    registerKeysRoutes(app, opts.pool, { onKeysChanged: opts.keyResolver.clear });
+  }
   registerExplainRoute(app, { config: opts.config, pool: opts.pool });
   registerChatRoute(app, {
     config: opts.config,

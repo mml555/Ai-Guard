@@ -1,5 +1,6 @@
 #!/usr/bin/env node
 import { runExplain, type ExplainFlags } from "./explain.js";
+import { runKeysCommand } from "./keys.js";
 import { runOps, type OpsCommand } from "./ops.js";
 import { runRequestsCommand, runUsageSummaryCommand } from "./operator.js";
 import { runPolicyTestFile } from "./testPolicy.js";
@@ -21,6 +22,7 @@ Commands:
   test-policy   Run policy regression tests from a YAML file
   requests      List or show request audit records
   usage         Usage summaries from audit logs
+  keys          Manage DB-backed API keys (create, list, rotate, revoke)
 
 Run 'ai-guard <command> --help' for command options.
 `;
@@ -63,6 +65,12 @@ function main(): void {
         break;
       case "usage":
         void runUsageCommand(rest);
+        break;
+      case "keys":
+        void runKeysCommand(rest).catch((err) => {
+          console.error(err instanceof Error ? err.message : err);
+          process.exit(1);
+        });
         break;
       default:
         console.error(`Unknown command: ${command}\n`);

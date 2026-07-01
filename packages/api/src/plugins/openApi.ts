@@ -154,6 +154,81 @@ export function buildOpenApiDocument() {
           },
         },
       },
+      "/v1/admin/keys": {
+        get: {
+          tags: ["admin"],
+          description: "List API keys (metadata only — never secrets). Requires keys:admin.",
+          security: [{ bearerAuth: [] }],
+          parameters: [
+            { name: "includeRevoked", in: "query", schema: { type: "boolean" } },
+            { name: "projectId", in: "query", schema: { type: "string" } },
+          ],
+          responses: {
+            200: { description: "Key list" },
+            401: { description: "Unauthorized", content: json(errorJsonSchema) },
+            403: { description: "Forbidden", content: json(errorJsonSchema) },
+          },
+        },
+        post: {
+          tags: ["admin"],
+          description:
+            "Issue a new API key. The plaintext secret is returned once. Requires keys:admin.",
+          security: [{ bearerAuth: [] }],
+          responses: {
+            201: { description: "Issued key (includes one-time secret)" },
+            400: { description: "Invalid request", content: json(errorJsonSchema) },
+            401: { description: "Unauthorized", content: json(errorJsonSchema) },
+            403: { description: "Forbidden", content: json(errorJsonSchema) },
+          },
+        },
+      },
+      "/v1/admin/keys/{id}": {
+        get: {
+          tags: ["admin"],
+          security: [{ bearerAuth: [] }],
+          parameters: [
+            { name: "id", in: "path", required: true, schema: { type: "string" } },
+          ],
+          responses: {
+            200: { description: "Key record" },
+            401: { description: "Unauthorized", content: json(errorJsonSchema) },
+            403: { description: "Forbidden", content: json(errorJsonSchema) },
+            404: { description: "Not found", content: json(errorJsonSchema) },
+          },
+        },
+      },
+      "/v1/admin/keys/{id}/rotate": {
+        post: {
+          tags: ["admin"],
+          description: "Mint a new secret for a key; the old secret stops working. Requires keys:admin.",
+          security: [{ bearerAuth: [] }],
+          parameters: [
+            { name: "id", in: "path", required: true, schema: { type: "string" } },
+          ],
+          responses: {
+            200: { description: "Rotated key (includes new one-time secret)" },
+            401: { description: "Unauthorized", content: json(errorJsonSchema) },
+            403: { description: "Forbidden", content: json(errorJsonSchema) },
+            404: { description: "Not found", content: json(errorJsonSchema) },
+          },
+        },
+      },
+      "/v1/admin/keys/{id}/revoke": {
+        post: {
+          tags: ["admin"],
+          description: "Revoke a key (idempotent). Requires keys:admin.",
+          security: [{ bearerAuth: [] }],
+          parameters: [
+            { name: "id", in: "path", required: true, schema: { type: "string" } },
+          ],
+          responses: {
+            200: { description: "Revoked" },
+            401: { description: "Unauthorized", content: json(errorJsonSchema) },
+            403: { description: "Forbidden", content: json(errorJsonSchema) },
+            404: { description: "Not found", content: json(errorJsonSchema) },
+          },
+        },
+      },
     },
     components: {
       securitySchemes: {

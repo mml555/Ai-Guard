@@ -37,6 +37,26 @@ export class ApiClient {
     }
     return body as T;
   }
+
+  async postJson<T>(path: string, payload?: unknown): Promise<T> {
+    const res = await this.fetchImpl(`${this.baseUrl}${path}`, {
+      method: "POST",
+      headers: {
+        "content-type": "application/json",
+        ...(this.apiKey ? { authorization: `Bearer ${this.apiKey}` } : {}),
+      },
+      body: payload === undefined ? undefined : JSON.stringify(payload),
+    });
+    const body = (await res.json().catch(() => ({}))) as T & { error?: { message?: string } };
+    if (!res.ok) {
+      const message =
+        typeof body === "object" && body && "error" in body && body.error?.message
+          ? body.error.message
+          : `request failed (${res.status})`;
+      throw new Error(message);
+    }
+    return body as T;
+  }
 }
 
 export function clientFromEnv(): ApiClient {

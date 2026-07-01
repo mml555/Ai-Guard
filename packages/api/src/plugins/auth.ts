@@ -20,10 +20,45 @@ export interface ApiKeyPrincipal {
   permissions?: readonly string[];
 }
 
+/**
+ * The subset of principal fields set into the request context after a key is
+ * verified. Both static (env) keys and DB-resolved keys produce this shape; the
+ * secret itself is not carried past verification.
+ */
+export interface ResolvedPrincipal {
+  name: string;
+  projectId?: string;
+  environment?: string;
+  allowedUserTypes?: readonly string[];
+  allowedUserIds?: readonly string[];
+  permissions?: readonly string[];
+}
+
+export interface AuthOptions {
+  metricsAuthToken?: string;
+  /**
+   * Optional async resolver consulted when no static key matches — backs the
+   * Postgres key store. Already verifies the token (by hash), so it returns a
+   * principal to trust directly.
+   */
+  resolveKey?: (token: string) => Promise<ResolvedPrincipal | null>;
+  /**
+   * Optional OIDC/JWT verifier for operator SSO. Tried when the bearer token
+   * has JWT shape (three dot-separated segments), before the API-key paths.
+   */
+  verifyJwt?: (token: string) => Promise<ResolvedPrincipal | null>;
+}
+
+/** A JWT has exactly three non-empty base64url segments. */
+function looksLikeJwt(token: string): boolean {
+  const parts = token.split(".");
+  return parts.length === 3 && parts.every((p) => p.length > 0);
+}
+
 export function registerAuth(
   app: FastifyInstance,
   principals: readonly ApiKeyPrincipal[],
-  options?: { metricsAuthToken?: string },
+  options?: AuthOptions,
 ): void {
   app.addHook("onRequest", async (request, reply) => {
     const path = request.url.split("?", 1)[0];
@@ -55,7 +90,18 @@ export function registerAuth(
         ? authorization.slice(BEARER_PREFIX.length)
         : "";
 
-    const principal = findPrincipal(token, principals);
+    // Resolution order:
+    //  1. Operator SSO — a JWT-shaped token, verified against the IdP.
+    //  2. Static (env) API keys — fully in-memory, constant-time.
+    //  3. DB-backed API keys — async lookup with a short TTL cache.
+    let principal: ResolvedPrincipal | null = null;
+    if (token && options?.verifyJwt && looksLikeJwt(token)) {
+      principal = await options.verifyJwt(token);
+    }
+    if (!principal) principal = findPrincipal(token, principals);
+    if (!principal && token && options?.resolveKey) {
+      principal = await options.resolveKey(token);
+    }
     if (!principal) {
       return sendError(
         reply,

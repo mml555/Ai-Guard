@@ -39,7 +39,8 @@ replace application authentication or authorization.
 
 ## Hardening recommendations
 
-- Use scoped `AI_GUARD_API_KEYS` with minimal `permissions`
+- Seed one bootstrap `keys:admin` key via `AI_GUARD_API_KEYS`; issue all other keys from the DB-backed key store so they can be rotated/revoked without a redeploy (only key hashes are stored, never plaintext)
+- Use scoped keys with minimal `permissions`, and set `expiresAt` for short-lived keys
 - Never commit `.env` or production secrets
 - Place the API behind a reverse proxy with TLS
 - Restrict Postgres to private networks
