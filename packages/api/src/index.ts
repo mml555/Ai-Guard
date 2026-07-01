@@ -215,6 +215,7 @@ async function main(): Promise<void> {
     apiKeys: env.apiKeys,
     keyResolver,
     jwtVerifier,
+    hierarchicalBudgets: env.HIERARCHICAL_BUDGETS === "true",
     idempotencyCaptureContent: env.IDEMPOTENCY_CAPTURE_CONTENT === "true",
     metrics: env.METRICS_ENABLED === "true",
     metricsAuthToken: env.METRICS_AUTH_TOKEN,

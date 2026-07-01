@@ -31,6 +31,7 @@ export interface ChatInput {
   inputTokensEstimate?: number;
   temperature?: number;
   stream?: boolean;
+  budgetNodeId?: string;
   projectId?: string;
   environment?: string;
   metadata?: Record<string, unknown>;

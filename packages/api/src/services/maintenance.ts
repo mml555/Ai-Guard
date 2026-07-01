@@ -6,6 +6,7 @@ import {
 } from "../modules/usage/auditLogRepo";
 import { cleanupStaleIdempotencyKeys } from "../modules/idempotency/repo";
 import { cleanupStaleReservationLeases } from "../modules/usage/reservationLeases";
+import { cleanupStaleNodeLeases } from "../modules/budgets/repo";
 
 const INTERVAL_MS = 60_000;
 // Distinct from the migration advisory lock key.
@@ -50,6 +51,15 @@ export function startMaintenance(opts: MaintenanceOptions): NodeJS.Timeout {
         Date.now(),
         opts.log,
       );
+
+      // Hierarchical-budget reservation leases (same TTL as the flat path).
+      const releasedNodeLeases = await cleanupStaleNodeLeases(
+        opts.pool,
+        opts.reservationStaleMs,
+      );
+      if (releasedNodeLeases > 0) {
+        opts.log?.info({ released: releasedNodeLeases }, "released stale budget node leases");
+      }
 
       const removedLogs = await cleanupOldRequestLogs(
         opts.pool,

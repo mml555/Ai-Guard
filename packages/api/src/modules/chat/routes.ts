@@ -10,6 +10,7 @@ import type { BudgetAlertWebhookConfig } from "../usage/budgetAlerts";
 import { requestHash, withIdempotency } from "../idempotency/service";
 import { chatBodyJsonSchema, chatBodySchema, chatSuccessJsonSchema, errorJsonSchema } from "./schemas";
 import { handleChat } from "./service";
+import { handleChatHierarchical } from "./hierarchical";
 import { prepareStream, releaseStream, settleStream } from "./stream";
 import type { ChatInput, ChatResult, ChatServiceDeps } from "./types";
 import type { FastifyReply, FastifyRequest } from "fastify";
@@ -23,6 +24,8 @@ export interface ChatRouteDeps {
   budgetAlert?: BudgetAlertWebhookConfig;
   /** When false, idempotency replays omit model completion text at rest. */
   idempotencyCaptureContent?: boolean;
+  /** Opt-in hierarchical (node-tree) budgets for requests carrying a budgetNodeId. */
+  hierarchicalBudgets?: boolean;
 }
 
 export function registerChatRoute(
@@ -80,8 +83,14 @@ export function registerChatRoute(
       return streamChat({ ...deps, log: request.log }, input, request, reply);
     }
 
+    // Hierarchical budgets (flag + a budgetNodeId from the request or the key)
+    // route to the node-tree path; otherwise the default flat path runs.
+    const leafNodeId = input.budgetNodeId ?? request.ctx.budgetNodeId;
+    const useHierarchical = Boolean(deps.hierarchicalBudgets && leafNodeId);
     const run = (): Promise<ChatResult> =>
-      handleChat({ ...deps, log: request.log }, input);
+      useHierarchical
+        ? handleChatHierarchical({ ...deps, log: request.log }, input, leafNodeId as string)
+        : handleChat({ ...deps, log: request.log }, input);
 
     let result: ChatResult;
     if (idempotencyKey) {

@@ -21,6 +21,10 @@ const baseEnvSchema = z.object({
   // the DB (seeding it from AI_GUARD_CONFIG on first run), instead of always
   // reading the file. Default false keeps file-based deploys unchanged.
   POLICY_STORE_ENABLED: z.enum(["true", "false"]).default("false"),
+  // Hierarchical (node-tree) budgets: when true, requests carrying a budgetNodeId
+  // (from the body or the API key) enforce budgets against the budget_nodes tree
+  // instead of the flat dimensions. Default false keeps the flat path.
+  HIERARCHICAL_BUDGETS: z.enum(["true", "false"]).default("false"),
   // Operator SSO (OIDC). When OIDC_ISSUER + OIDC_JWKS_URI are set, JWT bearer
   // tokens are verified against the IdP and mapped to operator roles.
   OIDC_ISSUER: z.string().url().optional(),

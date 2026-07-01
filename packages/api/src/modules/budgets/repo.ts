@@ -1,4 +1,4 @@
-import type { Pool } from "pg";
+import type { Pool, PoolClient } from "pg";
 import { withTransaction } from "../../db/pool";
 import { dayWindowStart, monthWindowStart } from "../../services/windows";
 
@@ -132,6 +132,54 @@ export interface PathReservation {
   entries: PathReservationEntry[];
   amountUsd: number;
   requestDelta: number;
+  /** Lease row id; deleted on settle/release, reconciled by the sweep if stranded. */
+  leaseId?: string;
+}
+
+export interface PathNodeUsage {
+  nodeId: string;
+  usedUsd: number;
+  reservedUsd: number;
+  requestsUsed: number;
+}
+
+/**
+ * Load per-node used/reserved/requests for a path at the given time (each node
+ * in its own window bucket). Nodes with no counter row yet report zeros. Feeds
+ * the pure `evaluateBudgetPath` pre-check.
+ */
+export async function loadPathSnapshot(
+  pool: Pool,
+  nodes: BudgetNode[],
+  now: Date,
+): Promise<Map<string, PathNodeUsage>> {
+  const out = new Map<string, PathNodeUsage>();
+  for (const n of nodes) out.set(n.id, { nodeId: n.id, usedUsd: 0, reservedUsd: 0, requestsUsed: 0 });
+  if (nodes.length === 0) return out;
+  const ids = nodes.map((n) => n.id);
+  const { rows } = await pool.query<{
+    node_id: string;
+    window_start: Date;
+    used_usd: string;
+    reserved_usd: string;
+    requests_used: number;
+  }>(
+    `SELECT node_id, window_start, used_usd, reserved_usd, requests_used
+     FROM budget_node_counters WHERE node_id = ANY($1::bigint[])`,
+    [ids],
+  );
+  const wantWindow = new Map(nodes.map((n) => [n.id, windowStartFor(n, now)]));
+  for (const r of rows) {
+    // A node counter row's window_start is a date; match the node's current bucket.
+    if (r.window_start.toISOString().slice(0, 10) !== wantWindow.get(r.node_id)) continue;
+    out.set(r.node_id, {
+      nodeId: r.node_id,
+      usedUsd: Number(r.used_usd),
+      reservedUsd: Number(r.reserved_usd),
+      requestsUsed: Number(r.requests_used),
+    });
+  }
+  return out;
 }
 
 export interface ReservePathResult {
@@ -182,7 +230,7 @@ export async function reservePath(
     windowStart: windowStartFor(n, params.now),
   }));
   try {
-    await withTransaction(
+    const leaseId = await withTransaction(
       pool,
       async (client) => {
         for (const node of ordered) {
@@ -197,48 +245,113 @@ export async function reservePath(
           ]);
           if (res.rowCount === 0) throw new NodeRejected(node.id);
         }
+        const lease = await client.query<{ id: string }>(
+          `INSERT INTO budget_node_leases (entries, amount_usd, request_delta)
+           VALUES ($1::jsonb, $2, $3) RETURNING id`,
+          [JSON.stringify(entries), params.estimatedCostUsd, requestDelta],
+        );
+        return lease.rows[0]?.id;
       },
       { lockTimeoutMs: LOCK_TIMEOUT_MS },
     );
-    return { ok: true, reservation: { entries, amountUsd: params.estimatedCostUsd, requestDelta } };
+    return {
+      ok: true,
+      reservation: { entries, amountUsd: params.estimatedCostUsd, requestDelta, leaseId },
+    };
   } catch (err) {
     if (err instanceof NodeRejected) return { ok: false, failedNodeId: err.nodeId };
     throw err;
   }
 }
 
-/** Settle a reservation: book actual cost as used and release the held estimate. */
+function orderEntries(entries: PathReservationEntry[]): PathReservationEntry[] {
+  return [...entries].sort((a, b) => (BigInt(a.nodeId) < BigInt(b.nodeId) ? -1 : 1));
+}
+
+async function settleEntries(
+  client: PoolClient,
+  entries: PathReservationEntry[],
+  amountUsd: number,
+  actualCostUsd: number,
+): Promise<void> {
+  for (const e of orderEntries(entries)) {
+    await client.query(
+      `UPDATE budget_node_counters
+         SET used_usd = used_usd + $3, reserved_usd = GREATEST(reserved_usd - $4, 0)
+       WHERE node_id = $1 AND window_start = $2`,
+      [e.nodeId, e.windowStart, actualCostUsd, amountUsd],
+    );
+  }
+}
+
+async function releaseEntries(
+  client: PoolClient,
+  entries: PathReservationEntry[],
+  amountUsd: number,
+  requestDelta: number,
+): Promise<void> {
+  for (const e of orderEntries(entries)) {
+    await client.query(
+      `UPDATE budget_node_counters
+         SET reserved_usd = GREATEST(reserved_usd - $3, 0),
+             requests_used = GREATEST(requests_used - $4, 0)
+       WHERE node_id = $1 AND window_start = $2`,
+      [e.nodeId, e.windowStart, amountUsd, requestDelta],
+    );
+  }
+}
+
+/** Settle a reservation: book actual cost as used, release the held estimate, drop the lease. */
 export async function settlePath(
   pool: Pool,
   reservation: PathReservation,
   actualCostUsd: number,
 ): Promise<void> {
-  const ordered = [...reservation.entries].sort((a, b) => (BigInt(a.nodeId) < BigInt(b.nodeId) ? -1 : 1));
   await withTransaction(pool, async (client) => {
-    for (const e of ordered) {
-      await client.query(
-        `UPDATE budget_node_counters
-           SET used_usd = used_usd + $3,
-               reserved_usd = GREATEST(reserved_usd - $4, 0)
-         WHERE node_id = $1 AND window_start = $2`,
-        [e.nodeId, e.windowStart, actualCostUsd, reservation.amountUsd],
-      );
+    await settleEntries(client, reservation.entries, reservation.amountUsd, actualCostUsd);
+    if (reservation.leaseId) {
+      await client.query("DELETE FROM budget_node_leases WHERE id = $1", [reservation.leaseId]);
     }
   }, { lockTimeoutMs: LOCK_TIMEOUT_MS });
 }
 
-/** Release a reservation (provider failure / client disconnect): free the hold. */
+/** Release a reservation (provider failure / client disconnect): free the hold, drop the lease. */
 export async function releasePath(pool: Pool, reservation: PathReservation): Promise<void> {
-  const ordered = [...reservation.entries].sort((a, b) => (BigInt(a.nodeId) < BigInt(b.nodeId) ? -1 : 1));
   await withTransaction(pool, async (client) => {
-    for (const e of ordered) {
-      await client.query(
-        `UPDATE budget_node_counters
-           SET reserved_usd = GREATEST(reserved_usd - $3, 0),
-               requests_used = GREATEST(requests_used - $4, 0)
-         WHERE node_id = $1 AND window_start = $2`,
-        [e.nodeId, e.windowStart, reservation.amountUsd, reservation.requestDelta],
-      );
+    await releaseEntries(client, reservation.entries, reservation.amountUsd, reservation.requestDelta);
+    if (reservation.leaseId) {
+      await client.query("DELETE FROM budget_node_leases WHERE id = $1", [reservation.leaseId]);
     }
+  }, { lockTimeoutMs: LOCK_TIMEOUT_MS });
+}
+
+/**
+ * Release path reservations whose lease is older than `staleMs` (worker crashed
+ * between reserve and settle). Mirrors the flat reservation-lease sweep. Runs in
+ * one transaction using SKIP LOCKED so replicas don't contend.
+ */
+export async function cleanupStaleNodeLeases(
+  pool: Pool,
+  staleMs: number,
+  now = Date.now(),
+): Promise<number> {
+  const cutoff = new Date(now - staleMs).toISOString();
+  return withTransaction(pool, async (client) => {
+    const { rows } = await client.query<{
+      id: string;
+      entries: PathReservationEntry[];
+      amount_usd: string;
+      request_delta: number;
+    }>(
+      `SELECT id::text, entries, amount_usd, request_delta
+       FROM budget_node_leases WHERE leased_at < $1::timestamptz
+       ORDER BY id FOR UPDATE SKIP LOCKED`,
+      [cutoff],
+    );
+    for (const row of rows) {
+      await releaseEntries(client, row.entries, Number(row.amount_usd), row.request_delta);
+      await client.query("DELETE FROM budget_node_leases WHERE id = $1", [row.id]);
+    }
+    return rows.length;
   }, { lockTimeoutMs: LOCK_TIMEOUT_MS });
 }

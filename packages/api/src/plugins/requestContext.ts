@@ -13,6 +13,9 @@ export interface RequestContext {
   readonly permissions?: readonly string[];
   readonly userId?: string;
   readonly orgId?: string;
+  readonly tenantId?: string;
+  /** Leaf budget node bound to the API key (hierarchical budgets). */
+  readonly budgetNodeId?: string;
 }
 
 declare module "fastify" {

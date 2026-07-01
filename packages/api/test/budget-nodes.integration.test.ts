@@ -33,7 +33,7 @@ describe.skipIf(!DATABASE_URL)("hierarchical budgets (integration)", () => {
     await pool.end();
   });
   beforeEach(async () => {
-    await pool.query("TRUNCATE budget_node_counters, budget_nodes RESTART IDENTITY CASCADE");
+    await pool.query("TRUNCATE budget_node_counters, budget_node_leases, budget_nodes RESTART IDENTITY CASCADE");
   });
 
   async function tree(orgCap: number | null): Promise<{ org: BudgetNode; team: BudgetNode; user: BudgetNode }> {

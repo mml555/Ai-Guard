@@ -207,6 +207,7 @@ export function buildServer(opts: BuildServerOptions): FastifyInstance {
     observability: opts.observability,
     budgetAlert: opts.budgetAlert,
     idempotencyCaptureContent: opts.idempotencyCaptureContent,
+    hierarchicalBudgets: opts.hierarchicalBudgets,
   });
 
   if (opts.metrics) {
