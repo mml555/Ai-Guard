@@ -1,0 +1,209 @@
+import { parse as parseYaml } from "yaml";
+import { z } from "zod";
+import { findUnpricedModels } from "./cost";
+import {
+  PolicyConfigError,
+  type AiGuardConfig,
+  type FeatureSafetyOverride,
+} from "./types";
+
+// ai-guard.yaml is authored in snake_case; we validate it and transform to the
+// camelCase AiGuardConfig the engine consumes. env/VAR resolution for provider
+// keys happens in the API layer, not here.
+
+const presetEnum = z.enum(["dev", "balanced", "strict", "custom"]);
+
+const protectSchema = z
+  .object({
+    pii: z.enum(["mask", "block", "off"]).optional(),
+    prompt_injection: z.enum(["block", "off"]).optional(),
+  })
+  .transform((p) => ({ pii: p.pii, promptInjection: p.prompt_injection }));
+
+const projectSchema = z
+  .object({
+    name: z.string(),
+    environment: z.string().default("development"),
+  })
+  .transform((p) => ({ name: p.name, environment: p.environment }));
+
+const providerSchema = z
+  .object({ api_key: z.string().optional() })
+  .transform((p) => ({ apiKey: p.api_key }));
+
+const globalBudgetSchema = z
+  .object({
+    monthly_usd: z.number().nonnegative(),
+    alert_at_percent: z.number().min(0).max(100).default(80),
+    hard_stop_at_percent: z.number().min(0).max(1000).default(100),
+  })
+  .transform((g) => ({
+    monthlyUsd: g.monthly_usd,
+    alertAtPercent: g.alert_at_percent,
+    hardStopAtPercent: g.hard_stop_at_percent,
+  }));
+
+const userTypeBudgetSchema = z
+  .object({
+    daily_usd: z.number().nonnegative(),
+    daily_requests: z.number().int().nonnegative(),
+    models: z.array(z.string()).min(1),
+  })
+  .transform((u) => ({
+    dailyUsd: u.daily_usd,
+    dailyRequests: u.daily_requests,
+    models: u.models,
+  }));
+
+const featureSafetySchema = z.union([
+  presetEnum,
+  z.object({ preset: presetEnum.optional(), protect: protectSchema.optional() }),
+]);
+
+const featureSchema = z
+  .object({
+    safety: featureSafetySchema.optional(),
+    model_class: z.string(),
+    max_tokens: z.number().int().positive(),
+    budget: z.object({ monthly_usd: z.number().nonnegative() }).optional(),
+  })
+  .transform((f) => ({
+    safety: normalizeFeatureSafety(f.safety),
+    modelClass: f.model_class,
+    maxTokens: f.max_tokens,
+    budget: f.budget ? { monthlyUsd: f.budget.monthly_usd } : undefined,
+  }));
+
+const modelClassSchema = z.object({
+  primary: z.string(),
+  fallback: z.string().optional(),
+});
+
+const routingSchema = z
+  .object({ degrade_at_percent: z.number().min(0).max(100).default(80) })
+  .transform((r) => ({ degradeAtPercent: r.degrade_at_percent }));
+
+const safetySchema = z
+  .object({
+    preset: presetEnum.default("balanced"),
+    protect: protectSchema.optional(),
+    injection_model: z.string().optional(),
+  })
+  .transform((s) => ({
+    preset: s.preset,
+    protect: s.protect ?? { pii: undefined, promptInjection: undefined },
+    injectionModel: s.injection_model,
+  }));
+
+const observabilitySchema = z.object({
+  provider: z.enum(["none", "langfuse"]).default("none"),
+});
+
+const configSchema = z
+  .object({
+    project: projectSchema,
+    providers: z.record(z.string(), providerSchema).default({}),
+    budgets: z
+      .object({
+        global: globalBudgetSchema,
+        by_user_type: z.record(z.string(), userTypeBudgetSchema),
+      })
+      .transform((b) => ({ global: b.global, byUserType: b.by_user_type })),
+    features: z.record(z.string(), featureSchema),
+    routing: routingSchema.optional(),
+    model_classes: z.record(z.string(), modelClassSchema),
+    safety: safetySchema.optional(),
+    observability: observabilitySchema.optional(),
+  })
+  .transform((c) => ({
+    project: c.project,
+    providers: c.providers,
+    budgets: c.budgets,
+    features: c.features,
+    routing: c.routing ?? { degradeAtPercent: 80 },
+    modelClasses: c.model_classes,
+    safety:
+      c.safety ?? {
+        preset: "balanced" as const,
+        protect: { pii: undefined, promptInjection: undefined },
+        injectionModel: undefined,
+      },
+    observability: c.observability ?? { provider: "none" as const },
+  }));
+
+function normalizeFeatureSafety(
+  s: z.infer<typeof featureSafetySchema> | undefined,
+): FeatureSafetyOverride | undefined {
+  if (s == null) return undefined;
+  if (typeof s === "string") return { preset: s };
+  return { preset: s.preset, protect: s.protect };
+}
+
+/** Validate cross-references that zod's per-field schema can't express. */
+function validateRefs(
+  config: AiGuardConfig,
+  options?: { strictPricing?: boolean },
+): void {
+  for (const [name, feature] of Object.entries(config.features)) {
+    if (!config.modelClasses[feature.modelClass]) {
+      throw new PolicyConfigError(
+        `feature '${name}' references unknown model_class '${feature.modelClass}'`,
+        "invalid_config",
+      );
+    }
+  }
+  for (const [userType, budget] of Object.entries(config.budgets.byUserType)) {
+    for (const cls of budget.models) {
+      if (!config.modelClasses[cls]) {
+        throw new PolicyConfigError(
+          `user_type '${userType}' permits unknown model_class '${cls}'`,
+          "invalid_config",
+        );
+      }
+    }
+  }
+
+  const unpriced = findUnpricedModels(config);
+  if (unpriced.length > 0) {
+    const detail = `model(s) missing from PRICE_TABLE (budget estimates use DEFAULT_PRICE): ${unpriced.join(", ")}`;
+    if (options?.strictPricing) {
+      throw new PolicyConfigError(detail, "unpriced_models");
+    }
+  }
+}
+
+/** Parse + validate a config object (already-loaded YAML/JSON). */
+export function parseConfigObject(
+  raw: unknown,
+  options?: { strictPricing?: boolean },
+): AiGuardConfig {
+  const result = configSchema.safeParse(raw);
+  if (!result.success) {
+    throw new PolicyConfigError(
+      `invalid ai-guard config: ${result.error.issues
+        .map((i) => `${i.path.join(".")}: ${i.message}`)
+        .join("; ")}`,
+      "invalid_config",
+    );
+  }
+  const config = result.data as AiGuardConfig;
+  validateRefs(config, options);
+  return config;
+}
+
+/** Parse + validate an ai-guard.yaml document from its text. */
+export function parseConfig(
+  yamlText: string,
+  options?: { strictPricing?: boolean },
+): AiGuardConfig {
+  let raw: unknown;
+  try {
+    raw = parseYaml(yamlText);
+  } catch (e) {
+    throw new PolicyConfigError(
+      `failed to parse YAML: ${(e as Error).message}`,
+      "invalid_yaml",
+    );
+  }
+  return parseConfigObject(raw, options);
+}

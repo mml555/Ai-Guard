@@ -1,0 +1,56 @@
+name: ci
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_DB: aiguard
+        ports:
+          - 55432:5432
+        options: >-
+          --health-cmd "pg_isready -U postgres"
+          --health-interval 5s
+          --health-timeout 3s
+          --health-retries 12
+    env:
+      DATABASE_URL: postgres://postgres:postgres@localhost:55432/aiguard
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 10.19.0
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile
+      - name: Audit production dependencies
+        run: pnpm audit --prod --audit-level high
+      - name: Wait for Postgres
+        run: npx wait-on tcp:localhost:55432 --timeout 60000
+      - run: pnpm generate-sdk-types
+      - name: Generated SDK types are committed
+        run: |
+          git diff --exit-code packages/sdk-typescript/src/generated/config-types.ts \
+            || (echo "::error::Run pnpm generate-sdk-types and commit the result" && exit 1)
+      - run: pnpm build
+      - run: pnpm typecheck
+      - run: pnpm lint
+      - run: pnpm test:coverage 2>&1 | tee /tmp/test.log
+      - name: Integration tests ran (not skipped)
+        run: |
+          if grep -E "↓ packages/api/test/(chat|usage|idempotency|reservationLeases)" /tmp/test.log; then
+            echo "::error::Integration tests were skipped — DATABASE_URL must be set in CI"
+            exit 1
+          fi
+      - run: pnpm --filter @ai-guard/api openapi:export
+      - name: API boot smoke test
+        run: bash scripts/smoke-ci.sh

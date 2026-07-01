@@ -1,0 +1,117 @@
+import {
+  roundUsd,
+  type AiRequest,
+  type BudgetRemaining,
+  type PolicyDecision,
+} from "@ai-guard/policy-engine";
+import type { ChatObservation } from "../../services/observability";
+import type { PolicyErrorContext } from "../../policyErrors";
+import type { ChatFailure, ChatSuccess } from "./types";
+
+export function fail(
+  status: number,
+  code: string,
+  details: Record<string, unknown>,
+  message?: string,
+  policy?: PolicyErrorContext,
+): ChatFailure {
+  return { ok: false, status, code, details, message, policy };
+}
+
+export function remainingAfter(
+  remaining: BudgetRemaining,
+  spentUsd: number,
+): BudgetRemaining {
+  return {
+    userDailyUsd: roundUsd(remaining.userDailyUsd - spentUsd),
+    featureMonthlyUsd:
+      remaining.featureMonthlyUsd === null
+        ? null
+        : roundUsd(remaining.featureMonthlyUsd - spentUsd),
+    globalMonthlyUsd:
+      remaining.globalMonthlyUsd === null
+        ? null
+        : roundUsd(remaining.globalMonthlyUsd - spentUsd),
+  };
+}
+
+export function chatSuccessBody(params: {
+  content: string;
+  model: string;
+  decision: "allow" | "degrade" | "fallback";
+  reason?: string;
+  inputTokens?: number;
+  outputTokens?: number;
+  estimatedCostUsd: number;
+  actualCostUsd: number;
+  budgetRemaining: BudgetRemaining;
+  piiMasked: boolean;
+  injectionBlocked: boolean;
+  requestId: string;
+}): ChatSuccess {
+  return {
+    ok: true,
+    body: {
+      message: { role: "assistant", content: params.content },
+      model: params.model,
+      decision: params.decision,
+      reason: params.reason,
+      usage: {
+        inputTokens: params.inputTokens ?? null,
+        outputTokens: params.outputTokens ?? null,
+      },
+      cost: {
+        estimatedUsd: params.estimatedCostUsd,
+        actualUsd: params.actualCostUsd,
+      },
+      budgetRemaining: remainingAfter(
+        params.budgetRemaining,
+        params.actualCostUsd,
+      ),
+      safety: {
+        piiMasked: params.piiMasked,
+        injectionBlocked: params.injectionBlocked,
+      },
+      requestId: params.requestId,
+    },
+  };
+}
+
+export function baseObs(
+  request: AiRequest,
+  decision: PolicyDecision,
+): ChatObservation {
+  return {
+    userId: request.userId,
+    feature: request.feature,
+    decision: decision.decision,
+    status: "ok",
+    estimatedCostUsd: decision.estimatedCostUsd,
+    traceTags: decision.traceTags,
+    projectId: request.projectId,
+    environment: request.environment,
+    hostMetadata: request.metadata,
+  };
+}
+
+export function baseLog(
+  request: AiRequest,
+  decision: PolicyDecision,
+  requestedModelClass?: string,
+) {
+  return {
+    projectId: request.projectId,
+    environment: request.environment,
+    userId: request.userId,
+    userType: request.userType,
+    feature: request.feature,
+    modelClass: decision.resolvedModelClass,
+    requestedModelClass: requestedModelClass ?? request.requestedModelClass,
+    resolvedModel: decision.resolvedModel,
+    decision: decision.decision,
+    estimatedCostUsd: decision.estimatedCostUsd,
+    reasonCode: decision.reasonCode,
+    traceTags: decision.traceTags,
+    hostMetadata: request.metadata,
+  };
+}

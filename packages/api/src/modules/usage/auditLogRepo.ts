@@ -1,0 +1,103 @@
+import type { Pool } from "pg";
+
+export interface RequestLogRow {
+  projectId?: string;
+  environment?: string;
+  userId: string;
+  userType: string;
+  feature: string;
+  modelClass?: string;
+  requestedModelClass?: string;
+  resolvedModel?: string;
+  decision: string;
+  status: "ok" | "failed" | "safety_blocked";
+  estimatedCostUsd?: number;
+  actualCostUsd?: number;
+  inputTokens?: number;
+  outputTokens?: number;
+  piiMasked?: boolean;
+  injectionBlocked?: boolean;
+  error?: string;
+  reasonCode?: string;
+  traceTags?: unknown;
+  safetyFindings?: unknown;
+  /** Host-app metadata from the chat request (non-authoritative). */
+  hostMetadata?: Record<string, unknown>;
+}
+
+export function formatAuditRequestId(id: number): string {
+  return `req_${id}`;
+}
+
+const LOG_SQL = `
+  INSERT INTO request_logs (
+    project_id, environment, user_id, user_type, feature, model_class,
+    requested_model_class, resolved_model, decision, status, estimated_cost_usd,
+    actual_cost_usd, input_tokens, output_tokens, pii_masked, injection_blocked,
+    error, reason_code, trace_tags, safety_findings, host_metadata
+  ) VALUES (
+    $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21
+  )
+  RETURNING id
+`;
+
+const RETENTION_SQL = `
+  DELETE FROM request_logs
+  WHERE id IN (
+    SELECT id FROM request_logs WHERE created_at < $1::timestamptz LIMIT $2
+  )
+`;
+
+/**
+ * Prune audit rows older than the retention window, in bounded batches so a
+ * large backlog doesn't hold a long lock. Returns the total number removed.
+ */
+export async function cleanupOldRequestLogs(
+  pool: Pool,
+  retentionMs: number,
+  now = Date.now(),
+  batchSize = 5000,
+): Promise<number> {
+  const cutoff = new Date(now - retentionMs).toISOString();
+  let total = 0;
+  for (;;) {
+    const res = await pool.query(RETENTION_SQL, [cutoff, batchSize]);
+    const removed = res.rowCount ?? 0;
+    total += removed;
+    if (removed < batchSize) break;
+  }
+  return total;
+}
+
+/** Append an audit-log row. Returns `req_<id>` when inserted; null on failure. */
+export async function logRequest(pool: Pool, row: RequestLogRow): Promise<string | null> {
+  try {
+    const res = await pool.query<{ id: string }>(LOG_SQL, [
+      row.projectId ?? null,
+      row.environment ?? null,
+      row.userId,
+      row.userType,
+      row.feature,
+      row.modelClass ?? null,
+      row.requestedModelClass ?? null,
+      row.resolvedModel ?? null,
+      row.decision,
+      row.status,
+      row.estimatedCostUsd ?? null,
+      row.actualCostUsd ?? null,
+      row.inputTokens ?? null,
+      row.outputTokens ?? null,
+      row.piiMasked ?? null,
+      row.injectionBlocked ?? null,
+      row.error ?? null,
+      row.reasonCode ?? null,
+      row.traceTags != null ? JSON.stringify(row.traceTags) : null,
+      row.safetyFindings != null ? JSON.stringify(row.safetyFindings) : null,
+      row.hostMetadata != null ? JSON.stringify(row.hostMetadata) : null,
+    ]);
+    const id = res.rows[0]?.id;
+    return id ? formatAuditRequestId(Number(id)) : null;
+  } catch {
+    return null;
+  }
+}

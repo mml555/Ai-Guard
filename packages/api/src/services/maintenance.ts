@@ -1,0 +1,70 @@
+import type { FastifyBaseLogger } from "fastify";
+import type { Pool } from "pg";
+import { cleanupOldRequestLogs } from "../modules/usage/auditLogRepo";
+import { cleanupStaleIdempotencyKeys } from "../modules/idempotency/repo";
+import { cleanupStaleReservationLeases } from "../modules/usage/reservationLeases";
+
+const INTERVAL_MS = 60_000;
+// Distinct from the migration advisory lock key.
+const MAINTENANCE_LOCK_KEY = 918_273_646;
+
+export interface MaintenanceOptions {
+  pool: Pool;
+  idempotencyStaleMs: number;
+  reservationStaleMs: number;
+  requestLogRetentionMs: number;
+  log?: FastifyBaseLogger;
+}
+
+export function startMaintenance(opts: MaintenanceOptions): NodeJS.Timeout {
+  const tick = async () => {
+    // Only one replica sweeps per tick. Every replica runs this timer, but a
+    // non-blocking advisory lock elects a single worker so the DB doesn't do N×
+    // the cleanup and N concurrent bulk DELETEs don't contend. Losers just skip.
+    const client = await opts.pool.connect();
+    let held = false;
+    try {
+      const { rows } = await client.query<{ ok: boolean }>(
+        "SELECT pg_try_advisory_lock($1) AS ok",
+        [MAINTENANCE_LOCK_KEY],
+      );
+      held = rows[0]?.ok === true;
+      if (!held) return;
+
+      const removedKeys = await cleanupStaleIdempotencyKeys(
+        opts.pool,
+        opts.idempotencyStaleMs,
+      );
+      if (removedKeys > 0) {
+        opts.log?.info({ removed: removedKeys }, "cleaned stale idempotency keys");
+      }
+
+      await cleanupStaleReservationLeases(
+        opts.pool,
+        opts.reservationStaleMs,
+        Date.now(),
+        opts.log,
+      );
+
+      const removedLogs = await cleanupOldRequestLogs(
+        opts.pool,
+        opts.requestLogRetentionMs,
+      );
+      if (removedLogs > 0) {
+        opts.log?.info({ removed: removedLogs }, "pruned old request_logs rows");
+      }
+    } catch (err) {
+      opts.log?.error({ err }, "maintenance tick failed");
+    } finally {
+      if (held) {
+        await client
+          .query("SELECT pg_advisory_unlock($1)", [MAINTENANCE_LOCK_KEY])
+          .catch(() => {});
+      }
+      client.release();
+    }
+  };
+
+  void tick();
+  return setInterval(() => void tick(), INTERVAL_MS);
+}
