@@ -13,6 +13,21 @@ the model call happens.
 
 ## Quick start
 
+**Add Ai-Guard to your app** (scaffolds config + compose + an example route for
+your framework, then a one-command smoke test):
+
+```bash
+npx create-ai-guard my-app        # asks: framework, feature template, provider, key
+cd my-app && docker compose up -d
+node scripts/smoke.mjs            # first guarded request → prints a requestId
+```
+
+Templates: `support_chat`, `document_extraction`, `admin_assistant`, `saas_tiers`,
+`event_intake`, `local_dev`, `general_gateway`. Frameworks: Next.js, Express,
+Fastify, FastAPI.
+
+**Or run the gateway from this repo:**
+
 ```bash
 make setup       # creates .env if needed, starts the stack, waits, smoke-tests
 ```

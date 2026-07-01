@@ -24,6 +24,8 @@ export interface BudgetNode {
   window: BudgetWindow;
   capUsd: number | null;
   requestCap: number | null;
+  /** >1 splits this node's counter into N shards, each with cap/N. */
+  shardCount: number;
 }
 
 interface NodeDbRow {
@@ -35,9 +37,10 @@ interface NodeDbRow {
   budget_window: BudgetWindow;
   cap_usd: string | null;
   request_cap: number | null;
+  shard_count: number;
 }
 
-const NODE_FIELDS = "id, tenant_id, parent_id, kind, name, budget_window, cap_usd, request_cap";
+const NODE_FIELDS = "id, tenant_id, parent_id, kind, name, budget_window, cap_usd, request_cap, shard_count";
 
 function rowToNode(r: NodeDbRow): BudgetNode {
   return {
@@ -49,7 +52,19 @@ function rowToNode(r: NodeDbRow): BudgetNode {
     window: r.budget_window,
     capUsd: r.cap_usd != null ? Number(r.cap_usd) : null,
     requestCap: r.request_cap,
+    shardCount: r.shard_count ?? 1,
   };
+}
+
+/** FNV-1a → shard index for a node. shardKey empty / shardCount<=1 → shard 0. */
+function shardFor(shardCount: number, shardKey: string): number {
+  if (shardCount <= 1 || !shardKey) return 0;
+  let h = 0x811c9dc5;
+  for (let i = 0; i < shardKey.length; i++) {
+    h ^= shardKey.charCodeAt(i);
+    h = Math.imul(h, 0x01000193);
+  }
+  return (h >>> 0) % shardCount;
 }
 
 export interface CreateNodeInput {
@@ -60,12 +75,13 @@ export interface CreateNodeInput {
   window?: BudgetWindow;
   capUsd?: number | null;
   requestCap?: number | null;
+  shardCount?: number;
 }
 
 export async function createNode(pool: Pool, input: CreateNodeInput): Promise<BudgetNode> {
   const { rows } = await pool.query<NodeDbRow>(
-    `INSERT INTO budget_nodes (tenant_id, parent_id, kind, name, budget_window, cap_usd, request_cap)
-     VALUES ($1, $2, $3, $4, $5, $6, $7)
+    `INSERT INTO budget_nodes (tenant_id, parent_id, kind, name, budget_window, cap_usd, request_cap, shard_count)
+     VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
      RETURNING ${NODE_FIELDS}`,
     [
       input.tenantId,
@@ -75,6 +91,7 @@ export async function createNode(pool: Pool, input: CreateNodeInput): Promise<Bu
       input.window ?? "monthly",
       input.capUsd ?? null,
       input.requestCap ?? null,
+      Math.max(1, input.shardCount ?? 1),
     ],
   );
   const row = rows[0];
@@ -126,6 +143,7 @@ function windowStartFor(node: BudgetNode, now: Date): string {
 export interface PathReservationEntry {
   nodeId: string;
   windowStart: string;
+  shard: number;
 }
 
 export interface PathReservation {
@@ -157,15 +175,18 @@ export async function loadPathSnapshot(
   for (const n of nodes) out.set(n.id, { nodeId: n.id, usedUsd: 0, reservedUsd: 0, requestsUsed: 0 });
   if (nodes.length === 0) return out;
   const ids = nodes.map((n) => n.id);
+  // Sum across shards so a sharded node reports its total spend for the window.
   const { rows } = await pool.query<{
     node_id: string;
     window_start: Date;
     used_usd: string;
     reserved_usd: string;
-    requests_used: number;
+    requests_used: string;
   }>(
-    `SELECT node_id, window_start, used_usd, reserved_usd, requests_used
-     FROM budget_node_counters WHERE node_id = ANY($1::bigint[])`,
+    `SELECT node_id, window_start,
+            SUM(used_usd) AS used_usd, SUM(reserved_usd) AS reserved_usd, SUM(requests_used) AS requests_used
+     FROM budget_node_counters WHERE node_id = ANY($1::bigint[])
+     GROUP BY node_id, window_start`,
     [ids],
   );
   const wantWindow = new Map(nodes.map((n) => [n.id, windowStartFor(n, now)]));
@@ -199,11 +220,11 @@ class NodeRejected extends Error {
 // WHERE guards a fresh window row; the ON CONFLICT DO UPDATE…WHERE guards an
 // existing row. rowCount 0 means the cap would be breached.
 const NODE_RESERVE_SQL = `
-  INSERT INTO budget_node_counters (node_id, window_start, used_usd, reserved_usd, requests_used)
-  SELECT $1, $2, 0, $3, $4
+  INSERT INTO budget_node_counters (node_id, window_start, shard, used_usd, reserved_usd, requests_used)
+  SELECT $1, $2, $7, 0, $3, $4
   WHERE ($5::numeric IS NULL OR $3::numeric <= $5::numeric)
     AND ($6::int IS NULL OR $4::int <= $6::int)
-  ON CONFLICT (node_id, window_start) DO UPDATE
+  ON CONFLICT (node_id, window_start, shard) DO UPDATE
     SET reserved_usd  = budget_node_counters.reserved_usd + EXCLUDED.reserved_usd,
         requests_used = budget_node_counters.requests_used + EXCLUDED.requests_used
     WHERE ($5::numeric IS NULL
@@ -221,13 +242,22 @@ const NODE_RESERVE_SQL = `
  */
 export async function reservePath(
   pool: Pool,
-  params: { nodes: BudgetNode[]; estimatedCostUsd: number; now: Date; requestDelta?: number },
+  params: {
+    nodes: BudgetNode[];
+    estimatedCostUsd: number;
+    now: Date;
+    requestDelta?: number;
+    /** Distributes load across a sharded node's shards (e.g. userId). */
+    shardKey?: string;
+  },
 ): Promise<ReservePathResult> {
   const requestDelta = params.requestDelta ?? 1;
+  const shardKey = params.shardKey ?? "";
   const ordered = [...params.nodes].sort((a, b) => (BigInt(a.id) < BigInt(b.id) ? -1 : 1));
   const entries: PathReservationEntry[] = ordered.map((n) => ({
     nodeId: n.id,
     windowStart: windowStartFor(n, params.now),
+    shard: shardFor(n.shardCount, shardKey),
   }));
   try {
     const leaseId = await withTransaction(
@@ -235,13 +265,22 @@ export async function reservePath(
       async (client) => {
         for (const node of ordered) {
           const windowStart = windowStartFor(node, params.now);
+          const shard = shardFor(node.shardCount, shardKey);
+          // Each shard gets an equal fraction of the node's cap.
+          const effectiveCap = node.capUsd != null && node.shardCount > 1
+            ? node.capUsd / node.shardCount
+            : node.capUsd;
+          const effectiveReqCap = node.requestCap != null && node.shardCount > 1
+            ? Math.floor(node.requestCap / node.shardCount)
+            : node.requestCap;
           const res = await client.query(NODE_RESERVE_SQL, [
             node.id,
             windowStart,
             params.estimatedCostUsd,
             requestDelta,
-            node.capUsd,
-            node.requestCap,
+            effectiveCap,
+            effectiveReqCap,
+            shard,
           ]);
           if (res.rowCount === 0) throw new NodeRejected(node.id);
         }
@@ -277,9 +316,9 @@ async function settleEntries(
   for (const e of orderEntries(entries)) {
     await client.query(
       `UPDATE budget_node_counters
-         SET used_usd = used_usd + $3, reserved_usd = GREATEST(reserved_usd - $4, 0)
-       WHERE node_id = $1 AND window_start = $2`,
-      [e.nodeId, e.windowStart, actualCostUsd, amountUsd],
+         SET used_usd = used_usd + $4, reserved_usd = GREATEST(reserved_usd - $5, 0)
+       WHERE node_id = $1 AND window_start = $2 AND shard = $3`,
+      [e.nodeId, e.windowStart, e.shard, actualCostUsd, amountUsd],
     );
   }
 }
@@ -293,10 +332,10 @@ async function releaseEntries(
   for (const e of orderEntries(entries)) {
     await client.query(
       `UPDATE budget_node_counters
-         SET reserved_usd = GREATEST(reserved_usd - $3, 0),
-             requests_used = GREATEST(requests_used - $4, 0)
-       WHERE node_id = $1 AND window_start = $2`,
-      [e.nodeId, e.windowStart, amountUsd, requestDelta],
+         SET reserved_usd = GREATEST(reserved_usd - $4, 0),
+             requests_used = GREATEST(requests_used - $5, 0)
+       WHERE node_id = $1 AND window_start = $2 AND shard = $3`,
+      [e.nodeId, e.windowStart, e.shard, amountUsd, requestDelta],
     );
   }
 }

@@ -1,5 +1,11 @@
 # Kubernetes deployment (sketch)
 
+> **Prefer the [Helm chart](../helm/ai-guard/README.md)** for a real install —
+> it templates the API (with a pre-upgrade migration hook), LiteLLM, Redis, and
+> optional Presidio/Postgres/Ingress from values, and is validated with
+> `helm lint` + `kubectl` client checks. These raw manifests are a minimal
+> reference for adapting by hand.
+
 Minimal manifests to run Ai-Guard on Kubernetes. Adapt namespaces, secrets, and image references for your cluster.
 
 ## Prerequisites

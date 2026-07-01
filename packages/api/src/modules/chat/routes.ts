@@ -26,6 +26,8 @@ export interface ChatRouteDeps {
   idempotencyCaptureContent?: boolean;
   /** Opt-in hierarchical (node-tree) budgets for requests carrying a budgetNodeId. */
   hierarchicalBudgets?: boolean;
+  /** Config identity stamped on every request log. */
+  policyMeta?: { configHash?: string; policyVersion?: string };
 }
 
 export function registerChatRoute(

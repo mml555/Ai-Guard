@@ -18,7 +18,7 @@ export function buildOpenApiDocument() {
     openapi: "3.0.3",
     info: {
       title: "Ai-Guard API",
-      version: "0.1.0",
+      version: "0.5.0",
     },
     paths: {
       "/health": {
@@ -308,6 +308,36 @@ export function buildOpenApiDocument() {
             401: { description: "Unauthorized", content: json(errorJsonSchema) },
             403: { description: "Forbidden", content: json(errorJsonSchema) },
             404: { description: "None active", content: json(errorJsonSchema) },
+          },
+        },
+      },
+      "/v1/admin/policy/preview": {
+        post: {
+          tags: ["admin"],
+          description: "Validate a proposed policy and diff it against the active version without saving. Requires policy:read.",
+          security: [{ bearerAuth: [] }],
+          responses: {
+            200: { description: "{ valid, diff } or { valid:false, error }" },
+            400: { description: "Invalid request", content: json(errorJsonSchema) },
+            401: { description: "Unauthorized", content: json(errorJsonSchema) },
+            403: { description: "Forbidden", content: json(errorJsonSchema) },
+          },
+        },
+      },
+      "/v1/admin/policy/versions/{id}/diff": {
+        get: {
+          tags: ["admin"],
+          description: "Diff a stored version against ?against=<id> or the active version. Requires policy:read.",
+          security: [{ bearerAuth: [] }],
+          parameters: [
+            { name: "id", in: "path", required: true, schema: { type: "string" } },
+            { name: "against", in: "query", schema: { type: "string" } },
+          ],
+          responses: {
+            200: { description: "{ from, to, diff }" },
+            401: { description: "Unauthorized", content: json(errorJsonSchema) },
+            403: { description: "Forbidden", content: json(errorJsonSchema) },
+            404: { description: "Not found", content: json(errorJsonSchema) },
           },
         },
       },

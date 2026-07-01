@@ -32,6 +32,11 @@ export function remainingAfter(
       remaining.globalMonthlyUsd === null
         ? null
         : roundUsd(remaining.globalMonthlyUsd - spentUsd),
+    // Token headroom is carried through (pre-settlement value) so clients can
+    // display it; null when the corresponding token cap is unset.
+    userDailyTokens: remaining.userDailyTokens ?? null,
+    featureMonthlyTokens: remaining.featureMonthlyTokens ?? null,
+    globalMonthlyTokens: remaining.globalMonthlyTokens ?? null,
   };
 }
 
@@ -94,10 +99,15 @@ export function baseObs(
   };
 }
 
+export interface PolicyMeta {
+  configHash?: string;
+  policyVersion?: string;
+}
+
 export function baseLog(
   request: AiRequest,
   decision: PolicyDecision,
-  requestedModelClass?: string,
+  meta?: PolicyMeta & { requestedModelClass?: string },
 ) {
   return {
     projectId: request.projectId,
@@ -106,12 +116,14 @@ export function baseLog(
     userType: request.userType,
     feature: request.feature,
     modelClass: decision.resolvedModelClass,
-    requestedModelClass: requestedModelClass ?? request.requestedModelClass,
+    requestedModelClass: meta?.requestedModelClass ?? request.requestedModelClass,
     resolvedModel: decision.resolvedModel,
     decision: decision.decision,
     estimatedCostUsd: decision.estimatedCostUsd,
     reasonCode: decision.reasonCode,
     traceTags: decision.traceTags,
     hostMetadata: request.metadata,
+    configHash: meta?.configHash,
+    policyVersion: meta?.policyVersion,
   };
 }

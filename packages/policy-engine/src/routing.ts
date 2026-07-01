@@ -1,9 +1,9 @@
 import type { AiGuardConfig } from "./types";
 
-// Boring v1 routing. Model-class tiers are ordered cheapest → most expensive.
-// "Degrade" means stepping DOWN to a cheaper tier. The set of class *names* is
-// open (user-defined), but the tier ordering follows this convention; unknown
-// names are treated as un-degradable.
+// Model-class tiers are ordered cheapest → most expensive. "Degrade" means
+// stepping DOWN to a cheaper tier. This built-in order is the default; a config
+// can override it with `routing.class_order`. Classes not in the effective
+// order are treated as un-degradable.
 export const CLASS_TIERS = ["cheap", "standard", "premium"] as const;
 
 /** Provider slug from a LiteLLM model string, e.g. "openai/gpt-4o-mini" -> "openai". */
@@ -46,10 +46,12 @@ export function nextPermittedCheaperClass(
   permitted: readonly string[],
   config: AiGuardConfig,
 ): string | null {
-  const idx = CLASS_TIERS.indexOf(current as (typeof CLASS_TIERS)[number]);
-  if (idx <= 0) return null; // already cheapest, or an unknown/un-tiered class
+  // Configurable order (cheapest → most expensive), else the built-in tiers.
+  const order: readonly string[] = config.routing.classOrder ?? CLASS_TIERS;
+  const idx = order.indexOf(current);
+  if (idx <= 0) return null; // already cheapest, or not in the ordering
   for (let i = idx - 1; i >= 0; i--) {
-    const candidate = CLASS_TIERS[i]!;
+    const candidate = order[i]!;
     if (permitted.includes(candidate) && config.modelClasses[candidate]) {
       return candidate;
     }

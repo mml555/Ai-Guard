@@ -54,6 +54,18 @@ export function estimateCostUsd(
   return roundUsd(cost);
 }
 
+/**
+ * Worst-case token estimate: assumed/declared input tokens plus the full
+ * maxOutputTokens. Mirrors estimateCostUsd so token reservations never
+ * under-book in-flight usage.
+ */
+export function estimateTokens(
+  inputTokensEstimate: number | undefined,
+  maxOutputTokens: number,
+): number {
+  return (inputTokensEstimate ?? DEFAULT_INPUT_TOKENS) + maxOutputTokens;
+}
+
 /** Models routed to local runtimes (Ollama, etc.) skip static price-table checks. */
 export function isPricingExemptModel(model: string): boolean {
   return (

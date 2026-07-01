@@ -95,6 +95,8 @@ export interface ApiKeyEnvPrincipal {
   allowedUserTypes?: readonly string[];
   allowedUserIds?: readonly string[];
   permissions?: readonly string[];
+  tenantId?: string;
+  budgetNodeId?: string;
 }
 
 const databaseEnvSchema = baseEnvSchema.pick({
@@ -203,6 +205,8 @@ function parseApiKeys(env: z.infer<typeof envSchema>): ApiKeyEnvPrincipal[] {
         allowedUserTypes: z.array(z.string().min(1)).optional(),
         allowedUserIds: z.array(z.string().min(1)).optional(),
         permissions: z.array(z.string().min(1)).optional(),
+        tenantId: z.string().min(1).optional(),
+        budgetNodeId: z.string().min(1).optional(),
       })
       .refine((p) => Boolean(p.key) || Boolean(p.keyHash), {
         message: "each API key needs either 'key' or 'keyHash'",

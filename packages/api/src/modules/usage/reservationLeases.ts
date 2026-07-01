@@ -8,7 +8,7 @@ import { releaseBudget } from "./repo";
 // otherwise the release below re-derives a Date and can target the wrong day's
 // counter (never freeing the reservation) in a non-UTC process timezone.
 const STALE_SELECT_SQL = `
-  SELECT id::text, project_id, user_id, feature, estimated_cost, caps,
+  SELECT id::text, project_id, user_id, feature, estimated_cost, estimated_tokens, caps,
          window_day::text AS window_day, window_month::text AS window_month
   FROM budget_reservation_leases
   WHERE leased_at < $1::timestamptz
@@ -29,6 +29,7 @@ export async function cleanupStaleReservationLeases(
     user_id: string;
     feature: string;
     estimated_cost: string;
+    estimated_tokens: string;
     caps: ReservationCaps;
     window_day: string;
     window_month: string;
@@ -41,6 +42,7 @@ export async function cleanupStaleReservationLeases(
       userId: row.user_id,
       feature: row.feature,
       estimatedCostUsd: Number(row.estimated_cost),
+      estimatedTokens: Number(row.estimated_tokens),
       caps: row.caps,
       now: new Date(`${row.window_day}T12:00:00.000Z`),
       windows: { day: row.window_day, month: row.window_month },

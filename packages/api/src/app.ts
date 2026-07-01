@@ -208,6 +208,7 @@ export function buildServer(opts: BuildServerOptions): FastifyInstance {
     budgetAlert: opts.budgetAlert,
     idempotencyCaptureContent: opts.idempotencyCaptureContent,
     hierarchicalBudgets: opts.hierarchicalBudgets,
+    policyMeta: opts.policyMeta,
   });
 
   if (opts.metrics) {

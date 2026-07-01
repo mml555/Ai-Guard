@@ -42,35 +42,56 @@ const META_FIELDS = "id, created_at, author, note, checksum, active, activated_a
  * (mapped to 400 by the caller) if the YAML doesn't parse/validate — an invalid
  * version can never enter the store.
  */
+const DEFAULT_TENANT = "default";
+
 export async function saveConfigVersion(
   pool: Pool,
-  input: { yaml: string; author?: string; note?: string },
+  input: { yaml: string; author?: string; note?: string; tenantId?: string },
 ): Promise<ConfigVersionRecord> {
   parseConfig(input.yaml); // throws on invalid config
   const checksum = createHash("sha256").update(input.yaml).digest("hex");
   const { rows } = await pool.query<ConfigVersionDbRow>(
-    `INSERT INTO config_versions (author, note, yaml_text, checksum)
-     VALUES ($1, $2, $3, $4)
+    `INSERT INTO config_versions (tenant_id, author, note, yaml_text, checksum)
+     VALUES ($1, $2, $3, $4, $5)
      RETURNING ${META_FIELDS}`,
-    [input.author ?? null, input.note ?? null, input.yaml, checksum],
+    [input.tenantId ?? DEFAULT_TENANT, input.author ?? null, input.note ?? null, input.yaml, checksum],
   );
   const row = rows[0];
   if (!row) throw new Error("config version insert returned no row");
   return rowToRecord(row);
 }
 
-export async function listConfigVersions(pool: Pool): Promise<ConfigVersionRecord[]> {
+export async function listConfigVersions(
+  pool: Pool,
+  tenantId: string = DEFAULT_TENANT,
+): Promise<ConfigVersionRecord[]> {
   const { rows } = await pool.query<ConfigVersionDbRow>(
-    `SELECT ${META_FIELDS} FROM config_versions ORDER BY id DESC`,
+    `SELECT ${META_FIELDS} FROM config_versions WHERE tenant_id = $1 ORDER BY id DESC`,
+    [tenantId],
   );
   return rows.map(rowToRecord);
 }
 
+/** Fetch a stored version's YAML by id (tenant-scoped). */
+export async function getConfigVersionYaml(
+  pool: Pool,
+  id: string,
+  tenantId: string = DEFAULT_TENANT,
+): Promise<string | null> {
+  const { rows } = await pool.query<{ yaml_text: string }>(
+    "SELECT yaml_text FROM config_versions WHERE id = $1 AND tenant_id = $2",
+    [id, tenantId],
+  );
+  return rows[0]?.yaml_text ?? null;
+}
+
 export async function getActiveConfigVersion(
   pool: Pool,
+  tenantId: string = DEFAULT_TENANT,
 ): Promise<{ record: ConfigVersionRecord; config: AiGuardConfig; yaml: string } | null> {
   const { rows } = await pool.query<ConfigVersionDbRow>(
-    `SELECT ${META_FIELDS}, yaml_text FROM config_versions WHERE active LIMIT 1`,
+    `SELECT ${META_FIELDS}, yaml_text FROM config_versions WHERE active AND tenant_id = $1 LIMIT 1`,
+    [tenantId],
   );
   const row = rows[0];
   if (!row || !row.yaml_text) return null;
@@ -86,21 +107,25 @@ export async function getActiveConfigVersion(
 export async function activateConfigVersion(
   pool: Pool,
   id: string,
+  expectedTenantId?: string,
 ): Promise<ConfigVersionRecord | null> {
   const client = await pool.connect();
   try {
     await client.query("BEGIN");
-    const target = await client.query<ConfigVersionDbRow>(
-      "SELECT yaml_text FROM config_versions WHERE id = $1 FOR UPDATE",
+    const target = await client.query<{ yaml_text: string; tenant_id: string }>(
+      "SELECT yaml_text, tenant_id FROM config_versions WHERE id = $1 FOR UPDATE",
       [id],
     );
     const yaml = target.rows[0]?.yaml_text;
-    if (!yaml) {
+    const tenantId = target.rows[0]?.tenant_id;
+    // Tenant isolation: a caller may only activate versions in its own tenant.
+    if (!yaml || !tenantId || (expectedTenantId != null && tenantId !== expectedTenantId)) {
       await client.query("ROLLBACK");
       return null;
     }
     parseConfig(yaml); // never activate an unparseable version
-    await client.query("UPDATE config_versions SET active = false WHERE active");
+    // Deactivate only this tenant's currently-active version.
+    await client.query("UPDATE config_versions SET active = false WHERE active AND tenant_id = $1", [tenantId]);
     const { rows } = await client.query<ConfigVersionDbRow>(
       `UPDATE config_versions SET active = true, activated_at = now()
        WHERE id = $1 RETURNING ${META_FIELDS}`,

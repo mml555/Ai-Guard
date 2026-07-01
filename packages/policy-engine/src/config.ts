@@ -36,11 +36,13 @@ const globalBudgetSchema = z
     monthly_usd: z.number().nonnegative(),
     alert_at_percent: z.number().min(0).max(100).default(80),
     hard_stop_at_percent: z.number().min(0).max(1000).default(100),
+    monthly_tokens: z.number().int().positive().optional(),
   })
   .transform((g) => ({
     monthlyUsd: g.monthly_usd,
     alertAtPercent: g.alert_at_percent,
     hardStopAtPercent: g.hard_stop_at_percent,
+    monthlyTokens: g.monthly_tokens,
   }));
 
 const userTypeBudgetSchema = z
@@ -48,11 +50,13 @@ const userTypeBudgetSchema = z
     daily_usd: z.number().nonnegative(),
     daily_requests: z.number().int().nonnegative(),
     models: z.array(z.string()).min(1),
+    daily_tokens: z.number().int().positive().optional(),
   })
   .transform((u) => ({
     dailyUsd: u.daily_usd,
     dailyRequests: u.daily_requests,
     models: u.models,
+    dailyTokens: u.daily_tokens,
   }));
 
 const featureSafetySchema = z.union([
@@ -65,7 +69,12 @@ const featureSchema = z
     safety: featureSafetySchema.optional(),
     model_class: z.string(),
     max_tokens: z.number().int().positive(),
-    budget: z.object({ monthly_usd: z.number().nonnegative() }).optional(),
+    budget: z
+      .object({
+        monthly_usd: z.number().nonnegative().optional(),
+        monthly_tokens: z.number().int().positive().optional(),
+      })
+      .optional(),
     data_sensitivity: z.string().optional(),
     retention_days: z.number().int().positive().optional(),
   })
@@ -73,7 +82,9 @@ const featureSchema = z
     safety: normalizeFeatureSafety(f.safety),
     modelClass: f.model_class,
     maxTokens: f.max_tokens,
-    budget: f.budget ? { monthlyUsd: f.budget.monthly_usd } : undefined,
+    budget: f.budget
+      ? { monthlyUsd: f.budget.monthly_usd, monthlyTokens: f.budget.monthly_tokens }
+      : undefined,
     dataSensitivity: f.data_sensitivity,
     retentionDays: f.retention_days,
   }));
@@ -94,8 +105,11 @@ const modelClassSchema = z.object({
 });
 
 const routingSchema = z
-  .object({ degrade_at_percent: z.number().min(0).max(100).default(80) })
-  .transform((r) => ({ degradeAtPercent: r.degrade_at_percent }));
+  .object({
+    degrade_at_percent: z.number().min(0).max(100).default(80),
+    class_order: z.array(z.string().min(1)).min(1).optional(),
+  })
+  .transform((r) => ({ degradeAtPercent: r.degrade_at_percent, classOrder: r.class_order }));
 
 const safetySchema = z
   .object({
@@ -176,6 +190,16 @@ function validateRefs(
           "invalid_config",
         );
       }
+    }
+  }
+
+  // routing.class_order entries must be defined model classes.
+  for (const cls of config.routing.classOrder ?? []) {
+    if (!config.modelClasses[cls]) {
+      throw new PolicyConfigError(
+        `routing.class_order references unknown model_class '${cls}'`,
+        "invalid_config",
+      );
     }
   }
 

@@ -115,7 +115,7 @@ export async function handleChat(
     });
     return recordRejection(
       { pool, observability },
-      { ...baseLog(aiRequest, decision), status: "failed", error: decision.reason, reasonCode: decision.reasonCode },
+      { ...baseLog(aiRequest, decision, deps.policyMeta), status: "failed", error: decision.reason, reasonCode: decision.reasonCode },
       { ...baseObs(aiRequest, decision), status: "blocked", reason: decision.reason },
       fail(
         403,
@@ -147,7 +147,7 @@ export async function handleChat(
       return recordRejection(
         { pool, observability },
         {
-          ...baseLog(aiRequest, decision),
+          ...baseLog(aiRequest, decision, deps.policyMeta),
           status: "safety_blocked",
           hostMetadata: body.metadata,
           piiMasked,
@@ -183,11 +183,15 @@ export async function handleChat(
     }
     throw err;
   }
+  // Reserve the model estimate PLUS the input-safety classifier cost already
+  // incurred above, so the reservation — not just settlement — accounts for
+  // safety spend and the cap can't be overshot by the classifier.
   const reservation = await reserveBudget(pool, {
     projectId: aiRequest.projectId,
     userId: aiRequest.userId,
     feature: aiRequest.feature,
-    estimatedCostUsd: decision.estimatedCostUsd,
+    estimatedCostUsd: decision.estimatedCostUsd + safetyCostUsd,
+    estimatedTokens: decision.estimatedTokens,
     caps: decision.reservationCaps,
     now,
   });
@@ -204,7 +208,7 @@ export async function handleChat(
     );
     return recordRejection(
       { pool, observability },
-      { ...baseLog(aiRequest, decision), status: "failed", error: reason, reasonCode: policy.reasonCode },
+      { ...baseLog(aiRequest, decision, deps.policyMeta), status: "failed", error: reason, reasonCode: policy.reasonCode },
       { ...baseObs(aiRequest, decision), status: "blocked", reason },
       fail(
         403,
@@ -223,8 +227,9 @@ export async function handleChat(
   let llm: LiteLLMChatResult;
   let usedModel = decision.resolvedModel;
   let finalDecision = decision.decision;
-  // Amount reserved against budget counters (may increase if we top up for fallback).
-  let reservedUsd = decision.estimatedCostUsd;
+  // Amount reserved against budget counters (may increase if we top up for
+  // fallback). Includes the input-safety cost booked into the reservation above.
+  let reservedUsd = decision.estimatedCostUsd + safetyCostUsd;
   // Best estimate of the call's cost when LiteLLM reports none. Updated to the
   // fallback model's estimate if we fall back, so we don't book the (possibly
   // cheaper) primary estimate for a call that actually ran on the fallback.
@@ -244,12 +249,15 @@ export async function handleChat(
           config,
           usage,
         });
-        if (fb.estimatedCostUsd > reservedUsd) {
+        // The fallback reservation must cover the fallback model estimate plus
+        // the same safety cost already reserved.
+        const fbReserve = fb.estimatedCostUsd + safetyCostUsd;
+        if (fbReserve > reservedUsd) {
           const topUp = await topUpBudget(pool, {
             projectId: aiRequest.projectId,
             userId: aiRequest.userId,
             feature: aiRequest.feature,
-            additionalCostUsd: fb.estimatedCostUsd - reservedUsd,
+            additionalCostUsd: fbReserve - reservedUsd,
             caps: decision.reservationCaps,
             now,
             leaseId,
@@ -260,6 +268,7 @@ export async function handleChat(
               userId: aiRequest.userId,
               feature: aiRequest.feature,
               estimatedCostUsd: reservedUsd,
+              estimatedTokens: decision.estimatedTokens,
               caps: decision.reservationCaps,
               now,
               leaseId,
@@ -285,7 +294,7 @@ export async function handleChat(
               policy,
             );
           }
-          reservedUsd = fb.estimatedCostUsd;
+          reservedUsd = fbReserve;
         }
         log?.warn(
           { primary: decision.resolvedModel, fallback: fb.resolvedModel },
@@ -310,6 +319,7 @@ export async function handleChat(
       userId: aiRequest.userId,
       feature: aiRequest.feature,
       estimatedCostUsd: reservedUsd,
+      estimatedTokens: decision.estimatedTokens,
       caps: decision.reservationCaps,
       now,
       leaseId,
@@ -324,7 +334,7 @@ export async function handleChat(
     return recordRejection(
       { pool, observability },
       {
-        ...baseLog(aiRequest, decision),
+        ...baseLog(aiRequest, decision, deps.policyMeta),
         resolvedModel: usedModel,
         decision: finalDecision,
         status: "failed",
@@ -345,6 +355,7 @@ export async function handleChat(
   // provider spend (injection classifier) — the reservation only covered the
   // model call, so the classifier cost is added on top so it is booked too.
   const actualCostUsd = (llm.actualCostUsd ?? costBasis) + safetyCostUsd;
+  const actualTokens = (llm.inputTokens ?? 0) + (llm.outputTokens ?? 0);
   try {
     await recordActualCost(pool, {
       projectId: aiRequest.projectId,
@@ -352,6 +363,8 @@ export async function handleChat(
       feature: aiRequest.feature,
       actualCostUsd,
       estimatedCostUsd: reservedUsd,
+      actualTokens,
+      estimatedTokens: decision.estimatedTokens,
       caps: decision.reservationCaps,
       now,
       leaseId,
@@ -386,6 +399,8 @@ export async function handleChat(
         feature: aiRequest.feature,
         actualCostUsd,
         estimatedCostUsd: reservedUsd,
+        actualTokens,
+        estimatedTokens: decision.estimatedTokens,
         caps: decision.reservationCaps,
         now,
         leaseId,
@@ -406,7 +421,7 @@ export async function handleChat(
       return recordRejection(
         { pool, observability },
         {
-          ...baseLog(aiRequest, decision),
+          ...baseLog(aiRequest, decision, deps.policyMeta),
           resolvedModel: usedModel,
           decision: finalDecision,
           status: "safety_blocked",
@@ -440,7 +455,7 @@ export async function handleChat(
     if (err instanceof SafetyServiceError) {
       log?.error({ err }, "output safety backend failure");
       await logRequest(pool, {
-        ...baseLog(aiRequest, decision),
+        ...baseLog(aiRequest, decision, deps.policyMeta),
         resolvedModel: usedModel,
         decision: finalDecision,
         status: "failed",
@@ -459,7 +474,7 @@ export async function handleChat(
   }
 
   const auditRequestId = await logRequest(pool, {
-    ...baseLog(aiRequest, decision),
+    ...baseLog(aiRequest, decision, deps.policyMeta),
     resolvedModel: usedModel,
     decision: finalDecision,
     status: "ok",

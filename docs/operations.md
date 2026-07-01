@@ -53,7 +53,13 @@ Or manually:
 docker compose -f docker-compose.production.yml --env-file .env.production up -d
 ```
 
-For Kubernetes, see [deploy/k8s/README.md](../deploy/k8s/README.md).
+For Kubernetes, use the **Helm chart** ([deploy/helm/ai-guard](../deploy/helm/ai-guard/README.md)) — it templates the API (with a pre-upgrade migration hook), LiteLLM, Redis, and optional Presidio/Postgres/Ingress from values. Raw manifests are also available in [deploy/k8s/README.md](../deploy/k8s/README.md).
+
+```bash
+helm install ai-guard ./deploy/helm/ai-guard -n ai-guard --create-namespace \
+  --set image.repository=ghcr.io/your-org/ai-guard-api --set image.tag=v0.5.0 \
+  --set secret.aiGuardApiKey=... --set secret.databaseUrl=postgres://...
+```
 
 ### 5. Verify
 

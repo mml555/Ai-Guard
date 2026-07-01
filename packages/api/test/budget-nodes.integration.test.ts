@@ -107,6 +107,37 @@ describe.skipIf(!DATABASE_URL)("hierarchical budgets (integration)", () => {
     expect(c.requests).toBe(0);
   });
 
+  it("shards a hot node: per-shard sub-cap enforced, total bounded, load spread", async () => {
+    // shardCount 3, cap $0.90 → each shard gets $0.30.
+    const org = await createNode(pool, { tenantId: "t", kind: "org", name: "o", capUsd: 0.9, shardCount: 3 });
+    const path = [org];
+
+    // (a) Same shardKey is confined to one shard → its $0.30 sub-cap.
+    const first = await reservePath(pool, { nodes: path, estimatedCostUsd: 0.3, now: NOW, shardKey: "same" });
+    const second = await reservePath(pool, { nodes: path, estimatedCostUsd: 0.3, now: NOW, shardKey: "same" });
+    expect(first.ok).toBe(true);
+    expect(second.ok).toBe(false); // 0.30 + 0.30 > 0.30 on that shard
+    expect(second.failedNodeId).toBe(org.id);
+  });
+
+  it("spreads across shards and never exceeds the total cap", async () => {
+    const org = await createNode(pool, { tenantId: "t", kind: "org", name: "o", capUsd: 1.0, shardCount: 4 });
+    // 20 distinct keys × $0.10; per-shard cap $0.25 admits 2 each (max 8 total).
+    await Promise.all(
+      Array.from({ length: 20 }, (_, i) =>
+        reservePath(pool, { nodes: [org], estimatedCostUsd: 0.1, now: NOW, shardKey: `user-${i}` }),
+      ),
+    );
+    const { rows } = await pool.query(
+      "SELECT shard, reserved_usd FROM budget_node_counters WHERE node_id = $1",
+      [org.id],
+    );
+    const total = rows.reduce((s, r) => s + Number(r.reserved_usd), 0);
+    expect(total).toBeLessThanOrEqual(1.0 + 1e-9); // never exceeds the org cap
+    expect(rows.length).toBeGreaterThan(1); // load spread across multiple shard rows
+    expect(total).toBeGreaterThan(0.25); // capacity beyond a single shard row
+  });
+
   it("uses per-node windows (daily vs monthly buckets)", async () => {
     const org = await createNode(pool, { tenantId: "t", kind: "org", name: "o", window: "monthly", capUsd: 10 });
     const user = await createNode(pool, { tenantId: "t", parentId: org.id, kind: "user", name: "u", window: "daily", capUsd: 5 });

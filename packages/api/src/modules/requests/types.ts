@@ -28,6 +28,11 @@ export interface RequestRecord {
   };
   /** Host-app metadata attached to the original chat call. */
   metadata?: Record<string, unknown>;
+  /** Which policy produced this decision. */
+  policy?: {
+    configHash?: string;
+    policyVersion?: string;
+  };
 }
 
 export interface RequestListQuery {

@@ -1,0 +1,140 @@
+# Ai-Guard Helm values. Turnkey k8s companion to the docker-compose scaffold.
+#
+# Minimum to install: set the image, an API key, and a DATABASE_URL (managed
+# Postgres recommended). LiteLLM + Redis run in-cluster by default; Presidio and
+# an in-cluster Postgres are opt-in.
+
+nameOverride: ""
+fullnameOverride: ""
+
+image:
+  repository: ghcr.io/ai-guard/ai-guard/ai-guard-api
+  tag: v0.5.0
+  pullPolicy: IfNotPresent
+
+api:
+  replicas: 2
+  # Extra env vars (name/value) appended to the API container.
+  extraEnv: []
+  metricsEnabled: true
+  idempotencyCaptureContent: false
+  observabilityCaptureContent: false
+  resources:
+    requests:
+      cpu: 100m
+      memory: 256Mi
+    limits:
+      memory: 512Mi
+  # Shared rate limits require Redis; the atomic budget reserve is the real
+  # spend guard regardless. When redis.enabled, REDIS_URL is wired automatically.
+  podAnnotations: {}
+
+# DB migrations run once as a pre-install/pre-upgrade Job hook (never N replicas
+# racing). Matches the "run one migrator on deploy" operations guidance.
+migrations:
+  enabled: true
+
+service:
+  type: ClusterIP
+  port: 3000
+
+ingress:
+  enabled: false
+  className: ""
+  annotations: {}
+  host: ai-guard.example.com
+  tls: false
+  tlsSecretName: ai-guard-tls
+
+# ── Secrets ────────────────────────────────────────────────────────────────
+# Provide an existingSecret (recommended: sync from Vault/CSI/Sealed Secrets),
+# OR let the chart create one from the values below. The secret carries the
+# API key, DATABASE_URL, LiteLLM master key, optional metrics token, and any
+# provider keys.
+secret:
+  existingSecret: ""
+  aiGuardApiKey: ""
+  databaseUrl: ""
+  litellmMasterKey: "sk-ai-guard-litellm"
+  metricsAuthToken: ""
+  # Provider keys consumed by LiteLLM (e.g. OPENAI_API_KEY, ANTHROPIC_API_KEY).
+  providerKeys: {}
+
+# ── Policy config (ai-guard.yaml) ────────────────────────────────────────────
+# Provide an existingConfigMap (key: ai-guard.yaml), OR inline it here.
+config:
+  existingConfigMap: ""
+  aiGuardYaml: |
+    project:
+      name: production
+      environment: production
+    budgets:
+      global:
+        monthly_usd: 500
+        alert_at_percent: 80
+        hard_stop_at_percent: 100
+      by_user_type:
+        logged_in:
+          daily_usd: 1
+          daily_requests: 100
+          models: ["cheap"]
+    features:
+      support_chat:
+        safety: balanced
+        model_class: cheap
+        max_tokens: 500
+    routing:
+      degrade_at_percent: 80
+    model_classes:
+      cheap:
+        primary: openai/gpt-4o-mini
+    safety:
+      preset: balanced
+      injection_model: openai/gpt-4o-mini
+    observability:
+      provider: none
+
+# ── LiteLLM (in-cluster by default) ──────────────────────────────────────────
+litellm:
+  enabled: true
+  image: ghcr.io/berriai/litellm:main-stable
+  # If disabled, point the API at an external LiteLLM here.
+  baseUrl: ""
+  resources:
+    requests:
+      cpu: 100m
+      memory: 256Mi
+    limits:
+      memory: 1Gi
+  # litellm_config.yaml — model_name must match ai-guard.yaml model_classes.
+  config: |
+    model_list:
+      - model_name: openai/gpt-4o-mini
+        litellm_params:
+          model: openai/gpt-4o-mini
+          api_key: os.environ/OPENAI_API_KEY
+    general_settings:
+      master_key: os.environ/LITELLM_MASTER_KEY
+    litellm_settings:
+      drop_params: true
+
+# ── Redis (shared rate limits across replicas) ───────────────────────────────
+redis:
+  enabled: true
+  image: redis:7-alpine
+  # External Redis URL when enabled=false (optional).
+  url: ""
+
+# ── Presidio (enable for balanced/strict safety enforcement) ─────────────────
+presidio:
+  enabled: false
+  analyzerImage: mcr.microsoft.com/presidio-analyzer:latest
+  anonymizerImage: mcr.microsoft.com/presidio-anonymizer:latest
+
+# ── In-cluster Postgres (DEV ONLY — use managed Postgres in production) ───────
+postgres:
+  enabled: false
+  image: postgres:16-alpine
+  password: postgres
+  database: aiguard
+  storage: 5Gi

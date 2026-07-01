@@ -11,6 +11,7 @@ import {
 } from "./services/rateLimitRedis";
 import type Redis from "ioredis";
 import { readFileSync } from "node:fs";
+import { createHash } from "node:crypto";
 import { resolveSafetyPlan } from "@ai-guard/policy-engine";
 import { createDbKeyResolver } from "./modules/keys/resolver";
 import { createOidcVerifier } from "./modules/authz/oidc";
@@ -103,6 +104,9 @@ async function main(): Promise<void> {
     throw new Error(`database unreachable at startup: ${redactError(err)}`);
   }
 
+  // Config identity stamped on every request log (which policy produced it).
+  let policyMeta: { configHash?: string; policyVersion?: string };
+
   // Dynamic policy store (opt-in): use the active DB version if present, else
   // seed it from AI_GUARD_CONFIG so the file becomes version 1. Applied at boot;
   // activating a new version is picked up by a rolling restart.
@@ -110,6 +114,7 @@ async function main(): Promise<void> {
     const active = await getActiveConfigVersion(pool);
     if (active) {
       config = active.config;
+      policyMeta = { configHash: active.record.checksum, policyVersion: active.record.id };
       console.log(`loaded active policy version ${active.record.id} from the config store`);
     } else {
       const seeded = await saveConfigVersion(pool, {
@@ -118,8 +123,15 @@ async function main(): Promise<void> {
         note: "seeded from AI_GUARD_CONFIG",
       });
       await activateConfigVersion(pool, seeded.id);
+      policyMeta = { configHash: seeded.checksum, policyVersion: seeded.id };
       console.log(`seeded policy store with version ${seeded.id} from AI_GUARD_CONFIG`);
     }
+  } else {
+    // File-based config: stamp a hash of the file so logs still identify it.
+    policyMeta = {
+      configHash: createHash("sha256").update(readFileSync(env.AI_GUARD_CONFIG, "utf8")).digest("hex"),
+      policyVersion: "file",
+    };
   }
 
   const litellm = createLiteLLMClient({
@@ -216,6 +228,7 @@ async function main(): Promise<void> {
     keyResolver,
     jwtVerifier,
     hierarchicalBudgets: env.HIERARCHICAL_BUDGETS === "true",
+    policyMeta,
     idempotencyCaptureContent: env.IDEMPOTENCY_CAPTURE_CONTENT === "true",
     metrics: env.METRICS_ENABLED === "true",
     metricsAuthToken: env.METRICS_AUTH_TOKEN,

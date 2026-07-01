@@ -2,6 +2,37 @@
 
 Get from zero to a guarded LLM call in under 5 minutes once Docker is running.
 
+## Fastest path — scaffold a project
+
+```bash
+npx create-ai-guard my-app
+```
+
+The wizard asks four things — **framework**, **AI feature (template)**,
+**provider**, and your **API key** — then generates everything you need:
+
+```text
+ai-guard.yaml   docker-compose.yml   litellm_config.yaml   .env
+scripts/smoke.mjs   + an example route & SDK client for your framework
+```
+
+Non-interactive (CI/scripts):
+
+```bash
+npx create-ai-guard my-app --template support_chat --framework nextjs --provider openai --yes
+cd my-app
+# set your provider key in .env, set the api image in docker-compose.yml
+docker compose up -d
+node scripts/smoke.mjs        # → prints a requestId on the first guarded call
+```
+
+**Templates:** `support_chat`, `document_extraction`, `admin_assistant`,
+`saas_tiers`, `event_intake`, `local_dev` (Ollama, no cloud key),
+`general_gateway`.
+**Frameworks:** `nextjs`, `express`, `fastify`, `fastapi`, `none`.
+
+The rest of this guide runs the gateway from the repo directly.
+
 ## Prerequisites
 
 - Docker and Docker Compose

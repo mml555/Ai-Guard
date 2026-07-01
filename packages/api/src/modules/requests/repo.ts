@@ -24,13 +24,16 @@ interface RequestLogDbRow {
   error: string | null;
   reason_code: string | null;
   host_metadata: Record<string, unknown> | null;
+  config_hash: string | null;
+  policy_version: string | null;
 }
 
 const SELECT_FIELDS = `
   id, created_at, project_id, environment, user_id, user_type, feature,
   model_class, requested_model_class, resolved_model, decision, status,
   estimated_cost_usd, actual_cost_usd, input_tokens, output_tokens,
-  pii_masked, injection_blocked,   error, reason_code, host_metadata
+  pii_masked, injection_blocked,   error, reason_code, host_metadata,
+  config_hash, policy_version
 `;
 
 export function parseRequestId(raw: string): number {
@@ -81,6 +84,10 @@ export function rowToRecord(row: RequestLogDbRow): RequestRecord {
       createdAt: row.created_at.toISOString(),
     },
     metadata: row.host_metadata ?? undefined,
+    policy: {
+      configHash: row.config_hash ?? undefined,
+      policyVersion: row.policy_version ?? undefined,
+    },
   };
 }
 

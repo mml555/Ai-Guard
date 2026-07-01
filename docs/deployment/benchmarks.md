@@ -214,3 +214,35 @@ Fill in on your hardware. **Do not ship these placeholders as real numbers.**
 See [operations metrics](../operations.md#metrics) for the exact metric names to
 scrape and [high-availability](./high-availability.md) to turn measured
 per-replica RPS into a replica count for your target load.
+
+---
+
+## Hierarchical budget reservation — counter sharding
+
+The single global/org counter is a throughput ceiling: every request contends on
+one row. Marking a hot node with `shard_count > 1` splits its counter into N rows
+(each with `cap/N`), spreading contention. Measure the effect with the bundled
+micro-benchmark:
+
+```bash
+DATABASE_URL=postgres://... npx tsx scripts/bench-node-reservation.ts
+# knobs: BENCH_OPS (default 2000), BENCH_CONCURRENCY (default 32)
+```
+
+It reserves against an unsharded node then a 16-shard node at fixed concurrency
+and reports ops/s + latency percentiles.
+
+**Local reference run** (2000 ops @ concurrency 32, single-box Postgres 16 —
+*not production RPS*, shown for the relative effect):
+
+| Scenario | Throughput | p50 | p95 | p99 |
+| --- | --- | --- | --- | --- |
+| Unsharded (1 row) | ~648 ops/s | 9 ms | 216 ms | 349 ms |
+| Sharded (16 rows) | ~2,140 ops/s | 13 ms | 31 ms | 46 ms |
+
+Sharding gave **~3.3× throughput and ~7× lower p95** here by removing the
+single-row lock convoy. Absolute numbers are hardware- and latency-bound (see the
+`TO BE MEASURED` targets above); re-run on your target infra. Note the tradeoff:
+per-shard sub-caps mean a skewed `shardKey` can reject on a hot shard while others
+have headroom — shard on a high-cardinality key (e.g. `userId`) and size N to your
+concurrency.

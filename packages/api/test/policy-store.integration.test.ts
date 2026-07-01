@@ -157,5 +157,82 @@ describe.skipIf(!DATABASE_URL)("dynamic policy store (integration)", () => {
       });
       expect(res.statusCode).toBe(403);
     });
+
+    it("previews a proposed config: validates + diffs against active without saving", async () => {
+      const server = app();
+      // Seed + activate v1.
+      const created = await server.inject({ method: "POST", url: "/v1/admin/policy/versions", headers: writer, payload: { yaml: VALID_YAML } });
+      await server.inject({ method: "POST", url: `/v1/admin/policy/versions/${created.json().id}/activate`, headers: writer });
+
+      // Preview v2 (raised global cap) — no save.
+      const preview = await server.inject({ method: "POST", url: "/v1/admin/policy/preview", headers: writer, payload: { yaml: VALID_YAML_V2 } });
+      expect(preview.statusCode).toBe(200);
+      expect(preview.json().valid).toBe(true);
+      const paths = preview.json().diff.map((d: { path: string }) => d.path);
+      expect(paths).toContain("budgets.global.monthly_usd");
+      // Preview did not create a new version.
+      const list = await server.inject({ method: "GET", url: "/v1/admin/policy/versions", headers: writer });
+      expect(list.json().items).toHaveLength(1);
+    });
+
+    it("preview reports invalid config without throwing", async () => {
+      const res = await app().inject({ method: "POST", url: "/v1/admin/policy/preview", headers: writer, payload: { yaml: INVALID_YAML } });
+      expect(res.statusCode).toBe(200);
+      expect(res.json().valid).toBe(false);
+      expect(res.json().error).toBeTruthy();
+    });
+
+    it("diffs one stored version against another", async () => {
+      const server = app();
+      const v1 = (await server.inject({ method: "POST", url: "/v1/admin/policy/versions", headers: writer, payload: { yaml: VALID_YAML } })).json().id;
+      const v2 = (await server.inject({ method: "POST", url: "/v1/admin/policy/versions", headers: writer, payload: { yaml: VALID_YAML_V2 } })).json().id;
+      const diff = await server.inject({ method: "GET", url: `/v1/admin/policy/versions/${v2}/diff?against=${v1}`, headers: writer });
+      expect(diff.statusCode).toBe(200);
+      expect(diff.json().diff.map((d: { path: string }) => d.path)).toContain("budgets.global.monthly_usd");
+    });
+  });
+
+  describe("tenant isolation", () => {
+    function tenantApp(): FastifyInstance {
+      return buildServer({
+        config,
+        pool,
+        litellm: { chat: async () => ({ content: "ok", model: "m", actualCostUsd: 0, raw: {} }) },
+        safety: new NoopGuard(),
+        observability: new NoopObservability(),
+        logger: false,
+        apiKeys: [
+          { name: "A", key: "a-key", permissions: ["policy:read", "policy:write"], tenantId: "tenant-a" },
+          { name: "B", key: "b-key", permissions: ["policy:read", "policy:write"], tenantId: "tenant-b" },
+        ],
+        keyResolver: createDbKeyResolver(pool, { cacheTtlMs: 1000 }),
+      });
+    }
+
+    it("scopes policy versions per tenant and blocks cross-tenant activation", async () => {
+      const server = tenantApp();
+      const created = await server.inject({
+        method: "POST",
+        url: "/v1/admin/policy/versions",
+        headers: { authorization: "Bearer a-key" },
+        payload: { yaml: VALID_YAML, note: "tenant A v1" },
+      });
+      expect(created.statusCode).toBe(201);
+      const idA = created.json().id as string;
+
+      // Tenant B cannot see tenant A's versions...
+      const listB = await server.inject({ method: "GET", url: "/v1/admin/policy/versions", headers: { authorization: "Bearer b-key" } });
+      expect(listB.json().items).toHaveLength(0);
+
+      // ...nor activate them (404, not a cross-tenant takeover).
+      const actB = await server.inject({ method: "POST", url: `/v1/admin/policy/versions/${idA}/activate`, headers: { authorization: "Bearer b-key" } });
+      expect(actB.statusCode).toBe(404);
+
+      // Tenant A sees and activates its own.
+      const listA = await server.inject({ method: "GET", url: "/v1/admin/policy/versions", headers: { authorization: "Bearer a-key" } });
+      expect(listA.json().items).toHaveLength(1);
+      const actA = await server.inject({ method: "POST", url: `/v1/admin/policy/versions/${idA}/activate`, headers: { authorization: "Bearer a-key" } });
+      expect(actA.statusCode).toBe(200);
+    });
   });
 });

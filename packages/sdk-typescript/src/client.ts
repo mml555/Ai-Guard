@@ -1,4 +1,4 @@
-import type { ChatRequest, ChatResponse, ExplainRequest, ExplainResponse } from "./types";
+import type { BudgetRemaining, ChatRequest, ChatResponse, ExplainRequest, ExplainResponse } from "./types";
 
 export interface AiGuardClientOptions {
   baseUrl: string;
@@ -13,13 +13,44 @@ export class AiGuardError extends Error {
   readonly status: number;
   readonly code: string;
   readonly body: unknown;
+  /** Stable machine-readable policy/safety reason, when present. */
+  readonly reasonCode?: string;
+  /** Audit-log id (`req_<n>`) when a request_logs row was written for this decision. */
+  readonly auditRequestId?: string;
+  /** Remaining budget headroom at decision time, when the API reports it. */
+  readonly budgetRemaining?: BudgetRemaining;
+  readonly feature?: string;
+  readonly userType?: string;
+  readonly resolvedModelClass?: string;
+
   constructor(status: number, code: string, body: unknown) {
     super(`ai-guard request failed (${status}): ${code}`);
     this.name = "AiGuardError";
     this.status = status;
     this.code = code;
     this.body = body;
+
+    const err = errorObject(body);
+    if (err) {
+      if (typeof err.reasonCode === "string") this.reasonCode = err.reasonCode;
+      if (typeof err.auditRequestId === "string") this.auditRequestId = err.auditRequestId;
+      if (err.budgetRemaining && typeof err.budgetRemaining === "object") {
+        this.budgetRemaining = err.budgetRemaining as BudgetRemaining;
+      }
+      if (typeof err.feature === "string") this.feature = err.feature;
+      if (typeof err.userType === "string") this.userType = err.userType;
+      if (typeof err.resolvedModelClass === "string") this.resolvedModelClass = err.resolvedModelClass;
+    }
   }
+}
+
+/** The `error` object from the API envelope, if present. */
+function errorObject(body: unknown): Record<string, unknown> | null {
+  if (body && typeof body === "object" && "error" in body) {
+    const e = (body as { error: unknown }).error;
+    if (e && typeof e === "object") return e as Record<string, unknown>;
+  }
+  return null;
 }
 
 /** Thrown on 403 policy_blocked / budget_exceeded. */

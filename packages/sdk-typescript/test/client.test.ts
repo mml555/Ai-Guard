@@ -83,6 +83,41 @@ describe("createAiGuardClient", () => {
     await expect(client.chat(baseRequest)).rejects.toBeInstanceOf(SafetyBlockedError);
   });
 
+  it("exposes typed fields on the thrown error", async () => {
+    const fetchImpl: typeof fetch = async () =>
+      jsonResponse(
+        {
+          error: {
+            code: "budget_exceeded",
+            message: "over budget",
+            reasonCode: "daily_budget_exceeded",
+            auditRequestId: "req_42",
+            budgetRemaining: { userDailyUsd: 0, featureMonthlyUsd: null, globalMonthlyUsd: 5 },
+            feature: "support_chat",
+            userType: "logged_in",
+            resolvedModelClass: "cheap",
+            details: {},
+            requestId: "abc",
+          },
+        },
+        403,
+      );
+    const client = createAiGuardClient({ baseUrl: "http://api", fetchImpl });
+    try {
+      await client.chat(baseRequest);
+      throw new Error("expected throw");
+    } catch (e) {
+      const err = e as PolicyBlockedError;
+      expect(err).toBeInstanceOf(PolicyBlockedError);
+      expect(err.reasonCode).toBe("daily_budget_exceeded");
+      expect(err.auditRequestId).toBe("req_42");
+      expect(err.budgetRemaining?.globalMonthlyUsd).toBe(5);
+      expect(err.feature).toBe("support_chat");
+      expect(err.userType).toBe("logged_in");
+      expect(err.resolvedModelClass).toBe("cheap");
+    }
+  });
+
   it("sends the Authorization header when an apiKey is set", async () => {
     let auth: string | null = null;
     const fetchImpl: typeof fetch = async (_url, init) => {

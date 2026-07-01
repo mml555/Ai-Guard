@@ -18,7 +18,10 @@ export type PolicyReasonCode =
   | "global_monthly_budget_exceeded"
   | "global_budget_degraded"
   | "provider_fallback"
-  | "data_sensitivity_not_permitted";
+  | "data_sensitivity_not_permitted"
+  | "daily_token_limit_reached"
+  | "feature_monthly_token_limit_reached"
+  | "global_monthly_token_limit_reached";
 
 // ── Parsed config (ai-guard.yaml) ───────────────────────────────────────────
 
@@ -36,6 +39,8 @@ export interface GlobalBudget {
   monthlyUsd: number;
   alertAtPercent: number;
   hardStopAtPercent: number;
+  /** Optional global monthly token cap (null/absent = no token limit). */
+  monthlyTokens?: number;
 }
 
 export interface UserTypeBudget {
@@ -43,10 +48,14 @@ export interface UserTypeBudget {
   dailyRequests: number;
   /** Model classes this user type is permitted to use. */
   models: string[];
+  /** Optional per-user daily token cap. */
+  dailyTokens?: number;
 }
 
 export interface FeatureBudget {
-  monthlyUsd: number;
+  monthlyUsd?: number;
+  /** Optional per-feature monthly token cap. */
+  monthlyTokens?: number;
 }
 
 export interface ProtectConfig {
@@ -95,6 +104,12 @@ export interface ModelClassConfig {
 
 export interface RoutingConfig {
   degradeAtPercent: number;
+  /**
+   * Model-class tier order, cheapest → most expensive. Degrade steps DOWN this
+   * order to the next permitted class. Defaults to the built-in
+   * `cheap → standard → premium` when omitted.
+   */
+  classOrder?: string[];
 }
 
 export interface AiGuardConfig {
@@ -141,6 +156,13 @@ export interface UsageSnapshot {
   featureMonthlyUsdReserved: number;
   globalMonthlyUsdUsed: number;
   globalMonthlyUsdReserved: number;
+  // Token counters (default 0 when the DB row predates token tracking).
+  userDailyTokensUsed?: number;
+  userDailyTokensReserved?: number;
+  featureMonthlyTokensUsed?: number;
+  featureMonthlyTokensReserved?: number;
+  globalMonthlyTokensUsed?: number;
+  globalMonthlyTokensReserved?: number;
 }
 
 export interface EvaluateInput {
@@ -166,6 +188,10 @@ export interface BudgetRemaining {
   featureMonthlyUsd: number | null;
   /** null when no global monthly cap is configured (monthly_usd: 0). */
   globalMonthlyUsd: number | null;
+  /** Token headroom; null when the corresponding token cap is unset. */
+  userDailyTokens?: number | null;
+  featureMonthlyTokens?: number | null;
+  globalMonthlyTokens?: number | null;
 }
 
 export interface TraceTags {
@@ -185,6 +211,10 @@ export interface ReservationCaps {
   featureMonthlyUsd: number | null;
   /** Already computed as monthlyUsd * hardStopAtPercent / 100. */
   globalMonthlyUsd: number | null;
+  /** Token caps (null/absent = no token limit on that dimension). */
+  userDailyTokens?: number | null;
+  featureMonthlyTokens?: number | null;
+  globalMonthlyTokens?: number | null;
 }
 
 export interface PolicyDecision {
@@ -200,6 +230,8 @@ export interface PolicyDecision {
   safetyPlan: SafetyPlan;
   maxOutputTokens: number;
   estimatedCostUsd: number;
+  /** Worst-case token estimate (input est + maxOutputTokens) — reserved upfront. */
+  estimatedTokens: number;
   budgetRemaining: BudgetRemaining;
   reservationCaps: ReservationCaps;
   traceTags: TraceTags;

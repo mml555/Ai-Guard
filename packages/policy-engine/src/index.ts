@@ -18,6 +18,7 @@ export {
 } from "./routing";
 export {
   estimateCostUsd,
+  estimateTokens,
   roundUsd,
   getModelPrice,
   PRICE_TABLE,

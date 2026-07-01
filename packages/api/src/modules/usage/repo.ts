@@ -40,6 +40,7 @@ interface Dimension {
   usdCap: number | null;
   reqCap: number | null;
   reqDelta: number;
+  tokenCap: number | null;
 }
 
 export interface ReserveParams {
@@ -47,6 +48,8 @@ export interface ReserveParams {
   userId: string;
   feature: string;
   estimatedCostUsd: number;
+  /** Worst-case token estimate reserved alongside cost (0 = no token tracking). */
+  estimatedTokens?: number;
   caps: ReservationCaps;
   now: Date;
 }
@@ -81,6 +84,7 @@ function dimensionsFor(
       usdCap: caps.userDailyUsd,
       reqCap: caps.userDailyRequests,
       reqDelta: 1,
+      tokenCap: caps.userDailyTokens ?? null,
     },
     {
       scope: "feature_monthly",
@@ -90,6 +94,7 @@ function dimensionsFor(
       usdCap: caps.featureMonthlyUsd,
       reqCap: null,
       reqDelta: 0,
+      tokenCap: caps.featureMonthlyTokens ?? null,
     },
     {
       scope: "global_monthly",
@@ -99,12 +104,13 @@ function dimensionsFor(
       usdCap: caps.globalMonthlyUsd,
       reqCap: null,
       reqDelta: 0,
+      tokenCap: caps.globalMonthlyTokens ?? null,
     },
   ];
 }
 
 const SNAPSHOT_SQL = `
-  SELECT scope, used_usd, reserved_usd, requests_used
+  SELECT scope, used_usd, reserved_usd, requests_used, used_tokens, reserved_tokens
   FROM budget_counters
   WHERE (scope = 'user_daily'      AND project_id = $1 AND key = $2 AND window_start = $3)
      OR (scope = 'feature_monthly' AND project_id = $1 AND key = $4 AND window_start = $5)
@@ -134,6 +140,12 @@ export async function loadUsageSnapshot(
     featureMonthlyUsdReserved: 0,
     globalMonthlyUsdUsed: 0,
     globalMonthlyUsdReserved: 0,
+    userDailyTokensUsed: 0,
+    userDailyTokensReserved: 0,
+    featureMonthlyTokensUsed: 0,
+    featureMonthlyTokensReserved: 0,
+    globalMonthlyTokensUsed: 0,
+    globalMonthlyTokensReserved: 0,
   };
 
   for (const row of rows as Array<{
@@ -141,19 +153,29 @@ export async function loadUsageSnapshot(
     used_usd: string;
     reserved_usd: string;
     requests_used: number;
+    used_tokens: string;
+    reserved_tokens: string;
   }>) {
     const used = Number(row.used_usd);
     const reserved = Number(row.reserved_usd);
+    const usedTokens = Number(row.used_tokens);
+    const reservedTokens = Number(row.reserved_tokens);
     if (row.scope === "user_daily") {
       snapshot.userDailyUsdUsed = used;
       snapshot.userDailyUsdReserved = reserved;
       snapshot.userDailyRequestsUsed = Number(row.requests_used);
+      snapshot.userDailyTokensUsed = usedTokens;
+      snapshot.userDailyTokensReserved = reservedTokens;
     } else if (row.scope === "feature_monthly") {
       snapshot.featureMonthlyUsdUsed = used;
       snapshot.featureMonthlyUsdReserved = reserved;
+      snapshot.featureMonthlyTokensUsed = usedTokens;
+      snapshot.featureMonthlyTokensReserved = reservedTokens;
     } else {
       snapshot.globalMonthlyUsdUsed = used;
       snapshot.globalMonthlyUsdReserved = reserved;
+      snapshot.globalMonthlyTokensUsed = usedTokens;
+      snapshot.globalMonthlyTokensReserved = reservedTokens;
     }
   }
   return snapshot;
@@ -166,17 +188,21 @@ export async function loadUsageSnapshot(
 // slip past the cap. On a fresh window "used + reserved" is 0, so the fresh-row
 // check is simply "this reservation alone <= cap".
 const RESERVE_SQL = `
-  INSERT INTO budget_counters (scope, project_id, key, window_start, used_usd, reserved_usd, requests_used)
-  SELECT $1, $2, $3, $4, 0, $5, $6
+  INSERT INTO budget_counters (scope, project_id, key, window_start, used_usd, reserved_usd, requests_used, used_tokens, reserved_tokens)
+  SELECT $1, $2, $3, $4, 0, $5, $6, 0, $9
   WHERE ($7::numeric IS NULL OR $5::numeric <= $7::numeric)
     AND ($8::int IS NULL OR $6::int <= $8::int)
+    AND ($10::bigint IS NULL OR $9::bigint <= $10::bigint)
   ON CONFLICT (scope, project_id, key, window_start) DO UPDATE
-    SET reserved_usd  = budget_counters.reserved_usd + EXCLUDED.reserved_usd,
-        requests_used = budget_counters.requests_used + EXCLUDED.requests_used
+    SET reserved_usd    = budget_counters.reserved_usd + EXCLUDED.reserved_usd,
+        requests_used   = budget_counters.requests_used + EXCLUDED.requests_used,
+        reserved_tokens = budget_counters.reserved_tokens + EXCLUDED.reserved_tokens
     WHERE ($7::numeric IS NULL
            OR budget_counters.used_usd + budget_counters.reserved_usd + EXCLUDED.reserved_usd <= $7::numeric)
       AND ($8::int IS NULL
            OR budget_counters.requests_used + EXCLUDED.requests_used <= $8::int)
+      AND ($10::bigint IS NULL
+           OR budget_counters.used_tokens + budget_counters.reserved_tokens + EXCLUDED.reserved_tokens <= $10::bigint)
   RETURNING reserved_usd
 `;
 
@@ -193,6 +219,7 @@ export async function reserveBudget(
   );
   const day = dims[0]!.windowStart;
   const month = dims[1]!.windowStart;
+  const estTokens = params.estimatedTokens ?? 0;
   try {
     const leaseId = await withTransaction(
       pool,
@@ -207,6 +234,8 @@ export async function reserveBudget(
             d.reqDelta,
             d.usdCap,
             d.reqCap,
+            estTokens,
+            d.tokenCap,
           ]);
           if (res.rowCount === 0) throw new ReservationRejected(d.scope);
         }
@@ -218,6 +247,7 @@ export async function reserveBudget(
           JSON.stringify(params.caps),
           day,
           month,
+          estTokens,
         ]);
         return lease.rows[0]?.id;
       },
@@ -262,6 +292,8 @@ export async function topUpBudget(
       pool,
       async (client) => {
         for (const d of dims) {
+          // Fallback top-up adds cost only; token estimate is unchanged
+          // (maxOutputTokens is feature-level), so token delta is 0.
           const res = await client.query(RESERVE_SQL, [
             d.scope,
             d.projectId,
@@ -271,6 +303,8 @@ export async function topUpBudget(
             0,
             d.usdCap,
             d.reqCap,
+            0,
+            d.tokenCap,
           ]);
           if (res.rowCount === 0) throw new ReservationRejected(d.scope);
         }
@@ -296,8 +330,10 @@ export async function topUpBudget(
 
 const RECORD_SQL = `
   UPDATE budget_counters
-  SET used_usd     = used_usd + $5::numeric,
-      reserved_usd = GREATEST(reserved_usd - $6::numeric, 0)
+  SET used_usd        = used_usd + $5::numeric,
+      reserved_usd    = GREATEST(reserved_usd - $6::numeric, 0),
+      used_tokens     = used_tokens + $7::bigint,
+      reserved_tokens = GREATEST(reserved_tokens - $8::bigint, 0)
   WHERE scope = $1 AND project_id = $2 AND key = $3 AND window_start = $4
 `;
 
@@ -309,6 +345,8 @@ export async function recordActualCost(
     feature: string;
     actualCostUsd: number;
     estimatedCostUsd: number;
+    actualTokens?: number;
+    estimatedTokens?: number;
     caps: ReservationCaps;
     now: Date;
     leaseId?: string;
@@ -332,6 +370,8 @@ export async function recordActualCost(
           d.windowStart,
           params.actualCostUsd,
           params.estimatedCostUsd,
+          params.actualTokens ?? 0,
+          params.estimatedTokens ?? 0,
         ]);
       }
       if (params.leaseId) {
@@ -344,15 +384,16 @@ export async function recordActualCost(
 
 const RELEASE_SQL = `
   UPDATE budget_counters
-  SET reserved_usd  = GREATEST(reserved_usd - $5::numeric, 0),
-      requests_used = GREATEST(requests_used - $6::int, 0)
+  SET reserved_usd    = GREATEST(reserved_usd - $5::numeric, 0),
+      requests_used   = GREATEST(requests_used - $6::int, 0),
+      reserved_tokens = GREATEST(reserved_tokens - $7::bigint, 0)
   WHERE scope = $1 AND project_id = $2 AND key = $3 AND window_start = $4
 `;
 
 const LEASE_INSERT_SQL = `
   INSERT INTO budget_reservation_leases
-    (project_id, user_id, feature, estimated_cost, caps, window_day, window_month)
-  VALUES ($1, $2, $3, $4, $5::jsonb, $6::date, $7::date)
+    (project_id, user_id, feature, estimated_cost, caps, window_day, window_month, estimated_tokens)
+  VALUES ($1, $2, $3, $4, $5::jsonb, $6::date, $7::date, $8::bigint)
   RETURNING id::text
 `;
 
@@ -365,6 +406,7 @@ export async function releaseBudget(
     userId: string;
     feature: string;
     estimatedCostUsd: number;
+    estimatedTokens?: number;
     caps: ReservationCaps;
     now: Date;
     windows?: WindowOverride;
@@ -390,6 +432,7 @@ export async function releaseBudget(
           d.windowStart,
           params.estimatedCostUsd,
           d.reqDelta,
+          params.estimatedTokens ?? 0,
         ]);
       }
       if (params.leaseId) {

@@ -1,4 +1,4 @@
-import { estimateCostUsd, roundUsd } from "./cost";
+import { estimateCostUsd, estimateTokens, roundUsd } from "./cost";
 import {
   nextPermittedCheaperClass,
   resolveModelInfo,
@@ -211,6 +211,47 @@ export function evaluateAiRequest(input: EvaluateInput): PolicyDecision {
     }
   }
 
+  // ── Token gates (block on any breach) ──────────────────────────────────────
+  // Worst-case token estimate reserved just like cost; enforced only where a
+  // token cap is configured.
+  const estTokens = estimateTokens(request.inputTokensEstimate, safetyPlan.maxOutputTokens);
+
+  const userTokenCap = userBudget.dailyTokens ?? null;
+  if (userTokenCap !== null &&
+      (usage.userDailyTokensUsed ?? 0) + (usage.userDailyTokensReserved ?? 0) + estTokens > userTokenCap) {
+    return buildDecision(ctx, {
+      decision: "block",
+      reasonCode: "daily_token_limit_reached",
+      reason: `user daily token limit reached (cap ${userTokenCap})`,
+      effectiveClass,
+      useFallback: false,
+    });
+  }
+
+  const featureTokenCap = feature.budget?.monthlyTokens ?? null;
+  if (featureTokenCap !== null &&
+      (usage.featureMonthlyTokensUsed ?? 0) + (usage.featureMonthlyTokensReserved ?? 0) + estTokens > featureTokenCap) {
+    return buildDecision(ctx, {
+      decision: "block",
+      reasonCode: "feature_monthly_token_limit_reached",
+      reason: `feature monthly token limit reached (cap ${featureTokenCap})`,
+      effectiveClass,
+      useFallback: false,
+    });
+  }
+
+  const globalTokenCap = global.monthlyTokens ?? null;
+  if (globalTokenCap !== null &&
+      (usage.globalMonthlyTokensUsed ?? 0) + (usage.globalMonthlyTokensReserved ?? 0) + estTokens > globalTokenCap) {
+    return buildDecision(ctx, {
+      decision: "block",
+      reasonCode: "global_monthly_token_limit_reached",
+      reason: `global monthly token limit reached (cap ${globalTokenCap})`,
+      effectiveClass,
+      useFallback: false,
+    });
+  }
+
   // ── Allowed (possibly degraded) ────────────────────────────────────────────
   return buildDecision(ctx, {
     decision: degraded ? "degrade" : "allow",
@@ -280,6 +321,7 @@ function buildDecision(ctx: BuildCtx, args: BuildArgs): PolicyDecision {
     ctx.inputTokensEstimate,
     safetyPlan.maxOutputTokens,
   );
+  const estimatedTokens = estimateTokens(ctx.inputTokensEstimate, safetyPlan.maxOutputTokens);
 
   const global: GlobalBudget = config.budgets.global;
   const globalCap =
@@ -294,11 +336,21 @@ function buildDecision(ctx: BuildCtx, args: BuildArgs): PolicyDecision {
   const globalSpend =
     usage.globalMonthlyUsdUsed + usage.globalMonthlyUsdReserved;
 
+  const userTokenCap = userBudget.dailyTokens ?? null;
+  const featureTokenCap = feature.budget?.monthlyTokens ?? null;
+  const globalTokenCap = global.monthlyTokens ?? null;
+  const userTokens = (usage.userDailyTokensUsed ?? 0) + (usage.userDailyTokensReserved ?? 0);
+  const featureTokens = (usage.featureMonthlyTokensUsed ?? 0) + (usage.featureMonthlyTokensReserved ?? 0);
+  const globalTokens = (usage.globalMonthlyTokensUsed ?? 0) + (usage.globalMonthlyTokensReserved ?? 0);
+
   const budgetRemaining: BudgetRemaining = {
     userDailyUsd: roundUsd(userBudget.dailyUsd - userDailySpend),
     featureMonthlyUsd:
       featureCap !== null ? roundUsd(featureCap - featureSpend) : null,
     globalMonthlyUsd: globalCap !== null ? roundUsd(globalCap - globalSpend) : null,
+    userDailyTokens: userTokenCap !== null ? userTokenCap - userTokens : null,
+    featureMonthlyTokens: featureTokenCap !== null ? featureTokenCap - featureTokens : null,
+    globalMonthlyTokens: globalTokenCap !== null ? globalTokenCap - globalTokens : null,
   };
 
   const reservationCaps: ReservationCaps = {
@@ -306,6 +358,9 @@ function buildDecision(ctx: BuildCtx, args: BuildArgs): PolicyDecision {
     userDailyRequests: userBudget.dailyRequests,
     featureMonthlyUsd: featureCap,
     globalMonthlyUsd: globalCap,
+    userDailyTokens: userTokenCap,
+    featureMonthlyTokens: featureTokenCap,
+    globalMonthlyTokens: globalTokenCap,
   };
 
   return {
@@ -320,6 +375,7 @@ function buildDecision(ctx: BuildCtx, args: BuildArgs): PolicyDecision {
     safetyPlan,
     maxOutputTokens: safetyPlan.maxOutputTokens,
     estimatedCostUsd,
+    estimatedTokens,
     budgetRemaining,
     reservationCaps,
     traceTags: {

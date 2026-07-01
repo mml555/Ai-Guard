@@ -43,6 +43,8 @@ const sampleRow = {
   error: "model_class 'standard' is not permitted for user_type 'logged_in'",
   reason_code: "model_class_not_permitted",
   host_metadata: { app: "jewgo", eventDraftId: "draft_1" },
+  config_hash: "abc123",
+  policy_version: "file",
 };
 
 function poolWithRows() {

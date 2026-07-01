@@ -139,6 +139,29 @@ describe.skipIf(!DATABASE_URL)("hierarchical budgets — /v1/chat (integration)"
     expect((await nodeCounter(org.id)).used).toBe(0); // node tree untouched
   });
 
+  it("bills the key-bound budgetNodeId when the request omits it", async () => {
+    const { org, user } = await tree(10);
+    // A key bound to the team/user node — the client sends no budgetNodeId.
+    const server = buildServer({
+      config,
+      pool,
+      litellm: okLiteLLM,
+      safety: new NoopGuard(),
+      observability: new NoopObservability(),
+      logger: false,
+      apiKeys: [{ name: "team-key", key: "tk", permissions: ["chat:create"], tenantId: "acme", budgetNodeId: user.id }],
+      hierarchicalBudgets: true,
+    });
+    const res = await server.inject({
+      method: "POST",
+      url: "/v1/chat",
+      headers: { authorization: "Bearer tk" },
+      payload: { userId: "u1", userType: "logged_in", feature: "support_chat", messages: [{ role: "user", content: "hi" }], inputTokensEstimate: BIG_INPUT },
+    });
+    expect(res.statusCode).toBe(200);
+    expect((await nodeCounter(org.id)).used).toBeCloseTo(0.15, 4); // key's node was billed
+  });
+
   it("ignores the node path when the flag is off", async () => {
     const { org, user } = await tree(0.01);
     const res = await post(app(okLiteLLM, false), user.id); // flag off

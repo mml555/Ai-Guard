@@ -74,7 +74,7 @@ export async function handleChatHierarchical(
     throw err;
   }
   if (decision.decision === "block" && decision.reasonCode && HONORED_BLOCKS.has(decision.reasonCode)) {
-    await logRequest(pool, { ...baseLog(aiRequest, decision), status: "failed", error: decision.reason, reasonCode: decision.reasonCode });
+    await logRequest(pool, { ...baseLog(aiRequest, decision, deps.policyMeta), status: "failed", error: decision.reason, reasonCode: decision.reasonCode });
     observability.recordChat({ ...baseObs(aiRequest, decision), status: "blocked", reason: decision.reason });
     return fail(403, "policy_blocked", { reason: decision.reason, reasonCode: decision.reasonCode }, decision.reason);
   }
@@ -92,7 +92,7 @@ export async function handleChatHierarchical(
   });
   const preCheck = evaluateBudgetPath({ path: pathNodes, estimatedCostUsd: decision.estimatedCostUsd });
   if (preCheck.decision === "block") {
-    await logRequest(pool, { ...baseLog(aiRequest, decision), status: "failed", error: preCheck.reason, reasonCode: "global_monthly_budget_exceeded" });
+    await logRequest(pool, { ...baseLog(aiRequest, decision, deps.policyMeta), status: "failed", error: preCheck.reason, reasonCode: "global_monthly_budget_exceeded" });
     observability.recordChat({ ...baseObs(aiRequest, decision), status: "blocked", reason: preCheck.reason });
     return fail(403, "budget_exceeded", { scope: "budget_node", failedNodeId: preCheck.failedNodeId, reason: preCheck.reason }, preCheck.reason);
   }
@@ -109,7 +109,7 @@ export async function handleChatHierarchical(
     injectionBlocked = s.injectionBlocked;
     safetyCostUsd = s.safetyCostUsd;
     if (s.action === "block") {
-      await logRequest(pool, { ...baseLog(aiRequest, decision), status: "safety_blocked", piiMasked, injectionBlocked, safetyFindings: s.findings, error: s.blockReason });
+      await logRequest(pool, { ...baseLog(aiRequest, decision, deps.policyMeta), status: "safety_blocked", piiMasked, injectionBlocked, safetyFindings: s.findings, error: s.blockReason });
       observability.recordChat({ ...baseObs(aiRequest, decision), status: "safety_blocked", reason: s.blockReason, piiMasked, injectionBlocked });
       return fail(403, "safety_blocked", { reason: s.blockReason, findings: s.findings });
     }
@@ -122,10 +122,11 @@ export async function handleChatHierarchical(
   }
 
   // Atomic reservation against the path.
-  const reservation = await reservePath(pool, { nodes, estimatedCostUsd: decision.estimatedCostUsd, now });
+  // Reserve model estimate + the input-safety cost already incurred.
+  const reservation = await reservePath(pool, { nodes, estimatedCostUsd: decision.estimatedCostUsd + safetyCostUsd, now, shardKey: body.userId });
   if (!reservation.ok || !reservation.reservation) {
     const reason = `budget_exceeded:node:${reservation.failedNodeId}`;
-    await logRequest(pool, { ...baseLog(aiRequest, decision), status: "failed", error: reason, reasonCode: "global_monthly_budget_exceeded" });
+    await logRequest(pool, { ...baseLog(aiRequest, decision, deps.policyMeta), status: "failed", error: reason, reasonCode: "global_monthly_budget_exceeded" });
     observability.recordChat({ ...baseObs(aiRequest, decision), status: "blocked", reason });
     return fail(403, "budget_exceeded", { scope: "budget_node", failedNodeId: reservation.failedNodeId }, reason);
   }
@@ -156,7 +157,7 @@ export async function handleChatHierarchical(
     await releasePath(pool, held);
     const code = err instanceof LiteLLMClientError ? "upstream_rejected" : "provider_unavailable";
     const message = err instanceof LiteLLMClientError ? "Upstream rejected request" : "Provider unavailable";
-    await logRequest(pool, { ...baseLog(aiRequest, decision), resolvedModel: usedModel, decision: finalDecision, status: "failed", error: (err as Error).message });
+    await logRequest(pool, { ...baseLog(aiRequest, decision, deps.policyMeta), resolvedModel: usedModel, decision: finalDecision, status: "failed", error: (err as Error).message });
     observability.recordChat({ ...baseObs(aiRequest, decision), decision: finalDecision, status: "error", reason: (err as Error).message });
     return fail(502, code, {}, message);
   }
@@ -176,7 +177,7 @@ export async function handleChatHierarchical(
   try {
     const out = await safety.inspectOutput(content, decision.safetyPlan);
     if (out.action === "block") {
-      await logRequest(pool, { ...baseLog(aiRequest, decision), resolvedModel: usedModel, decision: finalDecision, status: "safety_blocked", actualCostUsd, inputTokens: llm.inputTokens, outputTokens: llm.outputTokens, piiMasked, injectionBlocked, safetyFindings: out.findings, error: out.blockReason });
+      await logRequest(pool, { ...baseLog(aiRequest, decision, deps.policyMeta), resolvedModel: usedModel, decision: finalDecision, status: "safety_blocked", actualCostUsd, inputTokens: llm.inputTokens, outputTokens: llm.outputTokens, piiMasked, injectionBlocked, safetyFindings: out.findings, error: out.blockReason });
       observability.recordChat({ ...baseObs(aiRequest, decision), decision: finalDecision, status: "safety_blocked", model: usedModel, reason: out.blockReason, actualCostUsd, piiMasked, injectionBlocked });
       return fail(403, "safety_blocked", { reason: out.blockReason, findings: out.findings });
     }
@@ -185,13 +186,13 @@ export async function handleChatHierarchical(
   } catch (err) {
     if (err instanceof SafetyServiceError) {
       log?.error({ err }, "output safety backend failure (hierarchical)");
-      await logRequest(pool, { ...baseLog(aiRequest, decision), resolvedModel: usedModel, decision: finalDecision, status: "failed", actualCostUsd, error: "output_safety_unavailable" });
+      await logRequest(pool, { ...baseLog(aiRequest, decision, deps.policyMeta), resolvedModel: usedModel, decision: finalDecision, status: "failed", actualCostUsd, error: "output_safety_unavailable" });
       return { ...fail(503, "safety_unavailable", {}, "Safety service unavailable"), retryable: false };
     }
     throw err;
   }
 
-  const requestId = await logRequest(pool, { ...baseLog(aiRequest, decision), resolvedModel: usedModel, decision: finalDecision, status: "ok", actualCostUsd, inputTokens: llm.inputTokens, outputTokens: llm.outputTokens, piiMasked, injectionBlocked, traceTags: { ...decision.traceTags, policyDecision: finalDecision } });
+  const requestId = await logRequest(pool, { ...baseLog(aiRequest, decision, deps.policyMeta), resolvedModel: usedModel, decision: finalDecision, status: "ok", actualCostUsd, inputTokens: llm.inputTokens, outputTokens: llm.outputTokens, piiMasked, injectionBlocked, traceTags: { ...decision.traceTags, policyDecision: finalDecision } });
   observability.recordChat({ ...baseObs(aiRequest, decision), decision: finalDecision, status: "ok", model: usedModel, input: messages, output: content, inputTokens: llm.inputTokens, outputTokens: llm.outputTokens, actualCostUsd, piiMasked, injectionBlocked });
 
   return chatSuccessBody({

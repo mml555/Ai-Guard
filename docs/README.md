@@ -14,8 +14,11 @@ model request reaches a provider.
 | [Self-host overview](./self-host.md) | Decision makers, platform teams | What you deploy, licensing, support model |
 | [Getting started](./getting-started.md) | Everyone | Install → first API call in under 5 minutes |
 | [Configuration](./configuration.md) | Operators | `ai-guard.yaml` reference |
+| [Routing & block-vs-degrade](./routing.md) | Operators / engineers | Model selection, the four outcomes, decision table |
 | [TypeScript SDK](./sdk-typescript.md) | App developers | `createAiGuardClient`, types, errors |
 | [HTTP API](./api.md) | Any stack | REST, auth, idempotency, OpenAPI |
+| [OpenAPI client generation](./openapi-client.md) | Any stack | Generate a typed client from the spec |
+| [How Ai-Guard compares](./comparison.md) | Evaluators | vs LiteLLM / observability tools / cloud gateways |
 | [Operations](./operations.md) | DevOps / SRE | Production deploy, health, backups, scaling |
 | [Failure semantics](./failure-semantics.md) | SRE / engineers | Dependency failures, error contract |
 | [Budget alerts runbook](./runbooks/budget-alerts.md) | On-call | Alert thresholds, inspect spend, raise caps |
@@ -65,7 +68,7 @@ model request reaches a provider.
 
 ## Quick links
 
-- Example apps: [`event_intake_app`](../examples/event_intake_app), [`support_chat`](../examples/support_chat), [`saas_tiers`](../examples/saas_tiers), [`document_extraction`](../examples/document_extraction), [`nextjs_support_chat`](../examples/nextjs_support_chat)
+- Example apps: [`event_intake_app`](../examples/event_intake_app), [`support_chat`](../examples/support_chat), [`saas_tiers`](../examples/saas_tiers), [`document_extraction`](../examples/document_extraction), [`nextjs_support_chat`](../examples/nextjs_support_chat), [`fastapi_support_chat`](../examples/fastapi_support_chat) (Python SDK)
 - Dev config sample: [`ai-guard.yaml`](../ai-guard.yaml)
 - Production policy template: [`ai-guard.production.example.yaml`](../ai-guard.production.example.yaml)
 - OpenAPI (when API is running): `GET /openapi.json`

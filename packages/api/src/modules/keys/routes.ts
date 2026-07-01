@@ -22,6 +22,8 @@ const createKeyBodySchema = z.object({
   environment: z.string().min(1).optional(),
   allowedUserTypes: z.array(z.string().min(1)).max(64).optional(),
   allowedUserIds: z.array(z.string().min(1)).max(1000).optional(),
+  tenantId: z.string().min(1).optional(),
+  budgetNodeId: z.string().min(1).optional(),
   expiresAt: z.string().datetime().optional(),
 });
 
@@ -36,6 +38,8 @@ const keyRecordJsonSchema = {
     environment: { type: "string" },
     allowedUserTypes: { type: "array", items: { type: "string" } },
     allowedUserIds: { type: "array", items: { type: "string" } },
+    tenantId: { type: "string" },
+    budgetNodeId: { type: "string" },
     createdAt: { type: "string" },
     createdBy: { type: "string" },
     expiresAt: { type: "string" },

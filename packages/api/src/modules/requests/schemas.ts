@@ -48,6 +48,13 @@ export const requestRecordJsonSchema = {
         createdAt: { type: "string" },
       },
     },
+    policy: {
+      type: "object",
+      properties: {
+        configHash: { type: "string" },
+        policyVersion: { type: "string" },
+      },
+    },
   },
 } as const;
 

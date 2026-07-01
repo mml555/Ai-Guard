@@ -37,6 +37,10 @@ export interface BudgetRemaining {
   featureMonthlyUsd: number | null;
   /** null when no global monthly cap is configured (monthly_usd: 0). */
   globalMonthlyUsd: number | null;
+  /** Token headroom; present when a token cap is configured, null otherwise. */
+  userDailyTokens?: number | null;
+  featureMonthlyTokens?: number | null;
+  globalMonthlyTokens?: number | null;
 }
 
 export interface ChatResponse {

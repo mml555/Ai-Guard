@@ -18,6 +18,8 @@ export interface ApiKeyPrincipal {
   allowedUserTypes?: readonly string[];
   allowedUserIds?: readonly string[];
   permissions?: readonly string[];
+  tenantId?: string;
+  budgetNodeId?: string;
 }
 
 /**
@@ -32,6 +34,8 @@ export interface ResolvedPrincipal {
   allowedUserTypes?: readonly string[];
   allowedUserIds?: readonly string[];
   permissions?: readonly string[];
+  tenantId?: string;
+  budgetNodeId?: string;
 }
 
 export interface AuthOptions {
@@ -119,6 +123,8 @@ export function registerAuth(
       allowedUserTypes: principal.allowedUserTypes,
       allowedUserIds: principal.allowedUserIds,
       permissions: principal.permissions ?? ["chat:create"],
+      tenantId: principal.tenantId,
+      budgetNodeId: principal.budgetNodeId,
     });
   });
 }

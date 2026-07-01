@@ -23,6 +23,10 @@ export interface RequestLogRow {
   safetyFindings?: unknown;
   /** Host-app metadata from the chat request (non-authoritative). */
   hostMetadata?: Record<string, unknown>;
+  /** SHA-256 of the effective config that produced this decision. */
+  configHash?: string;
+  /** config_versions id when the policy store is on, else "file". */
+  policyVersion?: string;
 }
 
 export function formatAuditRequestId(id: number): string {
@@ -34,9 +38,10 @@ const LOG_SQL = `
     project_id, environment, user_id, user_type, feature, model_class,
     requested_model_class, resolved_model, decision, status, estimated_cost_usd,
     actual_cost_usd, input_tokens, output_tokens, pii_masked, injection_blocked,
-    error, reason_code, trace_tags, safety_findings, host_metadata
+    error, reason_code, trace_tags, safety_findings, host_metadata,
+    config_hash, policy_version
   ) VALUES (
-    $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21
+    $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21, $22, $23
   )
   RETURNING id
 `;
@@ -123,6 +128,8 @@ export async function logRequest(pool: Pool, row: RequestLogRow): Promise<string
       row.traceTags != null ? JSON.stringify(row.traceTags) : null,
       row.safetyFindings != null ? JSON.stringify(row.safetyFindings) : null,
       row.hostMetadata != null ? JSON.stringify(row.hostMetadata) : null,
+      row.configHash ?? null,
+      row.policyVersion ?? null,
     ]);
     const id = res.rows[0]?.id;
     return id ? formatAuditRequestId(Number(id)) : null;

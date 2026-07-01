@@ -83,7 +83,7 @@ export async function prepareStream(
       feature: aiRequest.feature,
     });
     await logRequest(pool, {
-      ...baseLog(aiRequest, decision),
+      ...baseLog(aiRequest, decision, deps.policyMeta),
       status: "failed",
       error: decision.reason,
       reasonCode: decision.reasonCode,
@@ -127,7 +127,7 @@ export async function prepareStream(
     safetyCostUsd = safetyResult.safetyCostUsd;
     if (safetyResult.action === "block") {
       await logRequest(pool, {
-        ...baseLog(aiRequest, decision),
+        ...baseLog(aiRequest, decision, deps.policyMeta),
         status: "safety_blocked",
         hostMetadata: body.metadata,
         piiMasked,
@@ -159,7 +159,9 @@ export async function prepareStream(
     projectId: aiRequest.projectId,
     userId: aiRequest.userId,
     feature: aiRequest.feature,
-    estimatedCostUsd: decision.estimatedCostUsd,
+    // Reserve model estimate + the input-safety cost already incurred.
+    estimatedCostUsd: decision.estimatedCostUsd + safetyCostUsd,
+    estimatedTokens: decision.estimatedTokens,
     caps: decision.reservationCaps,
     now,
   });
@@ -186,7 +188,7 @@ export async function prepareStream(
       messages,
       leaseId: reservation.leaseId,
       now,
-      reservedUsd: decision.estimatedCostUsd,
+      reservedUsd: decision.estimatedCostUsd + safetyCostUsd,
       safetyCostUsd,
       piiMasked,
       injectionBlocked,
@@ -206,7 +208,10 @@ export async function settleStream(
 ): Promise<string | null> {
   const { pool, observability, log } = deps;
   const { aiRequest, decision, leaseId, now, reservedUsd } = ctx;
-  const actualCostUsd = (final.actualCostUsd ?? reservedUsd) + ctx.safetyCostUsd;
+  // reservedUsd already includes the safety cost; when the provider reports no
+  // real cost, settle to the reserved amount (don't add safety again).
+  const actualCostUsd =
+    final.actualCostUsd != null ? final.actualCostUsd + ctx.safetyCostUsd : reservedUsd;
   try {
     await recordActualCost(pool, {
       projectId: aiRequest.projectId,
@@ -214,6 +219,8 @@ export async function settleStream(
       feature: aiRequest.feature,
       actualCostUsd,
       estimatedCostUsd: reservedUsd,
+      actualTokens: (final.inputTokens ?? 0) + (final.outputTokens ?? 0),
+      estimatedTokens: decision.estimatedTokens,
       caps: decision.reservationCaps,
       now,
       leaseId,
@@ -225,7 +232,7 @@ export async function settleStream(
   }
 
   const requestId = await logRequest(pool, {
-    ...baseLog(aiRequest, decision),
+    ...baseLog(aiRequest, decision, deps.policyMeta),
     resolvedModel: final.model,
     status: "ok",
     actualCostUsd,
@@ -259,6 +266,7 @@ export async function releaseStream(deps: ChatServiceDeps, ctx: StreamContext): 
       userId: ctx.aiRequest.userId,
       feature: ctx.aiRequest.feature,
       estimatedCostUsd: ctx.reservedUsd,
+      estimatedTokens: ctx.decision.estimatedTokens,
       caps: ctx.decision.reservationCaps,
       now: ctx.now,
       leaseId: ctx.leaseId,

@@ -5,14 +5,13 @@ multi-tenant isolation with nested budgets (org → dept → team → user → f
 without weakening the concurrency guarantees the current budget engine already
 proves.
 
-> **Status:** the concurrency-critical **core is now built** (migration
-> `0011_budget_nodes`, `modules/budgets/repo.ts`): the `budget_nodes` tree,
-> `budget_node_counters`, path resolution, and the **atomic multi-level
-> reserve/settle/release** — with a concurrency test proving exact admission
-> against a shared ancestor cap (`budget-nodes.integration.test.ts`). It ships
-> **alongside** the flat path (still the default) and is **not yet wired into
-> `/v1/chat`**. Remaining: the engine path-walk, chat wiring behind a flag,
-> counter sharding, and tenant binding (see "Rollout").
+> **Status:** hierarchical budgets are now **built end-to-end behind a flag**
+> (`HIERARCHICAL_BUDGETS=true`): the `budget_nodes` tree + counters + leases,
+> atomic multi-level reserve/settle/release (concurrency-proven), the pure
+> engine path-walk, `/v1/chat` wiring, counter sharding, and tenant-bound keys +
+> per-tenant policy versions. The **flat path remains the default**. RLS and
+> per-request per-tenant policy resolution are the documented remaining polish
+> (see "Rollout"). All steps are covered by integration tests.
 
 ## What exists today (foundations)
 
@@ -113,16 +112,41 @@ concurrency proof extend to the hierarchy.
 2. ~~Atomic multi-level reserve/settle/release with a concurrency proof.~~
    **Done** — `budget-nodes.integration.test.ts` (exact admission against a
    shared ancestor cap; 3-level tree).
-3. ~~Pure engine path-walk.~~ **Done** — `evaluateBudgetPath()` in the policy
-   engine (`budgetPath.ts`): no I/O, decides allow/block against a resolved node
-   path with per-node used/reserved/requests, returns the outermost breaching
-   node. The rule is identical to the DB `reservePath` upsert, so the pre-check
-   and the concurrency-safe reservation agree. Unit-tested (`budget-path.test.ts`).
-   *Next:* wire `/v1/chat` to it behind a flag — resolve the caller's node path,
-   load the per-node snapshot, `evaluateBudgetPath` → `reservePath` →
-   `settlePath`/`releasePath`.
-4. Shard the top counter; publish the RPS benchmark (see
-   [benchmarks](../deployment/benchmarks.md)).
-5. Add tenant binding to keys + policy versions; enable RLS.
+3. ~~Pure engine path-walk.~~ **Done** — `evaluateBudgetPath()` (`budgetPath.ts`),
+   unit-tested; rule matches the DB `reservePath` upsert.
+4. ~~Wire `/v1/chat` behind a flag.~~ **Done** — `HIERARCHICAL_BUDGETS=true`;
+   requests carrying a `budgetNodeId` (from the body or the API key) resolve the
+   path, `evaluateBudgetPath` pre-check → `reservePath` → `settlePath`/
+   `releasePath`, with node-reservation leases (`budget_node_leases`) swept by
+   maintenance. Flat path stays default. (`chat-hierarchical.integration.test.ts`)
+5. ~~Shard the top counter + benchmark.~~ **Done** — `shard_count` on a node
+   splits its counter into N rows (`cap/N` each); measured ~3.3× throughput,
+   ~7× lower p95 locally (see [benchmarks](../deployment/benchmarks.md)).
+6. ~~Tenant binding on keys + policy versions.~~ **Done** — keys carry
+   `tenant_id` + `budget_node_id`; policy versions are per-tenant with one active
+   version each and cross-tenant activation blocked (`policy-store` +
+   `chat-hierarchical` tests). **RLS** is offered as documented defense-in-depth
+   (below), not force-enabled.
 
-Each step is independently shippable and testable.
+### Postgres RLS (optional, defense-in-depth)
+
+Application queries already scope by tenant. For belt-and-suspenders, enable RLS
+and have the app connect as a **non-owner** role that sets `app.current_tenant`
+per transaction:
+
+```sql
+ALTER TABLE config_versions ENABLE ROW LEVEL SECURITY;
+CREATE POLICY tenant_isolation ON config_versions
+  USING (tenant_id = current_setting('app.current_tenant', true));
+-- app (non-owner role) per transaction:  SET LOCAL app.current_tenant = 'tenant-a';
+```
+
+Left to the operator because it requires a dedicated DB role and per-connection
+tenant context; the table owner bypasses RLS.
+
+### Remaining polish (not blocking)
+
+- Per-request **per-tenant policy resolution** (the boot loader currently loads
+  one tenant's active version; multi-tenant policy needs request-time selection).
+- Extend usage/requests read endpoints with explicit tenant scoping (they scope
+  by `project_id` today).

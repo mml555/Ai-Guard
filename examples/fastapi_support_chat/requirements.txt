@@ -1,0 +1,6 @@
+fastapi>=0.110
+uvicorn>=0.29
+# The Ai-Guard Python SDK (packages/sdk-python). From this repo:
+#   pip install -e ../../packages/sdk-python
+# Or, once published:
+#   ai-guard-sdk>=0.5.0

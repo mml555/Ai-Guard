@@ -16,6 +16,8 @@ export interface ChatServiceDeps {
   safety: SafetyGuard;
   observability: Observability;
   budgetAlert?: BudgetAlertWebhookConfig;
+  /** Config identity stamped on every request log (which policy decided). */
+  policyMeta?: { configHash?: string; policyVersion?: string };
   log?: {
     warn(obj: unknown, msg: string): void;
     error(obj: unknown, msg: string): void;

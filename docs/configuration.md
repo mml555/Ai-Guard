@@ -76,6 +76,7 @@ The pure policy engine never reads API keys.
 | `monthly_usd` | number | Global monthly spend cap (USD). `0` = no global cap |
 | `alert_at_percent` | 0–100 | Log a warning when spend crosses this % of monthly cap; optional webhook (see below) |
 | `hard_stop_at_percent` | 0–100 | Block new requests at this % of monthly cap (default 100) |
+| `monthly_tokens` | number | Optional global monthly **token** cap (input + output). Omit = no token limit |
 
 When global spend (used + reserved) crosses `degrade_at_percent` (see routing),
 the engine may **degrade** to a cheaper permitted model class.
@@ -89,7 +90,17 @@ match a key here.
 | --- | --- | --- |
 | `daily_usd` | number | Max USD per user per day (used + reserved) |
 | `daily_requests` | number | Max requests per user per day |
+| `daily_tokens` | number | Optional max **tokens** per user per day (input + output). Omit = no token limit |
 | `models` | string[] | Allowed model classes, e.g. `["cheap", "standard"]` |
+
+**Token limits vs cost:** every request reserves a worst-case token estimate
+(declared/assumed input + the feature's `max_tokens`) up front, and settles the
+provider's actual token usage after — exactly like cost. Set `daily_tokens` /
+`monthly_tokens` (per user, feature, or global) to cap on tokens independently of
+USD. A breach returns `403` with `reasonCode` `daily_token_limit_reached`,
+`feature_monthly_token_limit_reached`, or `global_monthly_token_limit_reached`.
+Useful with local/self-hosted models where per-token cost is ~0 but throughput
+still needs bounding.
 
 Example:
 
@@ -171,6 +182,16 @@ model_classes:
 | Field | Default | Description |
 | --- | --- | --- |
 | `degrade_at_percent` | 80 | When global monthly spend ≥ this % of cap, degrade model class |
+| `class_order` | `[cheap, standard, premium]` | Tier order, **cheapest → most expensive**; degrade steps down one tier in this list |
+
+`class_order` lets you define your own tiers and their degrade order. Every entry
+must be a defined `model_class`; classes not listed are treated as un-degradable.
+
+```yaml
+routing:
+  degrade_at_percent: 80
+  class_order: [nano, cheap, standard, premium]   # degrade walks right→left
+```
 
 ---
 

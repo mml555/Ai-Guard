@@ -68,6 +68,8 @@ export function createDbKeyResolver(
             allowedUserTypes: active.allowedUserTypes,
             allowedUserIds: active.allowedUserIds,
             permissions: active.permissions,
+            tenantId: active.tenantId,
+            budgetNodeId: active.budgetNodeId,
           }
         : null;
       set(hash, principal);

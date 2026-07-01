@@ -1,122 +1,164 @@
 import { stringify } from "yaml";
+import type { ModelClass, SafetyPreset, Template } from "./templates";
 
 export type Provider = "openai" | "anthropic" | "gemini";
 export type DeployMode = "simple" | "full";
-export type SafetyPreset = "dev" | "balanced" | "strict";
+export type { SafetyPreset } from "./templates";
 
 export interface ScaffoldOptions {
   projectName: string;
   providers: Provider[];
   mode: DeployMode;
   safetyPreset: SafetyPreset;
+  template: Template;
 }
 
-const CHEAP_PRIMARY: Record<Provider, string> = {
-  openai: "openai/gpt-4o-mini",
-  anthropic: "anthropic/claude-haiku",
-  gemini: "gemini/gemini-flash",
-};
-const STANDARD_PRIMARY: Record<Provider, string> = {
-  anthropic: "anthropic/claude-sonnet",
-  openai: "openai/gpt-4o",
-  gemini: "gemini/gemini-pro",
+const PRIMARY: Record<ModelClass, Record<Provider, string>> = {
+  cheap: {
+    openai: "openai/gpt-4o-mini",
+    anthropic: "anthropic/claude-haiku",
+    gemini: "gemini/gemini-flash",
+  },
+  standard: {
+    openai: "openai/gpt-4o",
+    anthropic: "anthropic/claude-sonnet",
+    gemini: "gemini/gemini-pro",
+  },
+  premium: {
+    openai: "openai/gpt-5",
+    anthropic: "anthropic/claude-opus",
+    gemini: "gemini/gemini-ultra",
+  },
+  local: { openai: "ollama/llama3.2:3b", anthropic: "ollama/llama3.2:3b", gemini: "ollama/llama3.2:3b" },
 };
 
-function pick<T>(providers: Provider[], table: Record<Provider, T>): T {
-  const p = providers[0]!;
-  return table[p];
+const LOCAL_MODEL = "ollama/llama3.2:3b";
+
+/** Resolve primary + optional fallback (a different provider at the same tier). */
+function modelClassEntry(cls: ModelClass, providers: Provider[]): { primary: string; fallback?: string } {
+  if (cls === "local") return { primary: LOCAL_MODEL };
+  const primary = PRIMARY[cls][providers[0]!];
+  const alt = providers.find((p) => p !== providers[0]);
+  return alt ? { primary, fallback: PRIMARY[cls][alt] } : { primary };
 }
 
-/** Build a valid ai-guard.yaml (snake_case) from wizard answers. */
+/** Build a valid ai-guard.yaml (snake_case) from wizard answers + template. */
 export function renderAiGuardYaml(opts: ScaffoldOptions): string {
-  const cheapPrimary = pick(opts.providers, CHEAP_PRIMARY);
-  // Prefer a provider that actually has a "standard" entry; else reuse first.
-  const standardProvider =
-    opts.providers.find((p) => p in STANDARD_PRIMARY) ?? opts.providers[0]!;
-  const standardPrimary = STANDARD_PRIMARY[standardProvider];
+  const t = opts.template;
+  const localOnly = t.localOnly === true;
+  const providers = localOnly ? [] : opts.providers;
+  const preset: SafetyPreset = localOnly ? "dev" : opts.safetyPreset;
+  const injectionModel = localOnly ? LOCAL_MODEL : PRIMARY.cheap[opts.providers[0]!];
 
-  // Optional fallback: a different provider's cheap model, when available.
-  const altProvider = opts.providers.find((p) => p !== opts.providers[0]);
+  const features = Object.fromEntries(
+    Object.entries(t.features).map(([name, f]) => [
+      name,
+      {
+        safety: f.safety ?? preset,
+        model_class: f.modelClass,
+        max_tokens: f.maxTokens,
+        ...(f.budgetMonthlyUsd != null ? { budget: { monthly_usd: f.budgetMonthlyUsd } } : {}),
+        ...(f.dataSensitivity ? { data_sensitivity: f.dataSensitivity } : {}),
+      },
+    ]),
+  );
+
+  const byUserType = Object.fromEntries(
+    Object.entries(t.userTypes).map(([name, u]) => [
+      name,
+      { daily_usd: u.dailyUsd, daily_requests: u.dailyRequests, models: u.models },
+    ]),
+  );
+
+  const modelClasses = Object.fromEntries(
+    t.modelClasses.map((cls) => [cls, modelClassEntry(cls, opts.providers)]),
+  );
 
   const config: Record<string, unknown> = {
     project: { name: opts.projectName, environment: "development" },
-    providers: Object.fromEntries(
-      opts.providers.map((p) => [
-        p,
-        { api_key: `env/${p.toUpperCase()}_API_KEY` },
-      ]),
-    ),
+    ...(providers.length
+      ? {
+          providers: Object.fromEntries(
+            providers.map((p) => [p, { api_key: `env/${p.toUpperCase()}_API_KEY` }]),
+          ),
+        }
+      : {}),
     budgets: {
-      global: {
-        monthly_usd: 500,
-        alert_at_percent: 80,
-        hard_stop_at_percent: 100,
-      },
-      by_user_type: {
-        anonymous: { daily_usd: 0.02, daily_requests: 5, models: ["cheap"] },
-        logged_in: {
-          daily_usd: 0.25,
-          daily_requests: 50,
-          models: ["cheap", "standard"],
-        },
-      },
+      global: { monthly_usd: 500, alert_at_percent: 80, hard_stop_at_percent: 100 },
+      by_user_type: byUserType,
     },
-    features: {
-      support_chat: {
-        safety: opts.safetyPreset,
-        model_class: "cheap",
-        max_tokens: 500,
-      },
-    },
+    features,
     routing: { degrade_at_percent: 80 },
-    model_classes: {
-      cheap: {
-        primary: cheapPrimary,
-        ...(altProvider ? { fallback: CHEAP_PRIMARY[altProvider] } : {}),
-      },
-      standard: { primary: standardPrimary },
-    },
-    safety: {
-      preset: opts.safetyPreset,
-      injection_model: cheapPrimary,
-    },
+    model_classes: modelClasses,
+    safety: { preset, injection_model: injectionModel },
+    ...(t.dataClasses
+      ? {
+          data_classes: Object.fromEntries(
+            Object.entries(t.dataClasses).map(([k, v]) => [
+              k,
+              {
+                ...(v.allowedModelClasses ? { allowed_model_classes: v.allowedModelClasses } : {}),
+                ...(v.allowedProviders ? { allowed_providers: v.allowedProviders } : {}),
+              },
+            ]),
+          ),
+        }
+      : {}),
     observability: { provider: opts.mode === "full" ? "langfuse" : "none" },
   };
 
   const header =
-    "# Generated by create-ai-guard. Edit freely.\n" +
+    `# Generated by create-ai-guard (${t.id} template). Edit freely.\n` +
     "# Provider api_key env/VAR refs are resolved by the Ai-Guard API at load time.\n\n";
   return header + stringify(config);
 }
 
 /** Build a .env with placeholders for the chosen providers + service URLs. */
 export function renderEnv(opts: ScaffoldOptions): string {
-  const lines: string[] = [
-    "# Provider keys (consumed by the LiteLLM proxy)",
-    ...opts.providers.map((p) => `${p.toUpperCase()}_API_KEY=`),
-    "",
+  const localOnly = opts.template.localOnly === true;
+  const lines: string[] = [];
+  if (!localOnly) {
+    lines.push(
+      "# Provider keys (consumed by the LiteLLM proxy)",
+      ...opts.providers.map((p) => `${p.toUpperCase()}_API_KEY=`),
+      "",
+    );
+  }
+  lines.push(
     "# LiteLLM proxy",
     "LITELLM_MASTER_KEY=sk-ai-guard-local",
     "",
     "# Ai-Guard API",
     "PORT=3000",
     "AI_GUARD_API_KEY=sk-ai-guard-api-local",
-    "DATABASE_URL=postgres://postgres:postgres@localhost:5432/aiguard",
-    "LITELLM_BASE_URL=http://localhost:4000",
+    "DATABASE_URL=postgres://postgres:postgres@postgres:5432/aiguard",
+    "LITELLM_BASE_URL=http://litellm:4000",
     "AI_GUARD_CONFIG=ai-guard.yaml",
-  ];
-  if (opts.safetyPreset !== "dev") {
+  );
+  const preset = localOnly ? "dev" : opts.safetyPreset;
+  if (preset !== "dev") {
     lines.push(
       "",
       "# Safety (Presidio)",
-      "PRESIDIO_ANALYZER_URL=http://localhost:5002",
-      "PRESIDIO_ANONYMIZER_URL=http://localhost:5001",
+      "PRESIDIO_ANALYZER_URL=http://presidio-analyzer:3000",
+      "PRESIDIO_ANONYMIZER_URL=http://presidio-anonymizer:3000",
     );
   }
   return lines.join("\n") + "\n";
 }
 
-/** The compose file the user should run for the chosen mode. */
+/** Concrete model strings (primary + fallback) the template's classes use. */
+export function modelStringsFor(opts: ScaffoldOptions): string[] {
+  const set = new Set<string>();
+  for (const cls of opts.template.modelClasses) {
+    const e = modelClassEntry(cls, opts.providers);
+    set.add(e.primary);
+    if (e.fallback) set.add(e.fallback);
+  }
+  return [...set];
+}
+
+/** The compose invocation for the chosen mode (repo-relative). */
 export function composeFileFor(mode: DeployMode): string {
   return mode === "full"
     ? "-f docker-compose.simple.yml -f docker-compose.full.yml"

@@ -14,6 +14,8 @@ export interface ApiKeyRecord {
   environment?: string;
   allowedUserTypes?: string[];
   allowedUserIds?: string[];
+  tenantId?: string;
+  budgetNodeId?: string;
   createdAt: string;
   createdBy?: string;
   expiresAt?: string;
@@ -28,6 +30,8 @@ export interface CreateApiKeyInput {
   environment?: string;
   allowedUserTypes?: string[];
   allowedUserIds?: string[];
+  tenantId?: string;
+  budgetNodeId?: string;
   expiresAt?: string;
   createdBy?: string;
 }
@@ -47,6 +51,8 @@ interface ApiKeyDbRow {
   environment: string | null;
   allowed_user_types: string[] | null;
   allowed_user_ids: string[] | null;
+  tenant_id: string | null;
+  budget_node_id: string | null;
   created_at: Date;
   created_by: string | null;
   expires_at: Date | null;
@@ -56,8 +62,8 @@ interface ApiKeyDbRow {
 
 const SELECT_FIELDS = `
   id, name, key_prefix, permissions, project_id, environment,
-  allowed_user_types, allowed_user_ids, created_at, created_by,
-  expires_at, revoked_at, last_used_at
+  allowed_user_types, allowed_user_ids, tenant_id, budget_node_id,
+  created_at, created_by, expires_at, revoked_at, last_used_at
 `;
 
 export function hashApiKey(secret: string): string {
@@ -88,6 +94,8 @@ function rowToRecord(row: ApiKeyDbRow): ApiKeyRecord {
     environment: row.environment ?? undefined,
     allowedUserTypes: row.allowed_user_types ?? undefined,
     allowedUserIds: row.allowed_user_ids ?? undefined,
+    tenantId: row.tenant_id ?? undefined,
+    budgetNodeId: row.budget_node_id ?? undefined,
     createdAt: row.created_at.toISOString(),
     createdBy: row.created_by ?? undefined,
     expiresAt: row.expires_at?.toISOString(),
@@ -105,8 +113,9 @@ export async function createApiKey(
   const { rows } = await pool.query<ApiKeyDbRow>(
     `INSERT INTO api_keys
        (name, key_hash, key_prefix, permissions, project_id, environment,
-        allowed_user_types, allowed_user_ids, expires_at, created_by)
-     VALUES ($1, $2, $3, $4::jsonb, $5, $6, $7::jsonb, $8::jsonb, $9, $10)
+        allowed_user_types, allowed_user_ids, tenant_id, budget_node_id,
+        expires_at, created_by)
+     VALUES ($1, $2, $3, $4::jsonb, $5, $6, $7::jsonb, $8::jsonb, $9, $10, $11, $12)
      RETURNING ${SELECT_FIELDS}`,
     [
       input.name,
@@ -117,6 +126,8 @@ export async function createApiKey(
       input.environment ?? null,
       input.allowedUserTypes ? JSON.stringify(input.allowedUserTypes) : null,
       input.allowedUserIds ? JSON.stringify(input.allowedUserIds) : null,
+      input.tenantId ?? null,
+      input.budgetNodeId ?? null,
       input.expiresAt ?? null,
       input.createdBy ?? null,
     ],
@@ -198,6 +209,8 @@ export interface ActiveApiKey {
   environment?: string;
   allowedUserTypes?: string[];
   allowedUserIds?: string[];
+  tenantId?: string;
+  budgetNodeId?: string;
   expiresAt?: string;
 }
 
@@ -231,6 +244,8 @@ export async function findActiveApiKeyByToken(
     environment: row.environment ?? undefined,
     allowedUserTypes: row.allowed_user_types ?? undefined,
     allowedUserIds: row.allowed_user_ids ?? undefined,
+    tenantId: row.tenant_id ?? undefined,
+    budgetNodeId: row.budget_node_id ?? undefined,
     expiresAt: row.expires_at?.toISOString(),
   };
 }
