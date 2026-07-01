@@ -14,6 +14,7 @@ model request reaches a provider.
 | [Self-host overview](./self-host.md) | Decision makers, platform teams | What you deploy, licensing, support model |
 | [Getting started](./getting-started.md) | Everyone | Install → first API call in under 5 minutes |
 | [Configuration](./configuration.md) | Operators | `ai-guard.yaml` reference |
+| [Providers](./providers.md) | Operators | OpenAI, Anthropic, Gemini, OpenRouter, Azure, Bedrock + custom pricing |
 | [Routing & block-vs-degrade](./routing.md) | Operators / engineers | Model selection, the four outcomes, decision table |
 | [TypeScript SDK](./sdk-typescript.md) | App developers | `createAiGuardClient`, types, errors |
 | [HTTP API](./api.md) | Any stack | REST, auth, idempotency, OpenAPI |

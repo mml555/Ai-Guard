@@ -33,6 +33,21 @@ const FEATURES = [
 
 const usd = (n: number) => `$${n.toFixed(6).replace(/0+$/, "").replace(/\.$/, ".0")}`;
 
+// A model string is "<provider>/<model...>", e.g. "openai/gpt-4o-mini",
+// "openrouter/anthropic/claude-3.5-sonnet", "azure/gpt-4o-mini", "ollama/llama3.2:1b".
+function splitModel(model: string): { provider: string; name: string } {
+  const i = model.indexOf("/");
+  return i === -1 ? { provider: "model", name: model } : { provider: model.slice(0, i), name: model.slice(i + 1) };
+}
+const PROVIDER_COLOR: Record<string, string> = {
+  openai: "#10a37f",
+  anthropic: "#d97757",
+  gemini: "#4285f4",
+  openrouter: "#8b5cf6",
+  azure: "#0078d4",
+  ollama: "#8a8f98",
+};
+
 export default function Page() {
   const [messages, setMessages] = useState<Msg[]>([]);
   const [input, setInput] = useState("");
@@ -161,10 +176,19 @@ function Bubble({ msg }: { msg: Msg }) {
 }
 
 function Receipt({ meta }: { meta: Meta }) {
+  const { provider, name } = splitModel(meta.model);
+  const color = PROVIDER_COLOR[provider] ?? "#8a8f98";
   return (
     <div style={{ marginTop: 5, fontSize: 12, display: "flex", gap: 8, flexWrap: "wrap", alignItems: "center" }}>
       <span className={`badge ${meta.decision}`}>{meta.decision}</span>
-      <span className="muted">{meta.model}</span>
+      <span
+        className="badge"
+        title={`provider: ${provider}`}
+        style={{ color, borderColor: color, textTransform: "lowercase" }}
+      >
+        {provider}
+      </span>
+      <span className="muted">{name}</span>
       <span className="muted">· {meta.usage.inputTokens ?? "?"}→{meta.usage.outputTokens ?? "?"} tok</span>
       <span className="muted">· {usd(meta.cost.actualUsd)}</span>
       {meta.safety.piiMasked && <span className="badge">PII masked</span>}

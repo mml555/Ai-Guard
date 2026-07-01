@@ -128,6 +128,34 @@ describe("buildScaffold", () => {
   });
 });
 
+describe("providers (openrouter / azure)", () => {
+  it("OpenRouter: valid config, openrouter model strings, and custom pricing emitted", () => {
+    const yaml = renderAiGuardYaml({ ...base, providers: ["openrouter"] });
+    const cfg = parseConfig(yaml);
+    expect(cfg.modelClasses.cheap?.primary).toBe("openrouter/openai/gpt-4o-mini");
+    // OpenRouter models aren't in the built-in table → pricing must be emitted.
+    expect(cfg.pricing?.["openrouter/openai/gpt-4o-mini"]).toBeDefined();
+  });
+
+  it("Azure: valid config + generated LiteLLM uses azure api_base/api_version, and .env has them", () => {
+    const opts: ProjectOptions = { ...base, providers: ["azure"], framework: "none" };
+    const files = buildScaffold(opts);
+    expect(() => parseConfig(files.get("ai-guard.yaml")!)).not.toThrow();
+    const litellm = files.get("litellm_config.yaml")!;
+    expect(litellm).toContain("model: azure/gpt-4o-mini");
+    expect(litellm).toContain("api_key: os.environ/AZURE_API_KEY");
+    expect(litellm).toContain("api_base: os.environ/AZURE_API_BASE");
+    expect(litellm).toContain("api_version: os.environ/AZURE_API_VERSION");
+    expect(files.get(".env")!).toContain("AZURE_API_BASE=");
+  });
+
+  it("OpenRouter LiteLLM entry uses the OpenRouter key", () => {
+    const litellm = buildScaffold({ ...base, providers: ["openrouter"], framework: "none" }).get("litellm_config.yaml")!;
+    expect(litellm).toContain("model: openrouter/openai/gpt-4o-mini");
+    expect(litellm).toContain("api_key: os.environ/OPENROUTER_API_KEY");
+  });
+});
+
 describe("composeFileFor", () => {
   it("maps modes", () => {
     expect(composeFileFor("simple")).toBe("-f docker-compose.simple.yml");

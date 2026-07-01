@@ -162,6 +162,7 @@ export function evaluateAiRequest(input: EvaluateInput): PolicyDecision {
     model,
     request.inputTokensEstimate,
     safetyPlan.maxOutputTokens,
+    config.pricing,
   );
 
   if (usage.userDailyRequestsUsed + 1 > userBudget.dailyRequests) {
@@ -320,6 +321,7 @@ function buildDecision(ctx: BuildCtx, args: BuildArgs): PolicyDecision {
     model,
     ctx.inputTokensEstimate,
     safetyPlan.maxOutputTokens,
+    config.pricing,
   );
   const estimatedTokens = estimateTokens(ctx.inputTokensEstimate, safetyPlan.maxOutputTokens);
 

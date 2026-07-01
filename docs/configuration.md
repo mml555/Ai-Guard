@@ -177,6 +177,28 @@ model_classes:
 
 ---
 
+## `pricing` (optional — custom token prices)
+
+Ai-Guard ships a built-in price table for common OpenAI/Anthropic/Gemini models.
+For anything it doesn't know — **OpenRouter**, **Azure** deployments, self-hosted
+models you bill internally, or a negotiated rate — declare the price so budget
+estimates (and the settled-cost fallback) are accurate:
+
+```yaml
+pricing:                                   # USD per 1K tokens, keyed by model string
+  "openrouter/anthropic/claude-3.5-sonnet": { input_per_1k: 0.003, output_per_1k: 0.015 }
+  "azure/gpt-4o-mini":                       { input_per_1k: 0.00015, output_per_1k: 0.0006 }
+```
+
+- Overrides the built-in table for that model; extends it for unknown models.
+- A model with a `pricing` entry is no longer flagged "unpriced" at startup.
+- Local/Ollama models (`ollama/…`, no `/`) are price-exempt unless you list them
+  here — handy to enforce **token** budgets on free local models with `$0` cost.
+
+Precedence: `pricing` override → built-in table → conservative default.
+
+---
+
 ## `routing`
 
 | Field | Default | Description |

@@ -126,6 +126,12 @@ export interface AiGuardConfig {
   observability: { provider: ObservabilityProvider };
   /** Optional data-sensitivity governance, keyed by class name. */
   dataClasses?: Record<string, DataClassConfig>;
+  /**
+   * Per-model price overrides (USD per 1K tokens), keyed by the model string in
+   * `model_classes`. Overrides/extends the built-in price table — required to
+   * budget models the table doesn't know (OpenRouter, Azure deployments, etc.).
+   */
+  pricing?: Record<string, { inputPer1k: number; outputPer1k: number }>;
 }
 
 // ── Evaluator input ─────────────────────────────────────────────────────────

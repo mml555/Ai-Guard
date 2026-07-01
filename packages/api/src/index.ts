@@ -138,6 +138,7 @@ async function main(): Promise<void> {
     baseUrl: env.LITELLM_BASE_URL,
     apiKey: env.LITELLM_MASTER_KEY,
     timeoutMs: env.LITELLM_TIMEOUT_MS,
+    priceOverrides: config.pricing,
   });
 
   // Safety backends are wired only when configured; otherwise the guard is a

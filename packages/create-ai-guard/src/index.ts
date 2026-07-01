@@ -79,6 +79,8 @@ async function promptOptions(flags: Flags): Promise<ProjectOptions> {
             { value: "openai", label: "OpenAI" },
             { value: "anthropic", label: "Anthropic" },
             { value: "gemini", label: "Gemini" },
+            { value: "openrouter", label: "OpenRouter" },
+            { value: "azure", label: "Azure OpenAI" },
           ],
           initialValues: flags.providers ?? ["openai"],
           required: false,

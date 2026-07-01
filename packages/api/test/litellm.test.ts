@@ -53,6 +53,23 @@ describe("LiteLLM client", () => {
     expect(r.actualCostUsd).toBeCloseTo(0.00075, 9);
   });
 
+  it("uses custom price overrides for the token-usage cost fallback", async () => {
+    const fetchImpl: typeof fetch = async () =>
+      jsonResponse({
+        model: "openrouter/exotic",
+        choices: [{ message: { content: "hi" } }],
+        usage: { prompt_tokens: 1000, completion_tokens: 1000 },
+      });
+    const client = createLiteLLMClient({
+      baseUrl: "http://x",
+      fetchImpl,
+      priceOverrides: { "openrouter/exotic": { inputPer1k: 2, outputPer1k: 4 } },
+    });
+    const r = await client.chat({ model: "openrouter/exotic", messages: [{ role: "user", content: "x" }] });
+    // 1000/1k*2 + 1000/1k*4 = 6
+    expect(r.actualCostUsd).toBeCloseTo(6, 6);
+  });
+
   it("throws ProviderError on 5xx (fallback-eligible)", async () => {
     const fetchImpl: typeof fetch = async () =>
       new Response("upstream down", { status: 503 });

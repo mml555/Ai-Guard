@@ -28,8 +28,15 @@ export const DEFAULT_PRICE: ModelPrice = { inputPer1k: 0.001, outputPer1k: 0.004
 /** Assumed input size when the caller provides no token estimate. */
 export const DEFAULT_INPUT_TOKENS = 500;
 
-export function getModelPrice(model: string): ModelPrice {
-  return PRICE_TABLE[model] ?? DEFAULT_PRICE;
+/**
+ * Resolve a model's price: config `pricing` override → built-in table →
+ * conservative default. `overrides` come from `ai-guard.yaml`'s `pricing:`.
+ */
+export function getModelPrice(
+  model: string,
+  overrides?: Record<string, ModelPrice>,
+): ModelPrice {
+  return overrides?.[model] ?? PRICE_TABLE[model] ?? DEFAULT_PRICE;
 }
 
 /** Round to 6 decimal places to match Postgres numeric(12,6). */
@@ -45,8 +52,9 @@ export function estimateCostUsd(
   model: string,
   inputTokensEstimate: number | undefined,
   maxOutputTokens: number,
+  overrides?: Record<string, ModelPrice>,
 ): number {
-  const price = getModelPrice(model);
+  const price = getModelPrice(model, overrides);
   const inputTokens = inputTokensEstimate ?? DEFAULT_INPUT_TOKENS;
   const cost =
     (inputTokens / 1000) * price.inputPer1k +
@@ -93,7 +101,8 @@ export function collectConfiguredModels(config: AiGuardConfig): string[] {
  * warn operators that budget reservations may be inaccurate.
  */
 export function findUnpricedModels(config: AiGuardConfig): string[] {
+  const custom = config.pricing ?? {};
   return collectConfiguredModels(config).filter(
-    (model) => !isPricingExemptModel(model) && !(model in PRICE_TABLE),
+    (model) => !isPricingExemptModel(model) && !(model in PRICE_TABLE) && !(model in custom),
   );
 }

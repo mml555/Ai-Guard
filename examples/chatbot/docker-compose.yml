@@ -22,7 +22,11 @@ services:
     command: ["--config", "/app/config.yaml", "--port", "4000"]
     environment:
       LITELLM_MASTER_KEY: sk-ai-guard-litellm
-    volumes: ["./litellm.ollama.yaml:/app/config.yaml:ro"]
+    # Swap the backend by setting LITELLM_CONFIG in .env, e.g.
+    #   LITELLM_CONFIG=./litellm.openrouter.yaml   (then set OPENROUTER_API_KEY)
+    #   LITELLM_CONFIG=./litellm.azure.yaml        (then set AZURE_API_* )
+    env_file: [.env]
+    volumes: ["${LITELLM_CONFIG:-./litellm.ollama.yaml}:/app/config.yaml:ro"]
     extra_hosts: ["host.docker.internal:host-gateway"]
 
   api:

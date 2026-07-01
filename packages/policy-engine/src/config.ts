@@ -127,6 +127,16 @@ const observabilitySchema = z.object({
   provider: z.enum(["none", "langfuse", "otel"]).default("none"),
 });
 
+const pricingSchema = z.record(
+  z.string(),
+  z
+    .object({
+      input_per_1k: z.number().nonnegative(),
+      output_per_1k: z.number().nonnegative(),
+    })
+    .transform((p) => ({ inputPer1k: p.input_per_1k, outputPer1k: p.output_per_1k })),
+);
+
 const configSchema = z
   .object({
     project: projectSchema,
@@ -143,6 +153,7 @@ const configSchema = z
     safety: safetySchema.optional(),
     observability: observabilitySchema.optional(),
     data_classes: z.record(z.string(), dataClassSchema).optional(),
+    pricing: pricingSchema.optional(),
   })
   .transform((c) => ({
     project: c.project,
@@ -159,6 +170,7 @@ const configSchema = z
       },
     observability: c.observability ?? { provider: "none" as const },
     dataClasses: c.data_classes,
+    pricing: c.pricing,
   }));
 
 function normalizeFeatureSafety(

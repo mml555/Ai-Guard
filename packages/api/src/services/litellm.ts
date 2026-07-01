@@ -1,6 +1,11 @@
 import { getModelPrice, roundUsd } from "@ai-guard/policy-engine";
 import type { ChatMessage } from "../types";
 
+interface ModelPrice {
+  inputPer1k: number;
+  outputPer1k: number;
+}
+
 // Talks to the LiteLLM proxy (OpenAI-compatible). The proxy owns provider
 // credentials and returns the real cost via the `x-litellm-response-cost`
 // header — that real cost reconciles the reservation after the call.
@@ -82,12 +87,15 @@ export interface LiteLLMClientOptions {
   timeoutMs?: number;
   /** Injectable for tests. Defaults to global fetch. */
   fetchImpl?: typeof fetch;
+  /** Custom per-model prices (from ai-guard.yaml `pricing:`) for the cost fallback. */
+  priceOverrides?: Record<string, ModelPrice>;
 }
 
 function extractCost(
   headers: Headers,
   json: Record<string, unknown>,
   model: string,
+  priceOverrides?: Record<string, ModelPrice>,
 ): number | null {
   const header = headers.get("x-litellm-response-cost");
   if (header) {
@@ -106,7 +114,7 @@ function extractCost(
     | { prompt_tokens?: number; completion_tokens?: number }
     | undefined;
   if (usage) {
-    const price = getModelPrice(model);
+    const price = getModelPrice(model, priceOverrides);
     return roundUsd(
       ((usage.prompt_tokens ?? 0) / 1000) * price.inputPer1k +
         ((usage.completion_tokens ?? 0) / 1000) * price.outputPer1k,
@@ -185,7 +193,7 @@ export function createLiteLLMClient(
       return {
         content,
         model: (json["model"] as string) ?? params.model,
-        actualCostUsd: extractCost(res.headers, json, params.model),
+        actualCostUsd: extractCost(res.headers, json, params.model, options.priceOverrides),
         inputTokens: usage?.prompt_tokens,
         outputTokens: usage?.completion_tokens,
         raw: json,
@@ -282,7 +290,7 @@ export function createLiteLLMClient(
       const actualCostUsd =
         inputTokens != null || outputTokens != null
           ? (() => {
-              const price = getModelPrice(model);
+              const price = getModelPrice(model, options.priceOverrides);
               return roundUsd(
                 ((inputTokens ?? 0) / 1000) * price.inputPer1k +
                   ((outputTokens ?? 0) / 1000) * price.outputPer1k,

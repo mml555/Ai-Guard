@@ -56,6 +56,28 @@ skip step 1. The gateway must load this folder's `ai-guard.yaml`.)
 - Model-class access control by tier, and degrade/fallback (visible in the badge).
 - Per-request audit id (`requestId`) surfaced to the client.
 
+### Run against a real provider (OpenRouter / Azure) instead of Ollama
+
+The demo's `ai-guard.yaml` uses generic model names (`openai/gpt-4o-mini`), so
+switching providers is just a LiteLLM swap — **no policy change**. In `.env`:
+
+```bash
+# OpenRouter
+LITELLM_CONFIG=./litellm.openrouter.yaml
+OPENROUTER_API_KEY=sk-or-...
+
+# …or Azure OpenAI (edit litellm.azure.yaml to your deployment names)
+LITELLM_CONFIG=./litellm.azure.yaml
+AZURE_API_KEY=...
+AZURE_API_BASE=https://<resource>.openai.azure.com
+AZURE_API_VERSION=2024-08-01-preview
+```
+
+Then `docker compose up`. Budgets/tokens/limits behave identically. (If you
+instead put provider-native model names like `openrouter/…` in `ai-guard.yaml`,
+add a [`pricing`](../../docs/providers.md) block so USD estimates stay accurate —
+`create-ai-guard` does this for you.)
+
 ### Optional: see safety blocking
 
 Set `support_chat`'s `safety: strict` in `ai-guard.yaml` and run the gateway with

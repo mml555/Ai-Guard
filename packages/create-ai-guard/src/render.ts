@@ -1,7 +1,7 @@
 import { stringify } from "yaml";
 import type { ModelClass, SafetyPreset, Template } from "./templates";
 
-export type Provider = "openai" | "anthropic" | "gemini";
+export type Provider = "openai" | "anthropic" | "gemini" | "openrouter" | "azure";
 export type DeployMode = "simple" | "full";
 export type { SafetyPreset } from "./templates";
 
@@ -13,26 +13,43 @@ export interface ScaffoldOptions {
   template: Template;
 }
 
+const OLLAMA = "ollama/llama3.2:3b";
 const PRIMARY: Record<ModelClass, Record<Provider, string>> = {
   cheap: {
     openai: "openai/gpt-4o-mini",
     anthropic: "anthropic/claude-haiku",
     gemini: "gemini/gemini-flash",
+    openrouter: "openrouter/openai/gpt-4o-mini",
+    azure: "azure/gpt-4o-mini",
   },
   standard: {
     openai: "openai/gpt-4o",
     anthropic: "anthropic/claude-sonnet",
     gemini: "gemini/gemini-pro",
+    openrouter: "openrouter/openai/gpt-4o",
+    azure: "azure/gpt-4o",
   },
   premium: {
     openai: "openai/gpt-5",
     anthropic: "anthropic/claude-opus",
     gemini: "gemini/gemini-ultra",
+    openrouter: "openrouter/anthropic/claude-3.5-sonnet",
+    azure: "azure/gpt-4o",
   },
-  local: { openai: "ollama/llama3.2:3b", anthropic: "ollama/llama3.2:3b", gemini: "ollama/llama3.2:3b" },
+  local: { openai: OLLAMA, anthropic: OLLAMA, gemini: OLLAMA, openrouter: OLLAMA, azure: OLLAMA },
 };
 
-const LOCAL_MODEL = "ollama/llama3.2:3b";
+// Prices (USD / 1K tokens) for models NOT in Ai-Guard's built-in table, so the
+// generated ai-guard.yaml can budget them. Keyed by model string.
+const MODEL_PRICING: Record<string, { input: number; output: number }> = {
+  "openrouter/openai/gpt-4o-mini": { input: 0.00015, output: 0.0006 },
+  "openrouter/openai/gpt-4o": { input: 0.0025, output: 0.01 },
+  "openrouter/anthropic/claude-3.5-sonnet": { input: 0.003, output: 0.015 },
+  "azure/gpt-4o-mini": { input: 0.00015, output: 0.0006 },
+  "azure/gpt-4o": { input: 0.0025, output: 0.01 },
+};
+
+const LOCAL_MODEL = OLLAMA;
 
 /** Resolve primary + optional fallback (a different provider at the same tier). */
 function modelClassEntry(cls: ModelClass, providers: Provider[]): { primary: string; fallback?: string } {
@@ -74,6 +91,14 @@ export function renderAiGuardYaml(opts: ScaffoldOptions): string {
     t.modelClasses.map((cls) => [cls, modelClassEntry(cls, opts.providers)]),
   );
 
+  // Custom pricing for any used model not in Ai-Guard's built-in table
+  // (OpenRouter / Azure) so budgets estimate correctly.
+  const pricing: Record<string, { input_per_1k: number; output_per_1k: number }> = {};
+  for (const m of modelStringsFor({ ...opts, providers: opts.providers })) {
+    const p = MODEL_PRICING[m];
+    if (p) pricing[m] = { input_per_1k: p.input, output_per_1k: p.output };
+  }
+
   const config: Record<string, unknown> = {
     project: { name: opts.projectName, environment: "development" },
     ...(providers.length
@@ -105,6 +130,7 @@ export function renderAiGuardYaml(opts: ScaffoldOptions): string {
         }
       : {}),
     observability: { provider: opts.mode === "full" ? "langfuse" : "none" },
+    ...(Object.keys(pricing).length ? { pricing } : {}),
   };
 
   const header =
@@ -118,11 +144,14 @@ export function renderEnv(opts: ScaffoldOptions): string {
   const localOnly = opts.template.localOnly === true;
   const lines: string[] = [];
   if (!localOnly) {
-    lines.push(
-      "# Provider keys (consumed by the LiteLLM proxy)",
-      ...opts.providers.map((p) => `${p.toUpperCase()}_API_KEY=`),
-      "",
-    );
+    lines.push("# Provider keys (consumed by the LiteLLM proxy)");
+    for (const p of opts.providers) {
+      lines.push(`${p.toUpperCase()}_API_KEY=`);
+      if (p === "azure") {
+        lines.push("AZURE_API_BASE=https://<your-resource>.openai.azure.com", "AZURE_API_VERSION=2024-08-01-preview");
+      }
+    }
+    lines.push("");
   }
   lines.push(
     "# LiteLLM proxy",
