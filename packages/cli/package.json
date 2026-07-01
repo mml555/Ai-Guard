@@ -1,6 +1,6 @@
 {
   "name": "@ai-guard/cli",
-  "version": "0.5.0",
+  "version": "0.6.0",
   "description": "Ai-Guard CLI for setup, operations, validation, and policy decisions.",
   "type": "module",
   "bin": {

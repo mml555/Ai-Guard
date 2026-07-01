@@ -1,6 +1,6 @@
 {
   "name": "@ai-guard/policy-engine",
-  "version": "0.5.0",
+  "version": "0.6.0",
   "description": "Pure, deterministic AI policy evaluator for Ai-Guard. No I/O.",
   "type": "module",
   "main": "./dist/index.js",

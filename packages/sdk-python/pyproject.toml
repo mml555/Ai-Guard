@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "ai-guard-sdk"
-version = "0.5.0"
+version = "0.6.0"
 description = "Ai-Guard API client. `feature` and `userType` are mandatory on every request."
 readme = "README.md"
 requires-python = ">=3.9"

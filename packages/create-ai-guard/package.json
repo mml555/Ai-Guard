@@ -1,6 +1,6 @@
 {
   "name": "create-ai-guard",
-  "version": "0.5.0",
+  "version": "0.6.0",
   "description": "Scaffold an ai-guard.yaml + .env for a new project.",
   "type": "module",
   "bin": {
