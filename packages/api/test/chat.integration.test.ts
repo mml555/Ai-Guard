@@ -168,6 +168,7 @@ describe.skipIf(!DATABASE_URL)("POST /v1/chat (integration)", () => {
     expect(res.statusCode).toBe(200);
     const json = res.json();
     expect(json.model).toBe("openai/gpt-4o-mini");
+    expect(json.provider).toBe("openai"); // first-class provider field, matches model
     expect(json.decision).toBe("allow");
     expect(json.message.content).toContain("openai/gpt-4o-mini");
     expect(json.cost.actualUsd).toBeCloseTo(0.0002, 6);
@@ -237,6 +238,8 @@ describe.skipIf(!DATABASE_URL)("POST /v1/chat (integration)", () => {
     expect(res.statusCode).toBe(200);
     expect(res.json().decision).toBe("fallback");
     expect(res.json().model).toBe("anthropic/claude-haiku");
+    // provider tracks the ACTUAL model used, not the primary.
+    expect(res.json().provider).toBe("anthropic");
   });
 
   it("releases the reservation and returns 502 when all providers fail", async () => {

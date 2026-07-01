@@ -1,4 +1,5 @@
 import {
+  providerOf,
   roundUsd,
   type AiRequest,
   type BudgetRemaining,
@@ -59,6 +60,9 @@ export function chatSuccessBody(params: {
     body: {
       message: { role: "assistant", content: params.content },
       model: params.model,
+      // Derived from the actual model that ran, so it matches `model` even on
+      // fallback (equals the engine's resolvedProvider on the normal path).
+      provider: providerOf(params.model),
       decision: params.decision,
       reason: params.reason,
       usage: {

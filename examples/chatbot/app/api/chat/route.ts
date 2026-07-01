@@ -42,6 +42,7 @@ export async function POST(request: Request): Promise<NextResponse> {
       reply: res.message.content,
       meta: {
         model: res.model,
+        provider: res.provider,
         decision: res.decision,
         reason: res.reason ?? null,
         usage: res.usage,

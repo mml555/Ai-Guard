@@ -689,6 +689,7 @@
                   "required": [
                     "message",
                     "model",
+                    "provider",
                     "decision",
                     "usage",
                     "cost",
@@ -713,6 +714,9 @@
                       }
                     },
                     "model": {
+                      "type": "string"
+                    },
+                    "provider": {
                       "type": "string"
                     },
                     "decision": {

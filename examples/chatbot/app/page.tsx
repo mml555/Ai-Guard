@@ -5,6 +5,7 @@ import { useRef, useState } from "react";
 type Decision = "allow" | "degrade" | "fallback";
 interface Meta {
   model: string;
+  provider: string;
   decision: Decision;
   reason: string | null;
   usage: { inputTokens: number | null; outputTokens: number | null };
@@ -33,12 +34,10 @@ const FEATURES = [
 
 const usd = (n: number) => `$${n.toFixed(6).replace(/0+$/, "").replace(/\.$/, ".0")}`;
 
-// A model string is "<provider>/<model...>", e.g. "openai/gpt-4o-mini",
-// "openrouter/anthropic/claude-3.5-sonnet", "azure/gpt-4o-mini", "ollama/llama3.2:1b".
-function splitModel(model: string): { provider: string; name: string } {
-  const i = model.indexOf("/");
-  return i === -1 ? { provider: "model", name: model } : { provider: model.slice(0, i), name: model.slice(i + 1) };
-}
+// Strip the provider prefix from a model string for compact display.
+const modelName = (provider: string, model: string) =>
+  model.startsWith(`${provider}/`) ? model.slice(provider.length + 1) : model;
+
 const PROVIDER_COLOR: Record<string, string> = {
   openai: "#10a37f",
   anthropic: "#d97757",
@@ -176,7 +175,8 @@ function Bubble({ msg }: { msg: Msg }) {
 }
 
 function Receipt({ meta }: { meta: Meta }) {
-  const { provider, name } = splitModel(meta.model);
+  const provider = meta.provider; // first-class field from the API — no parsing
+  const name = modelName(provider, meta.model);
   const color = PROVIDER_COLOR[provider] ?? "#8a8f98";
   return (
     <div style={{ marginTop: 5, fontSize: 12, display: "flex", gap: 8, flexWrap: "wrap", alignItems: "center" }}>

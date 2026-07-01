@@ -69,7 +69,7 @@ export const chatBodyJsonSchema = {
 
 export const chatSuccessJsonSchema = {
   type: "object",
-  required: ["message", "model", "decision", "usage", "cost", "budgetRemaining", "safety", "requestId"],
+  required: ["message", "model", "provider", "decision", "usage", "cost", "budgetRemaining", "safety", "requestId"],
   properties: {
     message: {
       type: "object",
@@ -80,6 +80,7 @@ export const chatSuccessJsonSchema = {
       },
     },
     model: { type: "string" },
+    provider: { type: "string" },
     decision: { type: "string", enum: ["allow", "degrade", "fallback"] },
     reason: { type: "string" },
     usage: {

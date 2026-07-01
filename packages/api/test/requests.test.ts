@@ -138,6 +138,8 @@ describe("request visibility", () => {
     expect(res.statusCode).toBe(200);
     expect(res.json().id).toBe("req_42");
     expect(res.json().reasonCode).toBe("model_class_not_permitted");
+    // provider must survive Fastify serialization (present in the response schema).
+    expect(res.json().provider).toBe("openai");
     await server.close();
   });
 

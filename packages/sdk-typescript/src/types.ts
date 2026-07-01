@@ -46,6 +46,8 @@ export interface BudgetRemaining {
 export interface ChatResponse {
   message: { role: string; content: string };
   model: string;
+  /** Provider of the model that ran, e.g. "openai", "openrouter", "azure", "ollama". */
+  provider: string;
   decision: "allow" | "degrade" | "fallback";
   reason?: string;
   usage: { inputTokens: number | null; outputTokens: number | null };

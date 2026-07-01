@@ -44,6 +44,8 @@ export interface ChatSuccess {
   body: {
     message: { role: "assistant"; content: string };
     model: string;
+    /** Provider of the model that actually ran (e.g. "openai", "openrouter", "azure"). */
+    provider: string;
     decision: "allow" | "degrade" | "fallback";
     reason?: string;
     usage: { inputTokens: number | null; outputTokens: number | null };

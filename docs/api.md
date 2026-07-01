@@ -110,6 +110,7 @@ Budget is settled after the stream completes; the terminal frame carries the
 {
   "message": { "role": "assistant", "content": "..." },
   "model": "openai/gpt-4o-mini",
+  "provider": "openai",
   "decision": "allow",
   "usage": { "inputTokens": 12, "outputTokens": 8 },
   "cost": { "estimatedUsd": 0.0001, "actualUsd": 0.00008 },
@@ -122,6 +123,10 @@ Budget is settled after the stream completes; the terminal frame carries the
   "requestId": "req_42"
 }
 ```
+
+`provider` is the provider of the model that actually ran (matches `model`,
+including on a fallback) — no need to parse the model string. `decision` is
+`allow` / `degrade` / `fallback`.
 
 Response header: `x-ai-guard-request-id: req_42` (same value as `requestId`).
 
@@ -296,6 +301,13 @@ content replay when enabled.
 ### `GET /v1/requests/:id`
 
 Returns one record. IDs are `req_<number>` (database primary key).
+
+Each record includes `provider` (e.g. `openai`, `openrouter`, `azure`, `ollama`)
+— the provider of the model that ran, derived the same way as the live chat
+response's `provider`, so historical logs and live responses agree. It's absent
+for requests blocked before a model was selected. Records also carry
+`resolvedModelClass`, `model`, cost, tokens, `reasonCode`, safety flags, and
+(when the policy store is used) `policy.configHash` / `policy.policyVersion`.
 
 ```bash
 curl -s "$AI_GUARD_URL/v1/requests/req_123" -H "Authorization: Bearer $OPS_KEY" | jq .
