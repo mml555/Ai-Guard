@@ -13,6 +13,7 @@ export const KNOWN_PERMISSIONS = [
   "policy:read",
   "policy:write",
   "audit:read",
+  "data:erase",
 ] as const;
 
 export type Permission = (typeof KNOWN_PERMISSIONS)[number];

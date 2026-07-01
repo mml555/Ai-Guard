@@ -261,6 +261,20 @@ export function buildOpenApiDocument() {
           },
         },
       },
+      "/v1/admin/erasure": {
+        post: {
+          tags: ["admin"],
+          description:
+            "Erase a user's request-linked data (GDPR/CCPA right-to-erasure). Requires data:erase.",
+          security: [{ bearerAuth: [] }],
+          responses: {
+            200: { description: "Erasure counts" },
+            400: { description: "Invalid request", content: json(errorJsonSchema) },
+            401: { description: "Unauthorized", content: json(errorJsonSchema) },
+            403: { description: "Forbidden", content: json(errorJsonSchema) },
+          },
+        },
+      },
     },
     components: {
       securitySchemes: {

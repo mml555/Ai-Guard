@@ -138,6 +138,26 @@ OIDC_ROLE_MAP={"ai-guard-admins":"owner","ai-guard-finops":"finops"}
 A verified token whose groups map to no role is authenticated but carries no
 permissions, so protected routes answer `403` (not `401`).
 
+## Secrets management
+
+Any environment variable `X` can be supplied from a file via `X_FILE` — the API
+reads the file at boot and populates `X`. This is the integration point for
+**HashiCorp Vault Agent**, the **AWS/GCP/Azure Secrets Store CSI drivers**,
+**Kubernetes Secrets**, and **Docker secrets**, all of which mount secret
+material as files, so no cloud SDK is needed and long-lived secrets never sit in
+the process environment or compose files.
+
+```bash
+# Vault Agent / CSI driver / k8s secret mounted at /run/secrets/*
+DATABASE_URL_FILE=/run/secrets/database_url
+AI_GUARD_API_KEYS_FILE=/run/secrets/api_keys
+LITELLM_MASTER_KEY_FILE=/run/secrets/litellm_key
+OPENAI_API_KEY_FILE=/run/secrets/openai_key   # provider keys too
+```
+
+An explicitly-set `X` wins over `X_FILE`. A declared `X_FILE` that can't be read
+is a **hard boot error** (fail fast rather than start without a credential).
+
 ## Backups
 
 Back up the **Postgres** volume (or managed DB snapshots). Critical tables:
@@ -257,6 +277,19 @@ API on port **3080**. No cloud provider keys required.
 | --- | --- |
 | `observability.provider: none` | Postgres `request_logs` only |
 | `make up-full` / Langfuse | UI at :3001 |
+| `observability.provider: otel` | OTLP/HTTP spans to any OpenTelemetry collector |
+
+For OpenTelemetry, set `OBSERVABILITY_PROVIDER=otel` and
+`OTEL_EXPORTER_OTLP_ENDPOINT=http://<collector>:4318` (optionally
+`OTEL_SERVICE_NAME`). One span per chat is exported with feature / decision /
+model / cost / token attributes — so OTel-standardized shops (Datadog, Grafana
+Tempo, Honeycomb via a collector) aren't locked to Langfuse. Export is
+best-effort and never blocks or fails a request.
+
+**SIEM & alerting:** the API logs structured JSON (pino) — ship the container
+logs plus the tamper-evident `/v1/admin/audit` trail to Splunk/Datadog. Budget
+threshold breaches POST to `BUDGET_ALERT_WEBHOOK_URL` (HMAC-signed); point it at
+Slack/PagerDuty-compatible endpoints for alert routing.
 
 Set `OBSERVABILITY_CAPTURE_CONTENT=false` in production unless you need prompt logging in Langfuse.
 

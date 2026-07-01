@@ -69,6 +69,35 @@ export async function cleanupOldRequestLogs(
   return total;
 }
 
+const FEATURE_RETENTION_SQL = `
+  DELETE FROM request_logs
+  WHERE id IN (
+    SELECT id FROM request_logs
+    WHERE feature = $1 AND created_at < $2::timestamptz
+    ORDER BY id
+    LIMIT $3
+  )
+`;
+
+/** Prune one feature's request_logs older than its own retention window. */
+export async function cleanupOldRequestLogsForFeature(
+  pool: Pool,
+  feature: string,
+  retentionMs: number,
+  now = Date.now(),
+  batchSize = 5000,
+): Promise<number> {
+  const cutoff = new Date(now - retentionMs).toISOString();
+  let total = 0;
+  for (;;) {
+    const res = await pool.query(FEATURE_RETENTION_SQL, [feature, cutoff, batchSize]);
+    const removed = res.rowCount ?? 0;
+    total += removed;
+    if (removed < batchSize) break;
+  }
+  return total;
+}
+
 /** Append an audit-log row. Returns `req_<id>` when inserted; null on failure. */
 export async function logRequest(pool: Pool, row: RequestLogRow): Promise<string | null> {
   try {

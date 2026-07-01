@@ -67,6 +67,7 @@ const featureSchema = z
     max_tokens: z.number().int().positive(),
     budget: z.object({ monthly_usd: z.number().nonnegative() }).optional(),
     data_sensitivity: z.string().optional(),
+    retention_days: z.number().int().positive().optional(),
   })
   .transform((f) => ({
     safety: normalizeFeatureSafety(f.safety),
@@ -74,6 +75,7 @@ const featureSchema = z
     maxTokens: f.max_tokens,
     budget: f.budget ? { monthlyUsd: f.budget.monthly_usd } : undefined,
     dataSensitivity: f.data_sensitivity,
+    retentionDays: f.retention_days,
   }));
 
 const dataClassSchema = z
@@ -108,7 +110,7 @@ const safetySchema = z
   }));
 
 const observabilitySchema = z.object({
-  provider: z.enum(["none", "langfuse"]).default("none"),
+  provider: z.enum(["none", "langfuse", "otel"]).default("none"),
 });
 
 const configSchema = z

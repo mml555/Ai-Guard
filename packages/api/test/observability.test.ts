@@ -4,6 +4,7 @@ import {
   createObservability,
   LangfuseObservability,
   NoopObservability,
+  OtelObservability,
   type ChatObservation,
 } from "../src/services/observability";
 
@@ -47,6 +48,55 @@ describe("createObservability", () => {
       baseUrl: "http://localhost:3001",
     });
     expect(o).toBeInstanceOf(LangfuseObservability);
+  });
+
+  it("returns Otel when provider is otel with an endpoint", () => {
+    const o = createObservability({ provider: "otel", otelEndpoint: "http://collector:4318" });
+    expect(o).toBeInstanceOf(OtelObservability);
+  });
+
+  it("falls back to Noop when otel endpoint is missing", () => {
+    expect(createObservability({ provider: "otel" })).toBeInstanceOf(NoopObservability);
+  });
+});
+
+describe("OtelObservability", () => {
+  it("POSTs an OTLP span with chat attributes to /v1/traces", async () => {
+    let url = "";
+    let body: Record<string, unknown> = {};
+    const fetchImpl = (async (u: string, init: { body: string }) => {
+      url = u;
+      body = JSON.parse(init.body);
+      return new Response("{}", { status: 200 });
+    }) as unknown as typeof fetch;
+
+    const o = new OtelObservability({
+      endpoint: "http://collector:4318/",
+      serviceName: "ai-guard-test",
+      fetchImpl,
+      now: () => 1_700_000_000_000,
+      randomHex: (n) => "a".repeat(n * 2),
+    });
+    o.recordChat(observation);
+    await o.shutdown();
+
+    expect(url).toBe("http://collector:4318/v1/traces");
+    const span = (body as any).resourceSpans[0].scopeSpans[0].spans[0];
+    expect(span.name).toBe("chat:support_chat");
+    expect(span.status.code).toBe(1);
+    expect(span.traceId).toHaveLength(32);
+    const attrKeys = span.attributes.map((a: { key: string }) => a.key);
+    expect(attrKeys).toContain("ai_guard.cost_usd");
+    expect(attrKeys).toContain("ai_guard.model");
+  });
+
+  it("marks error status and never throws on a failing exporter", async () => {
+    const fetchImpl = (async () => {
+      throw new Error("collector down");
+    }) as unknown as typeof fetch;
+    const o = new OtelObservability({ endpoint: "http://x/", serviceName: "s", fetchImpl });
+    expect(() => o.recordChat({ ...observation, status: "error", reason: "boom" })).not.toThrow();
+    await expect(o.shutdown()).resolves.toBeUndefined();
   });
 });
 

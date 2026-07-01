@@ -1,4 +1,5 @@
 import { z } from "zod";
+import { expandFileSecrets } from "./secrets";
 
 const baseEnvSchema = z.object({
   PORT: z.coerce.number().int().positive().default(3000),
@@ -31,10 +32,13 @@ const baseEnvSchema = z.object({
   LITELLM_TIMEOUT_MS: z.coerce.number().int().positive().default(60_000),
   PRESIDIO_ANALYZER_URL: z.string().url().optional(),
   PRESIDIO_ANONYMIZER_URL: z.string().url().optional(),
-  OBSERVABILITY_PROVIDER: z.enum(["none", "langfuse"]).optional(),
+  OBSERVABILITY_PROVIDER: z.enum(["none", "langfuse", "otel"]).optional(),
   LANGFUSE_PUBLIC_KEY: z.string().optional(),
   LANGFUSE_SECRET_KEY: z.string().optional(),
   LANGFUSE_HOST: z.string().url().optional(),
+  // OpenTelemetry OTLP/HTTP trace export (provider: otel).
+  OTEL_EXPORTER_OTLP_ENDPOINT: z.string().url().optional(),
+  OTEL_SERVICE_NAME: z.string().min(1).default("ai-guard"),
   REQUEST_BODY_LIMIT_BYTES: z.coerce.number().int().positive().default(1_048_576),
   REQUEST_TIMEOUT_MS: z.coerce.number().int().nonnegative().default(60_000),
   TRUST_PROXY: z.string().optional(),
@@ -113,6 +117,7 @@ const OPTIONAL_ENV_KEYS = [
   "OIDC_JWKS_URI",
   "OIDC_AUDIENCE",
   "OIDC_ROLE_MAP",
+  "OTEL_EXPORTER_OTLP_ENDPOINT",
 ] as const;
 
 function normalizeOptionalEmptyStrings(
@@ -128,7 +133,10 @@ function normalizeOptionalEmptyStrings(
 }
 
 export function loadEnv(raw: NodeJS.ProcessEnv = process.env): ApiEnv {
-  const normalized = normalizeOptionalEmptyStrings(raw);
+  // Resolve *_FILE secret references (Vault/CSI/K8s/Docker) before validation,
+  // so file-mounted secrets satisfy required vars and feed provider-key refs.
+  const expanded = expandFileSecrets(raw);
+  const normalized = normalizeOptionalEmptyStrings(expanded);
   const parsed = envSchema.safeParse(normalized);
   if (!parsed.success) {
     const detail = parsed.error.issues
@@ -139,12 +147,12 @@ export function loadEnv(raw: NodeJS.ProcessEnv = process.env): ApiEnv {
   return {
     ...parsed.data,
     apiKeys: parseApiKeys(parsed.data),
-    envRefs: { ...raw },
+    envRefs: { ...expanded },
   };
 }
 
 export function loadDatabaseEnv(raw: NodeJS.ProcessEnv = process.env): DatabaseEnv {
-  const parsed = databaseEnvSchema.safeParse(normalizeOptionalEmptyStrings(raw));
+  const parsed = databaseEnvSchema.safeParse(normalizeOptionalEmptyStrings(expandFileSecrets(raw)));
   if (!parsed.success) {
     const detail = parsed.error.issues
       .map((issue) => `${issue.path.join(".")}: ${issue.message}`)

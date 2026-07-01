@@ -127,6 +127,8 @@ async function main(): Promise<void> {
     secretKey: env.LANGFUSE_SECRET_KEY,
     baseUrl: env.LANGFUSE_HOST,
     captureContent: env.OBSERVABILITY_CAPTURE_CONTENT === "true",
+    otelEndpoint: env.OTEL_EXPORTER_OTLP_ENDPOINT,
+    otelServiceName: env.OTEL_SERVICE_NAME,
   });
 
   let rateLimitRedis: Redis | undefined;
@@ -220,11 +222,16 @@ async function main(): Promise<void> {
 
   let maintenanceTimer: NodeJS.Timeout | undefined;
   if (env.MAINTENANCE_ENABLED === "true") {
+    const featureRetentionDays: Record<string, number> = {};
+    for (const [name, feature] of Object.entries(config.features)) {
+      if (feature.retentionDays) featureRetentionDays[name] = feature.retentionDays;
+    }
     maintenanceTimer = startMaintenance({
       pool,
       idempotencyStaleMs: env.IDEMPOTENCY_STALE_MS,
       reservationStaleMs: env.RESERVATION_STALE_MS,
       requestLogRetentionMs: env.REQUEST_LOG_RETENTION_MS,
+      featureRetentionDays,
       log: app.log,
     });
   }

@@ -1,6 +1,9 @@
 import type { FastifyBaseLogger } from "fastify";
 import type { Pool } from "pg";
-import { cleanupOldRequestLogs } from "../modules/usage/auditLogRepo";
+import {
+  cleanupOldRequestLogs,
+  cleanupOldRequestLogsForFeature,
+} from "../modules/usage/auditLogRepo";
 import { cleanupStaleIdempotencyKeys } from "../modules/idempotency/repo";
 import { cleanupStaleReservationLeases } from "../modules/usage/reservationLeases";
 
@@ -13,6 +16,8 @@ export interface MaintenanceOptions {
   idempotencyStaleMs: number;
   reservationStaleMs: number;
   requestLogRetentionMs: number;
+  /** Optional per-feature retention overrides (days), applied after the global sweep. */
+  featureRetentionDays?: Record<string, number>;
   log?: FastifyBaseLogger;
 }
 
@@ -52,6 +57,18 @@ export function startMaintenance(opts: MaintenanceOptions): NodeJS.Timeout {
       );
       if (removedLogs > 0) {
         opts.log?.info({ removed: removedLogs }, "pruned old request_logs rows");
+      }
+
+      // Per-feature retention overrides (stricter windows for sensitive features).
+      for (const [feature, days] of Object.entries(opts.featureRetentionDays ?? {})) {
+        const removed = await cleanupOldRequestLogsForFeature(
+          opts.pool,
+          feature,
+          days * 24 * 60 * 60 * 1000,
+        );
+        if (removed > 0) {
+          opts.log?.info({ feature, removed }, "pruned request_logs for feature retention");
+        }
       }
     } catch (err) {
       opts.log?.error({ err }, "maintenance tick failed");

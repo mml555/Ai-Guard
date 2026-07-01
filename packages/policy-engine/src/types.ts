@@ -6,7 +6,7 @@
 export type SafetyPresetName = "dev" | "balanced" | "strict" | "custom";
 export type PiiMode = "mask" | "block" | "off";
 export type InjectionMode = "block" | "off";
-export type ObservabilityProvider = "none" | "langfuse";
+export type ObservabilityProvider = "none" | "langfuse" | "otel";
 export type PolicyDecisionKind = "allow" | "block" | "degrade" | "fallback";
 
 /** Stable machine-readable codes for policy outcomes (versioned contract). */
@@ -74,6 +74,8 @@ export interface FeatureConfig {
   budget?: FeatureBudget;
   /** Data-sensitivity class this feature handles; gated by `dataClasses`. */
   dataSensitivity?: string;
+  /** Override request-log retention (days) for this feature's audit rows. */
+  retentionDays?: number;
 }
 
 /**

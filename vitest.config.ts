@@ -23,6 +23,12 @@ export default defineConfig({
       include: [
         "packages/policy-engine/src/**/*.ts",
         "packages/api/src/modules/usage/repo.ts",
+        // Enterprise control-plane modules with dedicated test suites.
+        "packages/api/src/modules/keys/**/*.ts",
+        "packages/api/src/modules/authz/**/*.ts",
+        "packages/api/src/modules/audit/**/*.ts",
+        "packages/api/src/modules/governance/**/*.ts",
+        "packages/api/src/config/secrets.ts",
       ],
       exclude: ["**/*.test.ts", "**/index.ts"],
       thresholds: {

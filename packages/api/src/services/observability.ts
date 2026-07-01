@@ -1,3 +1,4 @@
+import { randomBytes } from "node:crypto";
 import type { TraceTags } from "@ai-guard/policy-engine";
 import { Langfuse } from "langfuse";
 import type { ChatMessage } from "../types";
@@ -130,12 +131,118 @@ export class LangfuseObservability implements Observability {
   }
 }
 
+export interface OtelOptions {
+  /** OTLP/HTTP base endpoint; `/v1/traces` is appended. */
+  endpoint: string;
+  serviceName: string;
+  fetchImpl?: typeof fetch;
+  now?: () => number;
+  randomHex?: (bytes: number) => string;
+}
+
+/**
+ * OpenTelemetry-native tracing via OTLP/HTTP (JSON). Emits one span per chat to
+ * any OTLP collector so OTel-standardized shops aren't locked to Langfuse. Kept
+ * dependency-free (no OTel SDK) and best-effort: export never blocks or throws.
+ */
+export class OtelObservability implements Observability {
+  private readonly url: string;
+  private readonly serviceName: string;
+  private readonly fetchImpl: typeof fetch;
+  private readonly now: () => number;
+  private readonly randomHex: (bytes: number) => string;
+  private inFlight = new Set<Promise<unknown>>();
+
+  constructor(opts: OtelOptions) {
+    this.url = `${opts.endpoint.replace(/\/$/, "")}/v1/traces`;
+    this.serviceName = opts.serviceName;
+    this.fetchImpl = opts.fetchImpl ?? fetch;
+    this.now = opts.now ?? Date.now;
+    this.randomHex =
+      opts.randomHex ?? ((bytes: number) => randomHex(bytes));
+  }
+
+  recordChat(o: ChatObservation): void {
+    try {
+      const nowNanos = `${this.now()}000000`;
+      const attrs: Array<{ key: string; value: Record<string, unknown> }> = [
+        kv("ai_guard.feature", o.feature),
+        kv("ai_guard.user_id", o.userId),
+        kv("ai_guard.decision", o.decision),
+        kv("ai_guard.status", o.status),
+        kv("ai_guard.model_class", o.traceTags.modelClass),
+      ];
+      if (o.model) attrs.push(kv("ai_guard.model", o.model));
+      if (typeof o.actualCostUsd === "number") attrs.push(kvNum("ai_guard.cost_usd", o.actualCostUsd));
+      if (typeof o.inputTokens === "number") attrs.push(kvInt("ai_guard.input_tokens", o.inputTokens));
+      if (typeof o.outputTokens === "number") attrs.push(kvInt("ai_guard.output_tokens", o.outputTokens));
+      if (o.projectId) attrs.push(kv("ai_guard.project_id", o.projectId));
+
+      const payload = {
+        resourceSpans: [
+          {
+            resource: { attributes: [kv("service.name", this.serviceName)] },
+            scopeSpans: [
+              {
+                scope: { name: "ai-guard" },
+                spans: [
+                  {
+                    traceId: this.randomHex(16),
+                    spanId: this.randomHex(8),
+                    name: `chat:${o.feature}`,
+                    kind: 3, // CLIENT
+                    startTimeUnixNano: nowNanos,
+                    endTimeUnixNano: nowNanos,
+                    attributes: attrs,
+                    // OTel status: 1=OK, 2=ERROR.
+                    status: { code: o.status === "ok" ? 1 : 2, message: o.reason },
+                  },
+                ],
+              },
+            ],
+          },
+        ],
+      };
+
+      const p = this.fetchImpl(this.url, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify(payload),
+      })
+        .catch(() => {})
+        .finally(() => this.inFlight.delete(p));
+      this.inFlight.add(p);
+    } catch {
+      // tracing is non-critical
+    }
+  }
+
+  async shutdown(): Promise<void> {
+    await Promise.allSettled([...this.inFlight]);
+  }
+}
+
+function kv(key: string, value: string): { key: string; value: Record<string, unknown> } {
+  return { key, value: { stringValue: value } };
+}
+function kvNum(key: string, value: number): { key: string; value: Record<string, unknown> } {
+  return { key, value: { doubleValue: value } };
+}
+function kvInt(key: string, value: number): { key: string; value: Record<string, unknown> } {
+  return { key, value: { intValue: value } };
+}
+function randomHex(bytes: number): string {
+  return randomBytes(bytes).toString("hex");
+}
+
 export function createObservability(opts: {
-  provider: "none" | "langfuse";
+  provider: "none" | "langfuse" | "otel";
   publicKey?: string;
   secretKey?: string;
   baseUrl?: string;
   captureContent?: boolean;
+  otelEndpoint?: string;
+  otelServiceName?: string;
 }): Observability {
   if (
     opts.provider === "langfuse" &&
@@ -148,6 +255,12 @@ export function createObservability(opts: {
       secretKey: opts.secretKey,
       baseUrl: opts.baseUrl,
       captureContent: opts.captureContent ?? false,
+    });
+  }
+  if (opts.provider === "otel" && opts.otelEndpoint) {
+    return new OtelObservability({
+      endpoint: opts.otelEndpoint,
+      serviceName: opts.otelServiceName ?? "ai-guard",
     });
   }
   return new NoopObservability();

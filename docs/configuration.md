@@ -190,6 +190,42 @@ the API logs a warning and PII rules are not enforced.
 
 ---
 
+## `data_classes` (optional — data-sensitivity governance)
+
+Restrict which model classes / providers may process a given data-sensitivity
+class. A feature opts in with `data_sensitivity: <class>`; requests for that
+feature are **blocked** (`reasonCode: data_sensitivity_not_permitted`) if the
+resolved model class or provider isn't on the allow-list — enforced before
+budget gates and on the fallback path too.
+
+```yaml
+data_classes:
+  restricted:
+    allowed_model_classes: [onprem]     # only these classes may run restricted data
+    allowed_providers: [ollama]         # and only these providers (by model prefix)
+
+features:
+  hr_chat:
+    model_class: onprem
+    max_tokens: 500
+    data_sensitivity: restricted        # gated by the class above
+```
+
+| Field | Description |
+| --- | --- |
+| `allowed_model_classes` | Model classes approved for this sensitivity (omit = no class restriction) |
+| `allowed_providers` | Providers approved (matched against the model's provider prefix; omit = no provider restriction) |
+
+A feature may also set `retention_days: <n>` to prune its own `request_logs`
+rows on a stricter window than the global `REQUEST_LOG_RETENTION_MS` (applied by
+the maintenance sweep). Combine with the erasure endpoint
+(`POST /v1/admin/erasure`, permission `data:erase`) for GDPR/CCPA workflows.
+
+Use this to keep confidential/restricted data on approved (e.g. on-prem or
+region-pinned) models and off general cloud providers.
+
+---
+
 ## `observability`
 
 | Field | Values | Description |

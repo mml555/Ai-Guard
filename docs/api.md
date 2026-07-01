@@ -27,6 +27,7 @@ Authentication: **`Authorization: Bearer <API_KEY>`** on all routes except
 | `POST` | `/v1/admin/keys/:id/revoke` | `keys:admin` | Revoke (idempotent) |
 | `GET` | `/v1/admin/audit` | `audit:read` | Tamper-evident admin audit log |
 | `GET` | `/v1/admin/audit/verify` | `audit:read` | Re-walk the hash chain; report integrity |
+| `POST` | `/v1/admin/erasure` | `data:erase` | Erase a user's request-linked data (GDPR/CCPA) |
 
 Default API keys include `chat:create` only. Add `usage:read` for the usage endpoint
 (see [Configuration](./configuration.md#scoped-api-keys-production)).
