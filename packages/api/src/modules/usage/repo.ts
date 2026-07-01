@@ -382,6 +382,61 @@ export async function recordActualCost(
   );
 }
 
+// Books already-spent money with NO cap check and NO reservation change: the
+// fresh-window INSERT is unconditional and the conflict path only adds to
+// used_usd. Deliberately unlike RESERVE_SQL — this is accounting, not a gate.
+const INCUR_SQL = `
+  INSERT INTO budget_counters (scope, project_id, key, window_start, used_usd, reserved_usd, requests_used, used_tokens, reserved_tokens)
+  VALUES ($1, $2, $3, $4, $5, 0, 0, 0, 0)
+  ON CONFLICT (scope, project_id, key, window_start) DO UPDATE
+    SET used_usd = budget_counters.used_usd + EXCLUDED.used_usd
+`;
+
+/**
+ * Book cost that was already spent outside a reservation — the input-safety
+ * classifier makes a billable provider call BEFORE the budget is reserved, so
+ * when the request is then blocked (safety block, reservation failure, provider
+ * failure) that real spend must still land in used_usd. No cap check, no
+ * reservation change, no lease: a safety block must stay a safety block, never
+ * flip to budget_exceeded because booking the classifier pushed a counter over
+ * its cap. The overshoot surfaces on the NEXT request's policy gate instead.
+ */
+export async function recordIncurredCost(
+  pool: Pool,
+  params: {
+    projectId: string;
+    userId: string;
+    feature: string;
+    costUsd: number;
+    caps: ReservationCaps;
+    now: Date;
+  },
+): Promise<void> {
+  if (params.costUsd <= 0) return;
+  const dims = dimensionsFor(
+    params.projectId,
+    params.userId,
+    params.feature,
+    params.caps,
+    params.now,
+  );
+  await withTransaction(
+    pool,
+    async (client) => {
+      for (const d of dims) {
+        await client.query(INCUR_SQL, [
+          d.scope,
+          d.projectId,
+          d.key,
+          d.windowStart,
+          params.costUsd,
+        ]);
+      }
+    },
+    { lockTimeoutMs: LOCK_TIMEOUT_MS },
+  );
+}
+
 const RELEASE_SQL = `
   UPDATE budget_counters
   SET reserved_usd    = GREATEST(reserved_usd - $5::numeric, 0),

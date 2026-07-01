@@ -365,6 +365,37 @@ export async function releasePath(pool: Pool, reservation: PathReservation): Pro
 }
 
 /**
+ * Book already-spent cost (the input-safety classifier) against every node on
+ * the path without a reservation, cap check, or lease. Mirrors the flat
+ * `recordIncurredCost`: a blocked request must still account for real provider
+ * spend, but the booking never gates the rejection.
+ */
+export async function recordIncurredPathCost(
+  pool: Pool,
+  nodes: BudgetNode[],
+  params: { costUsd: number; now: Date; shardKey?: string },
+): Promise<void> {
+  if (params.costUsd <= 0 || nodes.length === 0) return;
+  const shardKey = params.shardKey ?? "";
+  const ordered = [...nodes].sort((a, b) => (BigInt(a.id) < BigInt(b.id) ? -1 : 1));
+  await withTransaction(
+    pool,
+    async (client) => {
+      for (const node of ordered) {
+        await client.query(
+          `INSERT INTO budget_node_counters (node_id, window_start, shard, used_usd, reserved_usd, requests_used)
+           VALUES ($1, $2, $3, $4, 0, 0)
+           ON CONFLICT (node_id, window_start, shard) DO UPDATE
+             SET used_usd = budget_node_counters.used_usd + EXCLUDED.used_usd`,
+          [node.id, windowStartFor(node, params.now), shardFor(node.shardCount, shardKey), params.costUsd],
+        );
+      }
+    },
+    { lockTimeoutMs: LOCK_TIMEOUT_MS },
+  );
+}
+
+/**
  * Release path reservations whose lease is older than `staleMs` (worker crashed
  * between reserve and settle). Mirrors the flat reservation-lease sweep. Runs in
  * one transaction using SKIP LOCKED so replicas don't contend.

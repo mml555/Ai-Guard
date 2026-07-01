@@ -284,6 +284,11 @@ export function createAuthProviders(env: Env, pool: Pool): AuthProviders {
       nameClaim: env.OIDC_NAME_CLAIM,
       roleMap,
     });
+    if (!env.OIDC_AUDIENCE) {
+      console.warn(
+        "OIDC_AUDIENCE is unset — tokens minted for other audiences at the same IdP will pass verification. Set OIDC_AUDIENCE to enforce audience binding.",
+      );
+    }
     console.log(`operator SSO enabled (OIDC issuer ${env.OIDC_ISSUER})`);
   }
 

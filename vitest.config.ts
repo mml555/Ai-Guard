@@ -20,25 +20,28 @@ export default defineConfig({
     fileParallelism: false,
     coverage: {
       provider: "v8",
+      // Measure the WHOLE api + policy-engine surface, not an allow-list — a
+      // gate over hand-picked files reports high numbers while core paths go
+      // unmeasured. Only process entry scripts (boot wiring with no unit
+      // surface) are excluded, explicitly, so nothing silently drops out.
       include: [
         "packages/policy-engine/src/**/*.ts",
-        "packages/api/src/modules/usage/repo.ts",
-        // Enterprise control-plane modules with dedicated test suites.
-        "packages/api/src/modules/keys/**/*.ts",
-        "packages/api/src/modules/authz/**/*.ts",
-        "packages/api/src/modules/audit/**/*.ts",
-        "packages/api/src/modules/governance/**/*.ts",
-        "packages/api/src/modules/budgets/**/*.ts",
-        "packages/api/src/config/secrets.ts",
+        "packages/api/src/**/*.ts",
       ],
-      exclude: ["**/*.test.ts", "**/index.ts"],
+      exclude: [
+        "**/*.test.ts",
+        "**/index.ts",
+        "packages/api/src/migrate.ts",
+        "packages/api/src/openapiExport.ts",
+      ],
       // Set just below measured coverage so a regression fails CI while leaving
-      // headroom for legitimate refactors.
+      // headroom for legitimate refactors. Ratchet these UP as gaps close;
+      // never widen them back down.
       thresholds: {
-        lines: 90,
-        functions: 90,
-        branches: 80,
-        statements: 90,
+        lines: 81,
+        functions: 89,
+        branches: 72,
+        statements: 81,
       },
     },
   },

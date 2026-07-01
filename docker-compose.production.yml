@@ -8,13 +8,13 @@ services:
       postgres:
         condition: service_healthy
       redis:
-        condition: service_started
+        condition: service_healthy
       litellm:
-        condition: service_started
+        condition: service_healthy
       presidio-analyzer:
-        condition: service_started
+        condition: service_healthy
       presidio-anonymizer:
-        condition: service_started
+        condition: service_healthy
     environment:
       PORT: 3000
       HOST: 0.0.0.0
@@ -103,6 +103,16 @@ services:
       LITELLM_MASTER_KEY: ${LITELLM_MASTER_KEY:?set a LiteLLM master key}
     volumes:
       - ./litellm_config.yaml:/app/config.yaml:ro
+    healthcheck:
+      test:
+        [
+          "CMD-SHELL",
+          "python -c \"import urllib.request; urllib.request.urlopen('http://localhost:4000/health')\"",
+        ]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+      start_period: 30s
     deploy:
       resources:
         limits:
@@ -111,6 +121,16 @@ services:
   presidio-analyzer:
     image: ${PRESIDIO_ANALYZER_IMAGE:?set a pinned Presidio analyzer image}
     restart: unless-stopped
+    healthcheck:
+      test:
+        [
+          "CMD-SHELL",
+          "python -c \"import urllib.request; urllib.request.urlopen('http://localhost:3000/health')\"",
+        ]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+      start_period: 20s
     deploy:
       resources:
         limits:
@@ -119,6 +139,16 @@ services:
   presidio-anonymizer:
     image: ${PRESIDIO_ANONYMIZER_IMAGE:?set a pinned Presidio anonymizer image}
     restart: unless-stopped
+    healthcheck:
+      test:
+        [
+          "CMD-SHELL",
+          "python -c \"import urllib.request; urllib.request.urlopen('http://localhost:3000/health')\"",
+        ]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+      start_period: 20s
     deploy:
       resources:
         limits:

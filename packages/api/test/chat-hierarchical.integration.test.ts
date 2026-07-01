@@ -168,4 +168,125 @@ describe.skipIf(!DATABASE_URL)("hierarchical budgets — /v1/chat (integration)"
     expect(res.statusCode).toBe(200); // flat path admits
     expect((await nodeCounter(org.id)).used).toBe(0);
   });
+
+  it("books classifier spend to the node path when input safety blocks", async () => {
+    // Mirrors the flat-path incurred-cost semantics: a blocked request's real
+    // classifier spend lands in the nodes' used_usd without a reservation and
+    // without gating the block.
+    const server = buildServer({
+      config,
+      pool,
+      litellm: okLiteLLM,
+      safety: {
+        inspectInput: async (messages) => ({
+          action: "block" as const,
+          messages,
+          piiMasked: false,
+          injectionBlocked: true,
+          findings: [{ type: "prompt_injection", detail: "test" }],
+          blockReason: "prompt_injection",
+          safetyCostUsd: 0.07,
+        }),
+        inspectOutput: async (content) => ({
+          action: "allow" as const,
+          content,
+          piiMasked: false,
+          findings: [],
+        }),
+      },
+      observability: new NoopObservability(),
+      logger: false,
+      apiKey: "secret",
+      hierarchicalBudgets: true,
+    });
+    const { org, user } = await tree(10);
+    const res = await post(server, user.id);
+
+    expect(res.statusCode).toBe(403);
+    expect(res.json().error.code).toBe("safety_blocked");
+
+    // Spend rolled up to every node on the path; nothing reserved, no lease.
+    for (const nodeId of [org.id, user.id]) {
+      const c = await nodeCounter(nodeId);
+      expect(c.used).toBeCloseTo(0.07, 6);
+      expect(c.reserved).toBeCloseTo(0, 6);
+      expect(c.requests).toBe(0);
+    }
+    expect(await leaseCount()).toBe(0);
+
+    const { rows } = await pool.query("SELECT status, actual_cost_usd FROM request_logs");
+    expect(rows).toHaveLength(1);
+    expect(rows[0].status).toBe("safety_blocked");
+    expect(Number(rows[0].actual_cost_usd)).toBeCloseTo(0.07, 6);
+  });
+
+  it("honors a data-sensitivity block on the fallback path (releases nodes, audits the block)", async () => {
+    // Mirrors the flat-path spec in rejection-audit.integration.test.ts: the
+    // provider fails, the forceFallback re-eval blocks because the fallback's
+    // provider isn't approved for the feature's data class — the hierarchical
+    // path must release the node reservation, audit the block, and never issue
+    // a second provider call.
+    const sensitiveConfig = parseConfigObject({
+      project: { name: "test", environment: "test" },
+      budgets: {
+        global: { monthly_usd: 1000, hard_stop_at_percent: 100 },
+        by_user_type: { logged_in: { daily_usd: 1000, daily_requests: 1000, models: ["cheap"] } },
+      },
+      features: {
+        secure_chat: { safety: "dev", model_class: "cheap", max_tokens: 100, data_sensitivity: "restricted" },
+      },
+      data_classes: { restricted: { allowed_providers: ["openai"] } },
+      model_classes: { cheap: { primary: "openai/gpt-4o-mini", fallback: "anthropic/claude-haiku" } },
+      safety: { preset: "dev" },
+    });
+    const models: string[] = [];
+    const server = buildServer({
+      config: sensitiveConfig,
+      pool,
+      litellm: {
+        chat: async (p) => {
+          models.push(p.model);
+          throw new ProviderError("primary down");
+        },
+      },
+      safety: new NoopGuard(),
+      observability: new NoopObservability(),
+      logger: false,
+      apiKey: "secret",
+      hierarchicalBudgets: true,
+    });
+    const { org, user } = await tree(10);
+    const res = await server.inject({
+      method: "POST",
+      url: "/v1/chat",
+      headers: { authorization: "Bearer secret" },
+      payload: {
+        userId: "u1", userType: "logged_in", feature: "secure_chat",
+        messages: [{ role: "user", content: "restricted data" }],
+        budgetNodeId: user.id,
+      },
+    });
+
+    expect(res.statusCode).toBe(403);
+    expect(res.json().error.code).toBe("policy_blocked");
+    expect(res.json().error.details.reasonCode).toBe("data_sensitivity_not_permitted");
+    // Exactly one provider attempt (the primary); no retry, no unapproved call.
+    expect(models).toEqual(["openai/gpt-4o-mini"]);
+
+    // The node reservation and its lease must be fully released.
+    const c = await nodeCounter(org.id);
+    expect(c.used).toBeCloseTo(0, 6);
+    expect(c.reserved).toBeCloseTo(0, 6);
+    expect(await leaseCount()).toBe(0);
+
+    const { rows } = await pool.query(
+      "SELECT status, decision, reason_code FROM request_logs",
+    );
+    expect(rows).toHaveLength(1);
+    expect(rows[0]).toMatchObject({
+      status: "failed",
+      decision: "block",
+      reason_code: "data_sensitivity_not_permitted",
+    });
+  });
 });

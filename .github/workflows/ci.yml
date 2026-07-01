@@ -44,10 +44,12 @@ jobs:
       - run: pnpm build
       - run: pnpm typecheck
       - run: pnpm lint
+      - name: Policy regression tests
+        run: pnpm ai-guard test-policy --file ai-guard.policy-tests.yaml
       - run: pnpm test:coverage 2>&1 | tee /tmp/test.log
       - name: Integration tests ran (not skipped)
         run: |
-          if grep -E "↓ packages/api/test/(chat|usage|idempotency|reservationLeases)" /tmp/test.log; then
+          if grep -E "↓ packages/api/test/(chat|usage|idempotency|reservationLeases|rejection-audit)" /tmp/test.log; then
             echo "::error::Integration tests were skipped — DATABASE_URL must be set in CI"
             exit 1
           fi

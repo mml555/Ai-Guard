@@ -64,7 +64,6 @@ jobs:
         run: bash packages/api/scripts/docker-smoke.sh ai-guard-api:ci
 
       - name: Scan image for vulnerabilities
-        if: github.event_name == 'pull_request'
         uses: aquasecurity/trivy-action@0.24.0
         with:
           image-ref: ai-guard-api:ci

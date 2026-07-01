@@ -26,7 +26,7 @@ Budget reservations use row locks. Without Postgres, concurrent spend cannot be 
 
 1. Policy allows the request and budget is reserved.
 2. Primary model call fails with a provider error.
-3. If the model class has a **fallback** configured, the API re-evaluates with `forceFallback: true` and retries on the fallback model.
+3. If the model class has a **fallback** configured, the API re-evaluates with `forceFallback: true` and retries on the fallback model. The re-evaluation re-applies the **data-sensitivity gate**: if the fallback model's provider is not approved for the feature's data class, the request fails with `403 policy_blocked` (`data_sensitivity_not_permitted`) and the reservation is released — the primary is never retried and no data reaches the unapproved provider.
 4. If fallback also fails, or no fallback exists → **`502 provider_unavailable`** and reservation is released.
 
 Settlement: if the model call succeeded but `recordActualCost` fails, the reservation is **left in place** for the lease-cleanup sweep rather than released (prevents budget leaks).
@@ -39,6 +39,21 @@ Settlement: if the model call succeeded but `recordActualCost` fails, the reserv
 | **Output safety** (after model, cost booked) | `503 safety_unavailable`, `retryable: false` — idempotency key retained |
 
 When `safety.preset: dev` and protections are off, safety is a no-op (`NoopGuard`) and Presidio is not required.
+
+### Classifier cost on rejected requests
+
+The injection classifier makes a **billable model call** as part of input safety.
+That spend is booked to the caller's `used_usd` on every path where it was
+incurred — including requests that are then **safety-blocked**, rejected at
+budget reservation, or fail at the provider. The audit row carries it as
+`actualCostUsd`. Two invariants:
+
+- **Booking never gates.** A safety block stays `403 safety_blocked`; it never
+  flips to `budget_exceeded` because the classifier spend pushed a counter over
+  its cap. Any overshoot surfaces on the *next* request's policy gate.
+- Features with strict injection/PII presets therefore incur per-request
+  classifier cost **even on blocked requests** — expected, since the caller
+  triggered the scan.
 
 ## Langfuse
 
@@ -80,6 +95,7 @@ Policy and budget blocks return structured fields on the `error` object:
 | `reasonCode` | Meaning |
 | --- | --- |
 | `model_class_not_permitted` | User type cannot use requested model class |
+| `data_sensitivity_not_permitted` | Feature's data class does not permit the resolved model class or provider (also applies on fallback re-evaluation) |
 | `daily_request_limit_reached` | Daily request count exhausted |
 | `daily_budget_exceeded` | User daily USD cap exceeded |
 | `feature_monthly_budget_exceeded` | Feature monthly cap exceeded |

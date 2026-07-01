@@ -16,6 +16,7 @@ import { logRequest, type RequestLogRow } from "../usage/auditLogRepo";
 import {
   loadUsageSnapshot,
   recordActualCost,
+  recordIncurredCost,
   releaseBudget,
   reserveBudget,
   topUpBudget,
@@ -144,6 +145,17 @@ export async function handleChat(
     injectionBlocked = safetyResult.injectionBlocked;
     safetyCostUsd = safetyResult.safetyCostUsd;
     if (safetyResult.action === "block") {
+      // The classifier call was real provider spend even though the request is
+      // blocked — book it (no reservation exists yet, so incur directly). The
+      // booking never gates the rejection: this stays a safety block.
+      await recordIncurredCost(pool, {
+        projectId: aiRequest.projectId,
+        userId: aiRequest.userId,
+        feature: aiRequest.feature,
+        costUsd: safetyCostUsd,
+        caps: decision.reservationCaps,
+        now,
+      });
       return recordRejection(
         { pool, observability },
         {
@@ -154,6 +166,7 @@ export async function handleChat(
           injectionBlocked,
           safetyFindings: safetyResult.findings,
           error: safetyResult.blockReason,
+          ...(safetyCostUsd > 0 ? { actualCostUsd: safetyCostUsd } : {}),
         },
         // NB: no `input` on the observation — on a safety block the input is
         // exactly the content that tripped the guard (PII / injection), so
@@ -196,6 +209,16 @@ export async function handleChat(
     now,
   });
   if (!reservation.ok) {
+    // The reservation rolled back atomically, but the classifier spend already
+    // happened — book it without gating the (already-decided) rejection.
+    await recordIncurredCost(pool, {
+      projectId: aiRequest.projectId,
+      userId: aiRequest.userId,
+      feature: aiRequest.feature,
+      costUsd: safetyCostUsd,
+      caps: decision.reservationCaps,
+      now,
+    });
     const reason = `budget_exceeded:${reservation.failedScope}`;
     const policy = budgetErrorContext(
       reservation.failedScope,
@@ -208,7 +231,7 @@ export async function handleChat(
     );
     return recordRejection(
       { pool, observability },
-      { ...baseLog(aiRequest, decision, deps.policyMeta), status: "failed", error: reason, reasonCode: policy.reasonCode },
+      { ...baseLog(aiRequest, decision, deps.policyMeta), status: "failed", error: reason, reasonCode: policy.reasonCode, ...(safetyCostUsd > 0 ? { actualCostUsd: safetyCostUsd } : {}) },
       { ...baseObs(aiRequest, decision), status: "blocked", reason },
       fail(
         403,
@@ -249,6 +272,52 @@ export async function handleChat(
           config,
           usage,
         });
+        if (fb.decision === "block") {
+          // Book the classifier spend BEFORE releasing: if we crash in between,
+          // the stale-lease sweep releases the remainder, whereas the reverse
+          // order would lose the incurred spend entirely. The release returns
+          // the FULL reservation (model + safety); the incur re-books the
+          // safety portion as used — net effect: safety spent, model freed.
+          await recordIncurredCost(pool, {
+            projectId: aiRequest.projectId,
+            userId: aiRequest.userId,
+            feature: aiRequest.feature,
+            costUsd: safetyCostUsd,
+            caps: decision.reservationCaps,
+            now,
+          });
+          await releaseBudget(pool, {
+            projectId: aiRequest.projectId,
+            userId: aiRequest.userId,
+            feature: aiRequest.feature,
+            estimatedCostUsd: reservedUsd,
+            estimatedTokens: decision.estimatedTokens,
+            caps: decision.reservationCaps,
+            now,
+            leaseId,
+          });
+          const policy = policyErrorFromDecision(fb, {
+            userId: aiRequest.userId,
+            userType: aiRequest.userType,
+            feature: aiRequest.feature,
+          });
+          return recordRejection(
+            { pool, observability },
+            { ...baseLog(aiRequest, fb, deps.policyMeta), status: "failed", error: fb.reason, reasonCode: fb.reasonCode, ...(safetyCostUsd > 0 ? { actualCostUsd: safetyCostUsd } : {}) },
+            { ...baseObs(aiRequest, fb), status: "blocked", reason: fb.reason },
+            fail(
+              403,
+              "policy_blocked",
+              {
+                reason: fb.reason,
+                reasonCode: fb.reasonCode,
+                budgetRemaining: fb.budgetRemaining,
+              },
+              policyErrorMessage("policy_blocked", policy),
+              policy,
+            ),
+          );
+        }
         // The fallback reservation must cover the fallback model estimate plus
         // the same safety cost already reserved.
         const fbReserve = fb.estimatedCostUsd + safetyCostUsd;
@@ -273,6 +342,7 @@ export async function handleChat(
               now,
               leaseId,
             });
+            const reason = `budget_exceeded:${topUp.failedScope}`;
             const policy = budgetErrorContext(
               topUp.failedScope,
               {
@@ -282,16 +352,21 @@ export async function handleChat(
               },
               decision.budgetRemaining,
             );
-            return fail(
-              403,
-              "budget_exceeded",
-              {
-                scope: topUp.failedScope,
-                reasonCode: policy.reasonCode,
-                budgetRemaining: decision.budgetRemaining,
-              },
-              policyErrorMessage("budget_exceeded", policy),
-              policy,
+            return recordRejection(
+              { pool, observability },
+              { ...baseLog(aiRequest, decision, deps.policyMeta), status: "failed", error: reason, reasonCode: policy.reasonCode },
+              { ...baseObs(aiRequest, decision), status: "blocked", reason },
+              fail(
+                403,
+                "budget_exceeded",
+                {
+                  scope: topUp.failedScope,
+                  reasonCode: policy.reasonCode,
+                  budgetRemaining: decision.budgetRemaining,
+                },
+                policyErrorMessage("budget_exceeded", policy),
+                policy,
+              ),
             );
           }
           reservedUsd = fbReserve;
@@ -314,6 +389,16 @@ export async function handleChat(
       }
     }
   } catch (err) {
+    // Same incur-then-release ordering (and rationale) as the fallback-block
+    // branch above: safety spend was real even though the model call failed.
+    await recordIncurredCost(pool, {
+      projectId: aiRequest.projectId,
+      userId: aiRequest.userId,
+      feature: aiRequest.feature,
+      costUsd: safetyCostUsd,
+      caps: decision.reservationCaps,
+      now,
+    });
     await releaseBudget(pool, {
       projectId: aiRequest.projectId,
       userId: aiRequest.userId,
@@ -339,6 +424,7 @@ export async function handleChat(
         decision: finalDecision,
         status: "failed",
         error: detail,
+        ...(safetyCostUsd > 0 ? { actualCostUsd: safetyCostUsd } : {}),
       },
       {
         ...baseObs(aiRequest, decision),

@@ -10,6 +10,7 @@ import { logRequest } from "../usage/auditLogRepo";
 import {
   loadUsageSnapshot,
   recordActualCost,
+  recordIncurredCost,
   releaseBudget,
   reserveBudget,
 } from "../usage/repo";
@@ -126,6 +127,16 @@ export async function prepareStream(
     injectionBlocked = safetyResult.injectionBlocked;
     safetyCostUsd = safetyResult.safetyCostUsd;
     if (safetyResult.action === "block") {
+      // Classifier spend is real even though the request is blocked — book it
+      // (no reservation exists yet). Never gates the block.
+      await recordIncurredCost(pool, {
+        projectId: aiRequest.projectId,
+        userId: aiRequest.userId,
+        feature: aiRequest.feature,
+        costUsd: safetyCostUsd,
+        caps: decision.reservationCaps,
+        now,
+      });
       await logRequest(pool, {
         ...baseLog(aiRequest, decision, deps.policyMeta),
         status: "safety_blocked",
@@ -134,6 +145,7 @@ export async function prepareStream(
         injectionBlocked,
         safetyFindings: safetyResult.findings,
         error: safetyResult.blockReason,
+        ...(safetyCostUsd > 0 ? { actualCostUsd: safetyCostUsd } : {}),
       });
       deps.observability.recordChat({
         ...baseObs(aiRequest, decision),
@@ -166,11 +178,35 @@ export async function prepareStream(
     now,
   });
   if (!reservation.ok) {
+    // Book the classifier spend the failed reservation can no longer settle.
+    await recordIncurredCost(pool, {
+      projectId: aiRequest.projectId,
+      userId: aiRequest.userId,
+      feature: aiRequest.feature,
+      costUsd: safetyCostUsd,
+      caps: decision.reservationCaps,
+      now,
+    });
+    const reason = `budget_exceeded:${reservation.failedScope}`;
     const policy = budgetErrorContext(
       reservation.failedScope,
       { userId: aiRequest.userId, userType: aiRequest.userType, feature: aiRequest.feature },
       decision.budgetRemaining,
     );
+    // Rejections must hit the audit log like every other path (the non-stream
+    // handler records this via recordRejection).
+    await logRequest(pool, {
+      ...baseLog(aiRequest, decision, deps.policyMeta),
+      status: "failed",
+      error: reason,
+      reasonCode: policy.reasonCode,
+      ...(safetyCostUsd > 0 ? { actualCostUsd: safetyCostUsd } : {}),
+    });
+    deps.observability.recordChat({
+      ...baseObs(aiRequest, decision),
+      status: "blocked",
+      reason,
+    });
     return fail(
       403,
       "budget_exceeded",
@@ -261,6 +297,17 @@ export async function settleStream(
  */
 export async function releaseStream(deps: ChatServiceDeps, ctx: StreamContext): Promise<void> {
   try {
+    // Incur-then-release: the classifier spend inside the reservation was real;
+    // book it as used before freeing the full hold (net: safety spent, model
+    // freed). A crash in between leaves the lease sweep to release the rest.
+    await recordIncurredCost(deps.pool, {
+      projectId: ctx.aiRequest.projectId,
+      userId: ctx.aiRequest.userId,
+      feature: ctx.aiRequest.feature,
+      costUsd: ctx.safetyCostUsd,
+      caps: ctx.decision.reservationCaps,
+      now: ctx.now,
+    });
     await releaseBudget(deps.pool, {
       projectId: ctx.aiRequest.projectId,
       userId: ctx.aiRequest.userId,
