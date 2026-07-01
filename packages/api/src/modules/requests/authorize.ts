@@ -1,4 +1,10 @@
 import type { RequestContext } from "../../plugins/requestContext";
+import {
+  checkProjectScope,
+  checkUserIdAllowedIfPresent,
+  checkUserTypeAllowedIfPresent,
+  resolveProjectScope,
+} from "../authz/scope";
 import type { RequestListQuery } from "./types";
 
 export interface AuthorizedRequestQuery extends RequestListQuery {
@@ -16,23 +22,20 @@ export function authorizeRequestList(
     return deny(403, "forbidden", "API key is not permitted to read requests");
   }
 
-  if (query.userId && ctx.allowedUserIds?.length && !ctx.allowedUserIds.includes(query.userId)) {
-    return deny(403, "user_forbidden", "API key is not permitted for this user");
-  }
+  const userDenial = checkUserIdAllowedIfPresent(ctx, query.userId);
+  if (userDenial) return deny(userDenial.status, userDenial.code, userDenial.message);
 
-  if (ctx.projectId && query.projectId && query.projectId !== ctx.projectId) {
-    return deny(403, "project_mismatch", "API key is not permitted for this project");
-  }
+  const projectDenial = checkProjectScope(ctx, query.projectId);
+  if (projectDenial) return deny(projectDenial.status, projectDenial.code, projectDenial.message);
 
-  if (ctx.allowedUserTypes?.length && query.userType && !ctx.allowedUserTypes.includes(query.userType)) {
-    return deny(403, "user_type_forbidden", "API key is not permitted for this user type");
-  }
+  const userTypeDenial = checkUserTypeAllowedIfPresent(ctx, query.userType);
+  if (userTypeDenial) return deny(userTypeDenial.status, userTypeDenial.code, userTypeDenial.message);
 
   return {
     ok: true,
     value: {
       ...query,
-      projectScope: ctx.projectId ?? query.projectId ?? defaultProjectId,
+      projectScope: resolveProjectScope(ctx, query.projectId, defaultProjectId),
     },
   };
 }
@@ -47,11 +50,10 @@ export function authorizeRequestShow(
     return deny(403, "forbidden", "API key is not permitted to read requests");
   }
 
-  if (ctx.projectId && projectId && projectId !== ctx.projectId) {
-    return deny(403, "project_mismatch", "API key is not permitted for this project");
-  }
+  const projectDenial = checkProjectScope(ctx, projectId);
+  if (projectDenial) return deny(projectDenial.status, projectDenial.code, projectDenial.message);
 
-  return { ok: true, projectScope: ctx.projectId ?? projectId };
+  return { ok: true, projectScope: resolveProjectScope(ctx, projectId) };
 }
 
 function deny(status: number, code: string, message: string) {

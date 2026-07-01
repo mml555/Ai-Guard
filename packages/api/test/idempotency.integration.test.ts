@@ -1,7 +1,7 @@
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from "vitest";
 import { applySchema } from "../src/db/init";
 import { createPool, type Pool } from "../src/db/pool";
-import { claimKey, completeKey, releaseKey } from "../src/modules/idempotency/repo";
+import { claimKey, completeKey, releaseKey, cleanupCompletedIdempotencyKeys } from "../src/modules/idempotency/repo";
 
 const DATABASE_URL = process.env.DATABASE_URL;
 
@@ -69,5 +69,53 @@ describe.skipIf(!DATABASE_URL)("idempotency repo (integration)", () => {
     const b = await claimKey(pool, { key: "shared", userId: "u2", requestHash: "h1" });
     expect(a.state).toBe("claimed");
     expect(b.state).toBe("claimed");
+  });
+
+  it("cleanupCompletedIdempotencyKeys prunes old completed rows", async () => {
+    const sevenDaysMs = 7 * 24 * 60 * 60 * 1000;
+    const now = Date.now();
+
+    await claimKey(pool, params);
+    await completeKey(pool, {
+      userId: "u1",
+      key: "k1",
+      responseStatus: 200,
+      responseBody: { ok: true },
+    });
+    await pool.query(
+      `UPDATE idempotency_keys SET completed_at = $1::timestamptz WHERE user_id = $2 AND key = $3`,
+      [new Date(now - sevenDaysMs - 60_000).toISOString(), "u1", "k1"],
+    );
+
+    expect(await cleanupCompletedIdempotencyKeys(pool, sevenDaysMs, now)).toBe(1);
+    const { rows } = await pool.query(
+      `SELECT 1 FROM idempotency_keys WHERE user_id = $1 AND key = $2`,
+      ["u1", "k1"],
+    );
+    expect(rows).toHaveLength(0);
+  });
+
+  it("cleanupCompletedIdempotencyKeys keeps recent completed rows and in-flight claims", async () => {
+    const sevenDaysMs = 7 * 24 * 60 * 60 * 1000;
+    const now = Date.now();
+
+    await claimKey(pool, { key: "processing", userId: "u1", requestHash: "h1" });
+    await claimKey(pool, { key: "recent", userId: "u1", requestHash: "h2" });
+    await completeKey(pool, {
+      userId: "u1",
+      key: "recent",
+      responseStatus: 200,
+      responseBody: { ok: true },
+    });
+
+    expect(await cleanupCompletedIdempotencyKeys(pool, sevenDaysMs, now)).toBe(0);
+
+    const { rows } = await pool.query(
+      `SELECT key, status FROM idempotency_keys WHERE user_id = 'u1' ORDER BY key`,
+    );
+    expect(rows).toEqual([
+      { key: "processing", status: "processing" },
+      { key: "recent", status: "completed" },
+    ]);
   });
 });

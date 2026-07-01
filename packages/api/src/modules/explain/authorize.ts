@@ -1,4 +1,12 @@
 import type { RequestContext } from "../../plugins/requestContext";
+import {
+  checkEnvironmentScope,
+  checkProjectScope,
+  checkUserIdAllowed,
+  checkUserTypeAllowed,
+  firstScopeDenial,
+  mergeProjectEnvironment,
+} from "../authz/scope";
 import type { ExplainInput } from "./types";
 
 export type ExplainAuthResult =
@@ -25,27 +33,16 @@ export function authorizeExplainInput(
   if (ctx.apiKeyName && !perms.includes("chat:create") && !perms.includes("policy:explain")) {
     return deny(403, "forbidden", "API key is not permitted to explain policy");
   }
-  if (ctx.projectId && body.projectId && body.projectId !== ctx.projectId) {
-    return deny(403, "project_mismatch", "API key is not permitted for this project");
-  }
-  if (ctx.environment && body.environment && body.environment !== ctx.environment) {
-    return deny(403, "environment_mismatch", "API key is not permitted for this environment");
-  }
-  if (ctx.allowedUserTypes?.length && !ctx.allowedUserTypes.includes(body.userType)) {
-    return deny(403, "user_type_forbidden", "API key is not permitted for this user type");
-  }
-  if (ctx.allowedUserIds?.length && !ctx.allowedUserIds.includes(body.userId)) {
-    return deny(403, "user_forbidden", "API key is not permitted for this user");
-  }
 
-  return {
-    ok: true,
-    value: {
-      ...body,
-      projectId: ctx.projectId ?? body.projectId,
-      environment: ctx.environment ?? body.environment,
-    },
-  };
+  const denial = firstScopeDenial(
+    checkProjectScope(ctx, body.projectId),
+    checkEnvironmentScope(ctx, body.environment),
+    checkUserTypeAllowed(ctx, body.userType),
+    checkUserIdAllowed(ctx, body.userId),
+  );
+  if (denial) return denial;
+
+  return { ok: true, value: mergeProjectEnvironment(ctx, body) };
 }
 
 function deny(status: number, code: string, message: string): ExplainAuthResult {

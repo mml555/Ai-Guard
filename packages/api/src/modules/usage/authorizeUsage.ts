@@ -1,4 +1,10 @@
 import type { RequestContext } from "../../plugins/requestContext";
+import {
+  checkProjectScope,
+  checkUserIdAllowedIfPresent,
+  checkUserTypeAllowedIfPresent,
+  resolveProjectScope,
+} from "../authz/scope";
 import type { UsageQuery } from "./service";
 
 export interface AuthorizedUsageQuery extends UsageQuery {
@@ -18,13 +24,11 @@ export function authorizeUsageQuery(
   | { ok: false; status: number; code: string; message: string } {
   const tenantScoped = Boolean(ctx.projectId);
 
-  if (query.userId && ctx.allowedUserIds?.length && !ctx.allowedUserIds.includes(query.userId)) {
-    return deny(403, "user_forbidden", "API key is not permitted for this user");
-  }
+  const userDenial = checkUserIdAllowedIfPresent(ctx, query.userId);
+  if (userDenial) return deny(userDenial.status, userDenial.code, userDenial.message);
 
-  if (ctx.projectId && query.projectId && query.projectId !== ctx.projectId) {
-    return deny(403, "project_mismatch", "API key is not permitted for this project");
-  }
+  const projectDenial = checkProjectScope(ctx, query.projectId);
+  if (projectDenial) return deny(projectDenial.status, projectDenial.code, projectDenial.message);
 
   if (tenantScoped && query.userId === undefined && query.feature === undefined) {
     return deny(
@@ -34,14 +38,14 @@ export function authorizeUsageQuery(
     );
   }
 
-  const budgetProjectId = ctx.projectId ?? query.projectId ?? defaultProjectId;
+  const budgetProjectId = resolveProjectScope(ctx, query.projectId, defaultProjectId)!;
 
   return {
     ok: true,
     value: {
       ...query,
       budgetProjectId,
-      projectScope: ctx.projectId ?? query.projectId,
+      projectScope: resolveProjectScope(ctx, query.projectId),
       includeGlobal: !tenantScoped,
     },
   };
@@ -54,17 +58,17 @@ export function authorizeUsageSummary(
 ):
   | { ok: true; projectScope?: string }
   | { ok: false; status: number; code: string; message: string } {
-  if (ctx.projectId && query.projectId && query.projectId !== ctx.projectId) {
-    return deny(403, "project_mismatch", "API key is not permitted for this project");
-  }
+  const projectDenial = checkProjectScope(ctx, query.projectId);
+  if (projectDenial) return deny(projectDenial.status, projectDenial.code, projectDenial.message);
 
-  if (ctx.allowedUserTypes?.length && query.userType && !ctx.allowedUserTypes.includes(query.userType)) {
-    return deny(403, "user_type_forbidden", "API key is not permitted for this user type");
+  const userTypeDenial = checkUserTypeAllowedIfPresent(ctx, query.userType);
+  if (userTypeDenial) {
+    return deny(userTypeDenial.status, userTypeDenial.code, userTypeDenial.message);
   }
 
   return {
     ok: true,
-    projectScope: ctx.projectId ?? query.projectId ?? defaultProjectId,
+    projectScope: resolveProjectScope(ctx, query.projectId, defaultProjectId),
   };
 }
 

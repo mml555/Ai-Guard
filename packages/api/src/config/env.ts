@@ -78,6 +78,8 @@ const baseEnvSchema = z.object({
   METRICS_AUTH_TOKEN: z.string().min(1).optional(),
   MAINTENANCE_ENABLED: z.enum(["true", "false"]).default("true"),
   IDEMPOTENCY_STALE_MS: z.coerce.number().int().positive().default(900_000),
+  /** Completed idempotency replay rows older than this are pruned (default 7d). */
+  IDEMPOTENCY_COMPLETED_RETENTION_MS: z.coerce.number().int().positive().default(604_800_000),
   RESERVATION_STALE_MS: z.coerce.number().int().positive().default(900_000),
   // request_logs retention; the maintenance sweep prunes rows older than this.
   REQUEST_LOG_RETENTION_MS: z.coerce.number().int().positive().default(2_592_000_000),

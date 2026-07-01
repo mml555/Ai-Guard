@@ -310,6 +310,7 @@ export function startBackgroundJobs(
   return startMaintenance({
     pool,
     idempotencyStaleMs: env.IDEMPOTENCY_STALE_MS,
+    idempotencyCompletedRetentionMs: env.IDEMPOTENCY_COMPLETED_RETENTION_MS,
     reservationStaleMs: env.RESERVATION_STALE_MS,
     requestLogRetentionMs: env.REQUEST_LOG_RETENTION_MS,
     featureRetentionDays,

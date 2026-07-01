@@ -5,7 +5,7 @@ import {
   cleanupOldRequestLogs,
   cleanupOldRequestLogsForFeature,
 } from "../modules/usage/auditLogRepo";
-import { cleanupStaleIdempotencyKeys } from "../modules/idempotency/repo";
+import { cleanupCompletedIdempotencyKeys, cleanupStaleIdempotencyKeys } from "../modules/idempotency/repo";
 import { cleanupStaleReservationLeases } from "../modules/usage/reservationLeases";
 import { cleanupStaleNodeLeases } from "../modules/budgets/repo";
 
@@ -16,6 +16,7 @@ const MAINTENANCE_LOCK_KEY = 918_273_646;
 export interface MaintenanceOptions {
   pool: Pool;
   idempotencyStaleMs: number;
+  idempotencyCompletedRetentionMs: number;
   reservationStaleMs: number;
   requestLogRetentionMs: number;
   /** Optional per-feature retention overrides (days), applied after the global sweep. */
@@ -51,6 +52,17 @@ async function sweep(opts: MaintenanceOptions): Promise<void> {
   );
   if (removedKeys > 0) {
     opts.log?.info({ removed: removedKeys }, "cleaned stale idempotency keys");
+  }
+
+  const removedCompleted = await cleanupCompletedIdempotencyKeys(
+    opts.pool,
+    opts.idempotencyCompletedRetentionMs,
+  );
+  if (removedCompleted > 0) {
+    opts.log?.info(
+      { removed: removedCompleted },
+      "pruned completed idempotency keys past retention",
+    );
   }
 
   await cleanupStaleReservationLeases(

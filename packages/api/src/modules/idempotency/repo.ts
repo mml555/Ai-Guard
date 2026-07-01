@@ -128,3 +128,34 @@ export async function cleanupStaleIdempotencyKeys(
   );
   return res.rowCount ?? 0;
 }
+
+const COMPLETED_CLEANUP_SQL = `
+  DELETE FROM idempotency_keys
+  WHERE (user_id, key) IN (
+    SELECT user_id, key FROM idempotency_keys
+    WHERE status = 'completed' AND completed_at IS NOT NULL AND completed_at < $1::timestamptz
+    LIMIT $2
+  )
+`;
+
+/**
+ * Remove completed replay rows past retention so the table doesn't grow
+ * forever. Deletes in bounded batches (like the request_logs sweep) so the
+ * first sweep over a large backlog doesn't hold a long lock.
+ */
+export async function cleanupCompletedIdempotencyKeys(
+  pool: Pool,
+  retentionMs: number,
+  now = Date.now(),
+  batchSize = 5000,
+): Promise<number> {
+  const cutoff = new Date(now - retentionMs).toISOString();
+  let total = 0;
+  for (;;) {
+    const res = await pool.query(COMPLETED_CLEANUP_SQL, [cutoff, batchSize]);
+    const removed = res.rowCount ?? 0;
+    total += removed;
+    if (removed < batchSize) break;
+  }
+  return total;
+}
