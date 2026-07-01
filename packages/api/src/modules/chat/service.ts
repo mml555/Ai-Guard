@@ -4,15 +4,13 @@ import {
   type AiRequest,
   type PolicyDecision,
 } from "@ai-guard/policy-engine";
-import type { Pool } from "pg";
 import {
   LiteLLMClientError,
   ProviderError,
   type LiteLLMChatResult,
 } from "../../services/litellm";
-import type { ChatObservation, Observability } from "../../services/observability";
 import { SafetyServiceError } from "../../services/safety";
-import { logRequest, type RequestLogRow } from "../usage/auditLogRepo";
+import { logRequest } from "../usage/auditLogRepo";
 import {
   loadUsageSnapshot,
   recordActualCost,
@@ -21,37 +19,20 @@ import {
   reserveBudget,
   topUpBudget,
 } from "../usage/repo";
+import { budgetErrorContext, policyErrorMessage } from "../../policyErrors";
 import {
-  budgetErrorContext,
-  policyErrorFromDecision,
-  policyErrorMessage,
-} from "../../policyErrors";
+  recordRejection,
+  rejectPolicyBlock,
+  rejectSafetyBlock,
+  releaseWithSafety,
+  bookSafetyIfAny,
+  type IncurFn,
+  type RejectionCtx,
+} from "./lifecycle";
 import { baseLog, baseObs, chatSuccessBody, fail } from "./mapper";
-import type { ChatFailure, ChatInput, ChatResult, ChatServiceDeps } from "./types";
+import type { ChatInput, ChatResult, ChatServiceDeps } from "./types";
 import { handleGlobalBudgetAlert } from "../usage/budgetAlerts";
 
-/**
- * A chat request is rejected in several places (policy block, input-safety
- * block, budget-exceeded, provider error, output-safety block). Each must do
- * the same trio — append the audit log, emit the observability event, and
- * return the failure. Centralize it so a branch can't record one and forget
- * another, and so the sequence is single-sourced.
- */
-async function recordRejection(
-  ctx: { pool: Pool; observability: Observability },
-  logRow: RequestLogRow,
-  observation: ChatObservation,
-  result: ChatFailure,
-): Promise<ChatFailure> {
-  const auditRequestId = await logRequest(ctx.pool, logRow);
-  ctx.observability.recordChat(observation);
-  if (!auditRequestId) return result;
-  return {
-    ...result,
-    auditRequestId,
-    details: { ...result.details, auditRequestId },
-  };
-}
 export async function handleChat(
   deps: ChatServiceDeps,
   body: ChatInput,
@@ -108,28 +89,20 @@ export async function handleChat(
     }
   }
 
-  if (decision.decision === "block") {
-    const policy = policyErrorFromDecision(decision, {
+  const rejection: RejectionCtx = { pool, observability, aiRequest, policyMeta: deps.policyMeta };
+  // Books already-spent classifier cost against this request's budget scopes.
+  const incurSafety: IncurFn = (costUsd) =>
+    recordIncurredCost(pool, {
+      projectId: aiRequest.projectId,
       userId: aiRequest.userId,
-      userType: aiRequest.userType,
       feature: aiRequest.feature,
+      costUsd,
+      caps: decision.reservationCaps,
+      now,
     });
-    return recordRejection(
-      { pool, observability },
-      { ...baseLog(aiRequest, decision, deps.policyMeta), status: "failed", error: decision.reason, reasonCode: decision.reasonCode },
-      { ...baseObs(aiRequest, decision), status: "blocked", reason: decision.reason },
-      fail(
-        403,
-        "policy_blocked",
-        {
-          reason: decision.reason,
-          reasonCode: decision.reasonCode,
-          budgetRemaining: decision.budgetRemaining,
-        },
-        policyErrorMessage("policy_blocked", policy),
-        policy,
-      ),
-    );
+
+  if (decision.decision === "block") {
+    return rejectPolicyBlock(rejection, decision);
   }
   let messages = body.messages;
   let piiMasked = false;
@@ -145,44 +118,11 @@ export async function handleChat(
     injectionBlocked = safetyResult.injectionBlocked;
     safetyCostUsd = safetyResult.safetyCostUsd;
     if (safetyResult.action === "block") {
-      // The classifier call was real provider spend even though the request is
-      // blocked — book it (no reservation exists yet, so incur directly). The
-      // booking never gates the rejection: this stays a safety block.
-      await recordIncurredCost(pool, {
-        projectId: aiRequest.projectId,
-        userId: aiRequest.userId,
-        feature: aiRequest.feature,
-        costUsd: safetyCostUsd,
-        caps: decision.reservationCaps,
-        now,
+      return rejectSafetyBlock(rejection, incurSafety, {
+        decision,
+        safetyResult,
+        safetyCostUsd,
       });
-      return recordRejection(
-        { pool, observability },
-        {
-          ...baseLog(aiRequest, decision, deps.policyMeta),
-          status: "safety_blocked",
-          hostMetadata: body.metadata,
-          piiMasked,
-          injectionBlocked,
-          safetyFindings: safetyResult.findings,
-          error: safetyResult.blockReason,
-          ...(safetyCostUsd > 0 ? { actualCostUsd: safetyCostUsd } : {}),
-        },
-        // NB: no `input` on the observation — on a safety block the input is
-        // exactly the content that tripped the guard (PII / injection), so
-        // exporting it to the observability backend would leak what we blocked.
-        {
-          ...baseObs(aiRequest, decision),
-          status: "safety_blocked",
-          reason: safetyResult.blockReason,
-          piiMasked,
-          injectionBlocked,
-        },
-        fail(403, "safety_blocked", {
-          reason: safetyResult.blockReason,
-          findings: safetyResult.findings,
-        }),
-      );
     }
   } catch (err) {
     if (err instanceof SafetyServiceError) {
@@ -211,14 +151,7 @@ export async function handleChat(
   if (!reservation.ok) {
     // The reservation rolled back atomically, but the classifier spend already
     // happened — book it without gating the (already-decided) rejection.
-    await recordIncurredCost(pool, {
-      projectId: aiRequest.projectId,
-      userId: aiRequest.userId,
-      feature: aiRequest.feature,
-      costUsd: safetyCostUsd,
-      caps: decision.reservationCaps,
-      now,
-    });
+    await bookSafetyIfAny(incurSafety, safetyCostUsd);
     const reason = `budget_exceeded:${reservation.failedScope}`;
     const policy = budgetErrorContext(
       reservation.failedScope,
@@ -273,50 +206,22 @@ export async function handleChat(
           usage,
         });
         if (fb.decision === "block") {
-          // Book the classifier spend BEFORE releasing: if we crash in between,
-          // the stale-lease sweep releases the remainder, whereas the reverse
-          // order would lose the incurred spend entirely. The release returns
-          // the FULL reservation (model + safety); the incur re-books the
-          // safety portion as used — net effect: safety spent, model freed.
-          await recordIncurredCost(pool, {
-            projectId: aiRequest.projectId,
-            userId: aiRequest.userId,
-            feature: aiRequest.feature,
-            costUsd: safetyCostUsd,
-            caps: decision.reservationCaps,
-            now,
-          });
-          await releaseBudget(pool, {
-            projectId: aiRequest.projectId,
-            userId: aiRequest.userId,
-            feature: aiRequest.feature,
-            estimatedCostUsd: reservedUsd,
-            estimatedTokens: decision.estimatedTokens,
-            caps: decision.reservationCaps,
-            now,
-            leaseId,
-          });
-          const policy = policyErrorFromDecision(fb, {
-            userId: aiRequest.userId,
-            userType: aiRequest.userType,
-            feature: aiRequest.feature,
-          });
-          return recordRejection(
-            { pool, observability },
-            { ...baseLog(aiRequest, fb, deps.policyMeta), status: "failed", error: fb.reason, reasonCode: fb.reasonCode, ...(safetyCostUsd > 0 ? { actualCostUsd: safetyCostUsd } : {}) },
-            { ...baseObs(aiRequest, fb), status: "blocked", reason: fb.reason },
-            fail(
-              403,
-              "policy_blocked",
-              {
-                reason: fb.reason,
-                reasonCode: fb.reasonCode,
-                budgetRemaining: fb.budgetRemaining,
-              },
-              policyErrorMessage("policy_blocked", policy),
-              policy,
-            ),
+          await releaseWithSafety(
+            incurSafety,
+            () =>
+              releaseBudget(pool, {
+                projectId: aiRequest.projectId,
+                userId: aiRequest.userId,
+                feature: aiRequest.feature,
+                estimatedCostUsd: reservedUsd,
+                estimatedTokens: decision.estimatedTokens,
+                caps: decision.reservationCaps,
+                now,
+                leaseId,
+              }),
+            safetyCostUsd,
           );
+          return rejectPolicyBlock(rejection, fb, { safetyCostUsd });
         }
         // The fallback reservation must cover the fallback model estimate plus
         // the same safety cost already reserved.
@@ -332,16 +237,24 @@ export async function handleChat(
             leaseId,
           });
           if (!topUp.ok) {
-            await releaseBudget(pool, {
-              projectId: aiRequest.projectId,
-              userId: aiRequest.userId,
-              feature: aiRequest.feature,
-              estimatedCostUsd: reservedUsd,
-              estimatedTokens: decision.estimatedTokens,
-              caps: decision.reservationCaps,
-              now,
-              leaseId,
-            });
+            // Historically this branch released WITHOUT booking the safety
+            // spend — the one rejection path 1.3 missed. releaseWithSafety
+            // makes that impossible to forget again.
+            await releaseWithSafety(
+              incurSafety,
+              () =>
+                releaseBudget(pool, {
+                  projectId: aiRequest.projectId,
+                  userId: aiRequest.userId,
+                  feature: aiRequest.feature,
+                  estimatedCostUsd: reservedUsd,
+                  estimatedTokens: decision.estimatedTokens,
+                  caps: decision.reservationCaps,
+                  now,
+                  leaseId,
+                }),
+              safetyCostUsd,
+            );
             const reason = `budget_exceeded:${topUp.failedScope}`;
             const policy = budgetErrorContext(
               topUp.failedScope,
@@ -354,7 +267,7 @@ export async function handleChat(
             );
             return recordRejection(
               { pool, observability },
-              { ...baseLog(aiRequest, decision, deps.policyMeta), status: "failed", error: reason, reasonCode: policy.reasonCode },
+              { ...baseLog(aiRequest, decision, deps.policyMeta), status: "failed", error: reason, reasonCode: policy.reasonCode, ...(safetyCostUsd > 0 ? { actualCostUsd: safetyCostUsd } : {}) },
               { ...baseObs(aiRequest, decision), status: "blocked", reason },
               fail(
                 403,
@@ -389,26 +302,21 @@ export async function handleChat(
       }
     }
   } catch (err) {
-    // Same incur-then-release ordering (and rationale) as the fallback-block
-    // branch above: safety spend was real even though the model call failed.
-    await recordIncurredCost(pool, {
-      projectId: aiRequest.projectId,
-      userId: aiRequest.userId,
-      feature: aiRequest.feature,
-      costUsd: safetyCostUsd,
-      caps: decision.reservationCaps,
-      now,
-    });
-    await releaseBudget(pool, {
-      projectId: aiRequest.projectId,
-      userId: aiRequest.userId,
-      feature: aiRequest.feature,
-      estimatedCostUsd: reservedUsd,
-      estimatedTokens: decision.estimatedTokens,
-      caps: decision.reservationCaps,
-      now,
-      leaseId,
-    });
+    await releaseWithSafety(
+      incurSafety,
+      () =>
+        releaseBudget(pool, {
+          projectId: aiRequest.projectId,
+          userId: aiRequest.userId,
+          feature: aiRequest.feature,
+          estimatedCostUsd: reservedUsd,
+          estimatedTokens: decision.estimatedTokens,
+          caps: decision.reservationCaps,
+          now,
+          leaseId,
+        }),
+      safetyCostUsd,
+    );
     const detail = (err as Error).message;
     const code =
       err instanceof LiteLLMClientError ? "upstream_rejected" : "provider_unavailable";

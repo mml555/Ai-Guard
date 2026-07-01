@@ -23,6 +23,15 @@ import {
   settlePath,
   type PathReservation,
 } from "../budgets/repo";
+import {
+  recordRejection,
+  rejectPolicyBlock,
+  rejectSafetyBlock,
+  releaseWithSafety,
+  bookSafetyIfAny,
+  type IncurFn,
+  type RejectionCtx,
+} from "./lifecycle";
 import { baseLog, baseObs, chatSuccessBody, fail } from "./mapper";
 import type { ChatInput, ChatResult, ChatServiceDeps } from "./types";
 
@@ -74,10 +83,11 @@ export async function handleChatHierarchical(
     if (err instanceof PolicyConfigError) return fail(400, err.code, { detail: err.message }, err.message);
     throw err;
   }
+  const rejection: RejectionCtx = { pool, observability, aiRequest, policyMeta: deps.policyMeta };
   if (decision.decision === "block" && decision.reasonCode && HONORED_BLOCKS.has(decision.reasonCode)) {
-    await logRequest(pool, { ...baseLog(aiRequest, decision, deps.policyMeta), status: "failed", error: decision.reason, reasonCode: decision.reasonCode });
-    observability.recordChat({ ...baseObs(aiRequest, decision), status: "blocked", reason: decision.reason });
-    return fail(403, "policy_blocked", { reason: decision.reason, reasonCode: decision.reasonCode }, decision.reason);
+    // budgetRemaining omitted: the flat gates ran against ZERO_USAGE, so their
+    // "remaining" would claim full flat headroom while the node tree governs.
+    return rejectPolicyBlock(rejection, decision, { includeBudgetRemaining: false });
   }
 
   // Resolve the budget path and pre-check every cap before spending.
@@ -86,6 +96,9 @@ export async function handleChatHierarchical(
   if (nodes.length === 0) {
     return fail(400, "invalid_request", { detail: `unknown budgetNodeId '${leafNodeId}'` }, "Unknown budget node");
   }
+  // Books already-spent classifier cost against every node on the path.
+  const incurSafety: IncurFn = (costUsd) =>
+    recordIncurredPathCost(pool, nodes, { costUsd, now, shardKey: body.userId });
   const usage = await loadPathSnapshot(pool, nodes, now);
   const pathNodes: BudgetPathNode[] = nodes.map((n) => {
     const u = usage.get(n.id)!;
@@ -110,12 +123,11 @@ export async function handleChatHierarchical(
     injectionBlocked = s.injectionBlocked;
     safetyCostUsd = s.safetyCostUsd;
     if (s.action === "block") {
-      // Classifier spend is real even though the request is blocked — book it
-      // against the node path (no reservation exists yet). Never gates the block.
-      await recordIncurredPathCost(pool, nodes, { costUsd: safetyCostUsd, now, shardKey: body.userId });
-      await logRequest(pool, { ...baseLog(aiRequest, decision, deps.policyMeta), status: "safety_blocked", piiMasked, injectionBlocked, safetyFindings: s.findings, error: s.blockReason, ...(safetyCostUsd > 0 ? { actualCostUsd: safetyCostUsd } : {}) });
-      observability.recordChat({ ...baseObs(aiRequest, decision), status: "safety_blocked", reason: s.blockReason, piiMasked, injectionBlocked });
-      return fail(403, "safety_blocked", { reason: s.blockReason, findings: s.findings });
+      return rejectSafetyBlock(rejection, incurSafety, {
+        decision,
+        safetyResult: s,
+        safetyCostUsd,
+      });
     }
   } catch (err) {
     if (err instanceof SafetyServiceError) {
@@ -131,11 +143,14 @@ export async function handleChatHierarchical(
   if (!reservation.ok || !reservation.reservation) {
     // The path reservation rolled back atomically, but the classifier already
     // spent real money — book it without gating the rejection.
-    await recordIncurredPathCost(pool, nodes, { costUsd: safetyCostUsd, now, shardKey: body.userId });
+    await bookSafetyIfAny(incurSafety, safetyCostUsd);
     const reason = `budget_exceeded:node:${reservation.failedNodeId}`;
-    await logRequest(pool, { ...baseLog(aiRequest, decision, deps.policyMeta), status: "failed", error: reason, reasonCode: "global_monthly_budget_exceeded", ...(safetyCostUsd > 0 ? { actualCostUsd: safetyCostUsd } : {}) });
-    observability.recordChat({ ...baseObs(aiRequest, decision), status: "blocked", reason });
-    return fail(403, "budget_exceeded", { scope: "budget_node", failedNodeId: reservation.failedNodeId }, reason);
+    return recordRejection(
+      rejection,
+      { ...baseLog(aiRequest, decision, deps.policyMeta), status: "failed", error: reason, reasonCode: "global_monthly_budget_exceeded", ...(safetyCostUsd > 0 ? { actualCostUsd: safetyCostUsd } : {}) },
+      { ...baseObs(aiRequest, decision), status: "blocked", reason },
+      fail(403, "budget_exceeded", { scope: "budget_node", failedNodeId: reservation.failedNodeId }, reason),
+    );
   }
   const held: PathReservation = reservation.reservation;
 
@@ -153,15 +168,8 @@ export async function handleChatHierarchical(
       if (err instanceof ProviderError && decision.fallbackModel) {
         const fb = evaluateAiRequest({ request: { ...aiRequest, forceFallback: true }, config, usage: ZERO_USAGE });
         if (fb.decision === "block") {
-          // Incur-then-release: book the safety spend first so a crash between
-          // the two leaves the lease sweep to release the remainder (the
-          // reverse order would lose the incurred spend). Net effect: safety
-          // portion moves to used, model portion is freed.
-          await recordIncurredPathCost(pool, nodes, { costUsd: safetyCostUsd, now, shardKey: body.userId });
-          await releasePath(pool, held);
-          await logRequest(pool, { ...baseLog(aiRequest, fb, deps.policyMeta), status: "failed", error: fb.reason, reasonCode: fb.reasonCode, ...(safetyCostUsd > 0 ? { actualCostUsd: safetyCostUsd } : {}) });
-          observability.recordChat({ ...baseObs(aiRequest, fb), status: "blocked", reason: fb.reason });
-          return fail(403, "policy_blocked", { reason: fb.reason, reasonCode: fb.reasonCode }, fb.reason);
+          await releaseWithSafety(incurSafety, () => releasePath(pool, held), safetyCostUsd);
+          return rejectPolicyBlock(rejection, fb, { safetyCostUsd, includeBudgetRemaining: false });
         }
         usedModel = fb.resolvedModel;
         finalDecision = "fallback";
@@ -172,15 +180,15 @@ export async function handleChatHierarchical(
       }
     }
   } catch (err) {
-    // Same incur-then-release ordering (and rationale) as the fallback-block
-    // branch above: safety spend was real even though the model call failed.
-    await recordIncurredPathCost(pool, nodes, { costUsd: safetyCostUsd, now, shardKey: body.userId });
-    await releasePath(pool, held);
+    await releaseWithSafety(incurSafety, () => releasePath(pool, held), safetyCostUsd);
     const code = err instanceof LiteLLMClientError ? "upstream_rejected" : "provider_unavailable";
     const message = err instanceof LiteLLMClientError ? "Upstream rejected request" : "Provider unavailable";
-    await logRequest(pool, { ...baseLog(aiRequest, decision, deps.policyMeta), resolvedModel: usedModel, decision: finalDecision, status: "failed", error: (err as Error).message, ...(safetyCostUsd > 0 ? { actualCostUsd: safetyCostUsd } : {}) });
-    observability.recordChat({ ...baseObs(aiRequest, decision), decision: finalDecision, status: "error", reason: (err as Error).message });
-    return fail(502, code, {}, message);
+    return recordRejection(
+      rejection,
+      { ...baseLog(aiRequest, decision, deps.policyMeta), resolvedModel: usedModel, decision: finalDecision, status: "failed", error: (err as Error).message, ...(safetyCostUsd > 0 ? { actualCostUsd: safetyCostUsd } : {}) },
+      { ...baseObs(aiRequest, decision), decision: finalDecision, status: "error", reason: (err as Error).message },
+      fail(502, code, {}, message),
+    );
   }
 
   // Settle actual cost against every node on the path (plus input-safety spend).

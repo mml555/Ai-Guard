@@ -43,7 +43,7 @@ class CostlyBlockingSafety implements SafetyGuard {
   }
 }
 
-function config(dailyUsd: number) {
+function config(dailyUsd: number, fallback?: string) {
   return parseConfigObject({
     project: { name: "test", environment: "test" },
     budgets: {
@@ -51,7 +51,7 @@ function config(dailyUsd: number) {
       by_user_type: { logged_in: { daily_usd: dailyUsd, daily_requests: 100, models: ["cheap"] } },
     },
     features: { support_chat: { safety: "dev", model_class: "cheap", max_tokens: 50 } },
-    model_classes: { cheap: { primary: "openai/gpt-4o-mini" } },
+    model_classes: { cheap: { primary: "openai/gpt-4o-mini", ...(fallback ? { fallback } : {}) } },
     safety: { preset: "dev" },
   });
 }
@@ -155,6 +155,47 @@ describe.skipIf(!DATABASE_URL)("safety cost is reserved upfront (integration)", 
     );
     expect(rows).toHaveLength(1);
     expect(rows[0].status).toBe("safety_blocked");
+    expect(Number(rows[0].actual_cost_usd)).toBeCloseTo(SAFETY_COST, 4);
+  });
+
+  it("books the safety spend when the fallback top-up exceeds the cap", async () => {
+    // cap 0.25 admits primary + safety (~0.1975); the fallback estimate
+    // (claude-haiku at 650k input ≈ $0.52) forces a top-up to ~0.62 which the
+    // cap rejects. Historically this branch released the reservation WITHOUT
+    // booking the classifier spend — the one rejection path 1.3 missed.
+    let fallbackCalled = false;
+    const server = buildServer({
+      config: config(0.25, "anthropic/claude-haiku"),
+      pool,
+      litellm: {
+        chat: async (p) => {
+          if (p.model === "openai/gpt-4o-mini") throw new ProviderError("primary down", 503);
+          fallbackCalled = true;
+          return { content: "ok", model: p.model, actualCostUsd: 0.52, raw: {} };
+        },
+      },
+      safety: new CostlySafety(),
+      observability: new NoopObservability(),
+      logger: false,
+      apiKey: "secret",
+    });
+    const res = await server.inject({
+      method: "POST",
+      url: "/v1/chat",
+      headers: { authorization: "Bearer secret" },
+      payload: body,
+    });
+    expect(res.statusCode).toBe(403);
+    expect(res.json().error.code).toBe("budget_exceeded");
+    expect(fallbackCalled).toBe(false); // top-up rejected before the fallback call
+
+    const c = await userDailyCounter();
+    expect(c.used).toBeCloseTo(SAFETY_COST, 4);
+    expect(c.reserved).toBeCloseTo(0, 6);
+
+    const { rows } = await pool.query("SELECT status, actual_cost_usd FROM request_logs");
+    expect(rows).toHaveLength(1);
+    expect(rows[0].status).toBe("failed");
     expect(Number(rows[0].actual_cost_usd)).toBeCloseTo(SAFETY_COST, 4);
   });
 

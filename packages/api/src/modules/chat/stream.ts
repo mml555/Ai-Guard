@@ -14,11 +14,16 @@ import {
   releaseBudget,
   reserveBudget,
 } from "../usage/repo";
+import { budgetErrorContext, policyErrorMessage } from "../../policyErrors";
 import {
-  budgetErrorContext,
-  policyErrorFromDecision,
-  policyErrorMessage,
-} from "../../policyErrors";
+  recordRejection,
+  rejectPolicyBlock,
+  rejectSafetyBlock,
+  releaseWithSafety,
+  bookSafetyIfAny,
+  type IncurFn,
+  type RejectionCtx,
+} from "./lifecycle";
 import { baseLog, baseObs, fail } from "./mapper";
 import type { ChatFailure, ChatInput, ChatServiceDeps } from "./types";
 
@@ -77,30 +82,20 @@ export async function prepareStream(
     throw err;
   }
 
-  if (decision.decision === "block") {
-    const policy = policyErrorFromDecision(decision, {
+  const rejection: RejectionCtx = { pool, observability: deps.observability, aiRequest, policyMeta: deps.policyMeta };
+  // Books already-spent classifier cost against this request's budget scopes.
+  const incurSafety: IncurFn = (costUsd) =>
+    recordIncurredCost(pool, {
+      projectId: aiRequest.projectId,
       userId: aiRequest.userId,
-      userType: aiRequest.userType,
       feature: aiRequest.feature,
+      costUsd,
+      caps: decision.reservationCaps,
+      now,
     });
-    await logRequest(pool, {
-      ...baseLog(aiRequest, decision, deps.policyMeta),
-      status: "failed",
-      error: decision.reason,
-      reasonCode: decision.reasonCode,
-    });
-    deps.observability.recordChat({
-      ...baseObs(aiRequest, decision),
-      status: "blocked",
-      reason: decision.reason,
-    });
-    return fail(
-      403,
-      "policy_blocked",
-      { reason: decision.reason, reasonCode: decision.reasonCode, budgetRemaining: decision.budgetRemaining },
-      policyErrorMessage("policy_blocked", policy),
-      policy,
-    );
+
+  if (decision.decision === "block") {
+    return rejectPolicyBlock(rejection, decision);
   }
 
   // Streaming safety gate: we cannot mask/block output that has already been
@@ -127,36 +122,10 @@ export async function prepareStream(
     injectionBlocked = safetyResult.injectionBlocked;
     safetyCostUsd = safetyResult.safetyCostUsd;
     if (safetyResult.action === "block") {
-      // Classifier spend is real even though the request is blocked — book it
-      // (no reservation exists yet). Never gates the block.
-      await recordIncurredCost(pool, {
-        projectId: aiRequest.projectId,
-        userId: aiRequest.userId,
-        feature: aiRequest.feature,
-        costUsd: safetyCostUsd,
-        caps: decision.reservationCaps,
-        now,
-      });
-      await logRequest(pool, {
-        ...baseLog(aiRequest, decision, deps.policyMeta),
-        status: "safety_blocked",
-        hostMetadata: body.metadata,
-        piiMasked,
-        injectionBlocked,
-        safetyFindings: safetyResult.findings,
-        error: safetyResult.blockReason,
-        ...(safetyCostUsd > 0 ? { actualCostUsd: safetyCostUsd } : {}),
-      });
-      deps.observability.recordChat({
-        ...baseObs(aiRequest, decision),
-        status: "safety_blocked",
-        reason: safetyResult.blockReason,
-        piiMasked,
-        injectionBlocked,
-      });
-      return fail(403, "safety_blocked", {
-        reason: safetyResult.blockReason,
-        findings: safetyResult.findings,
+      return rejectSafetyBlock(rejection, incurSafety, {
+        decision,
+        safetyResult,
+        safetyCostUsd,
       });
     }
   } catch (err) {
@@ -179,40 +148,30 @@ export async function prepareStream(
   });
   if (!reservation.ok) {
     // Book the classifier spend the failed reservation can no longer settle.
-    await recordIncurredCost(pool, {
-      projectId: aiRequest.projectId,
-      userId: aiRequest.userId,
-      feature: aiRequest.feature,
-      costUsd: safetyCostUsd,
-      caps: decision.reservationCaps,
-      now,
-    });
+    await bookSafetyIfAny(incurSafety, safetyCostUsd);
     const reason = `budget_exceeded:${reservation.failedScope}`;
     const policy = budgetErrorContext(
       reservation.failedScope,
       { userId: aiRequest.userId, userType: aiRequest.userType, feature: aiRequest.feature },
       decision.budgetRemaining,
     );
-    // Rejections must hit the audit log like every other path (the non-stream
-    // handler records this via recordRejection).
-    await logRequest(pool, {
-      ...baseLog(aiRequest, decision, deps.policyMeta),
-      status: "failed",
-      error: reason,
-      reasonCode: policy.reasonCode,
-      ...(safetyCostUsd > 0 ? { actualCostUsd: safetyCostUsd } : {}),
-    });
-    deps.observability.recordChat({
-      ...baseObs(aiRequest, decision),
-      status: "blocked",
-      reason,
-    });
-    return fail(
-      403,
-      "budget_exceeded",
-      { scope: reservation.failedScope, reasonCode: policy.reasonCode, budgetRemaining: decision.budgetRemaining },
-      policyErrorMessage("budget_exceeded", policy),
-      policy,
+    return recordRejection(
+      rejection,
+      {
+        ...baseLog(aiRequest, decision, deps.policyMeta),
+        status: "failed",
+        error: reason,
+        reasonCode: policy.reasonCode,
+        ...(safetyCostUsd > 0 ? { actualCostUsd: safetyCostUsd } : {}),
+      },
+      { ...baseObs(aiRequest, decision), status: "blocked", reason },
+      fail(
+        403,
+        "budget_exceeded",
+        { scope: reservation.failedScope, reasonCode: policy.reasonCode, budgetRemaining: decision.budgetRemaining },
+        policyErrorMessage("budget_exceeded", policy),
+        policy,
+      ),
     );
   }
 
@@ -297,27 +256,29 @@ export async function settleStream(
  */
 export async function releaseStream(deps: ChatServiceDeps, ctx: StreamContext): Promise<void> {
   try {
-    // Incur-then-release: the classifier spend inside the reservation was real;
-    // book it as used before freeing the full hold (net: safety spent, model
-    // freed). A crash in between leaves the lease sweep to release the rest.
-    await recordIncurredCost(deps.pool, {
-      projectId: ctx.aiRequest.projectId,
-      userId: ctx.aiRequest.userId,
-      feature: ctx.aiRequest.feature,
-      costUsd: ctx.safetyCostUsd,
-      caps: ctx.decision.reservationCaps,
-      now: ctx.now,
-    });
-    await releaseBudget(deps.pool, {
-      projectId: ctx.aiRequest.projectId,
-      userId: ctx.aiRequest.userId,
-      feature: ctx.aiRequest.feature,
-      estimatedCostUsd: ctx.reservedUsd,
-      estimatedTokens: ctx.decision.estimatedTokens,
-      caps: ctx.decision.reservationCaps,
-      now: ctx.now,
-      leaseId: ctx.leaseId,
-    });
+    await releaseWithSafety(
+      (costUsd) =>
+        recordIncurredCost(deps.pool, {
+          projectId: ctx.aiRequest.projectId,
+          userId: ctx.aiRequest.userId,
+          feature: ctx.aiRequest.feature,
+          costUsd,
+          caps: ctx.decision.reservationCaps,
+          now: ctx.now,
+        }),
+      () =>
+        releaseBudget(deps.pool, {
+          projectId: ctx.aiRequest.projectId,
+          userId: ctx.aiRequest.userId,
+          feature: ctx.aiRequest.feature,
+          estimatedCostUsd: ctx.reservedUsd,
+          estimatedTokens: ctx.decision.estimatedTokens,
+          caps: ctx.decision.reservationCaps,
+          now: ctx.now,
+          leaseId: ctx.leaseId,
+        }),
+      ctx.safetyCostUsd,
+    );
   } catch (err) {
     deps.log?.error({ err }, "failed to release stream reservation; lease sweep will reconcile");
   }
