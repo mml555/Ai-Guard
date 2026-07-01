@@ -19,7 +19,13 @@ WORKDIR /app
 ENV NODE_ENV=production
 # Install exactly the externalized third-party deps (generated, not hand-listed).
 COPY --from=build /app/packages/api/dist/runtime-package.json ./package.json
-RUN npm install --omit=dev --no-package-lock --no-audit --no-fund
+# After the install, strip npm/corepack/yarn from the image: the runtime CMD
+# only ever runs `node`, and the package managers' own vendored dependencies
+# (e.g. npm's bundled picomatch) otherwise ship CVEs the app never executes.
+RUN npm install --omit=dev --no-package-lock --no-audit --no-fund \
+ && rm -rf /usr/local/lib/node_modules /usr/local/bin/npm /usr/local/bin/npx \
+           /usr/local/bin/corepack /opt/yarn* /usr/local/bin/yarn /usr/local/bin/yarnpkg \
+           /root/.npm
 COPY --from=build /app/packages/api/dist ./dist
 COPY ai-guard.yaml ./ai-guard.yaml
 # Run as the unprivileged `node` user shipped in the base image, not root.
