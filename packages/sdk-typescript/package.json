@@ -2,6 +2,11 @@
   "name": "@modelgov/sdk",
   "version": "1.0.0",
   "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/mml555/modelgov.git",
+    "directory": "packages/sdk-typescript"
+  },
   "description": "Modelgov API client. `feature` and `userType` are mandatory at the type level.",
   "type": "module",
   "main": "./dist/index.js",

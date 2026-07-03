@@ -2,6 +2,11 @@
   "name": "@modelgov/policy-engine",
   "version": "1.0.0",
   "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/mml555/modelgov.git",
+    "directory": "packages/policy-engine"
+  },
   "description": "Pure, deterministic AI policy evaluator for Modelgov. No I/O.",
   "type": "module",
   "main": "./dist/index.js",
