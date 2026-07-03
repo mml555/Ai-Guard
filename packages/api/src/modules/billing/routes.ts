@@ -3,6 +3,7 @@ import type { FastifyInstance, FastifyRequest } from "fastify";
 import type { Pool } from "pg";
 import { z } from "zod";
 import { sendError } from "../../errors";
+import { checkUserIdAllowed } from "../authz/scope";
 import type { BillingService } from "./service";
 
 const topUpBodySchema = z.object({
@@ -35,6 +36,10 @@ export function registerBillingRoutes(
       return sendError(reply, 403, "forbidden", {}, "API key is not permitted to read balances");
     }
     const userId = (request.params as { userId: string }).userId;
+    // Same user-scope enforcement as /v1/usage: a key restricted with
+    // allowedUserIds must not read another user's wallet within the tenant.
+    const denial = checkUserIdAllowed(request.ctx, userId);
+    if (denial) return sendError(reply, denial.status, denial.code, {}, denial.message);
     const balance = await billing.getBalance(request.ctx.tenantId ?? "", userId);
     return reply.send(balance);
   });

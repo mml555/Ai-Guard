@@ -37,15 +37,26 @@ export async function claimPendingWebhooks(
   pool: Pool,
   limit = 20,
 ): Promise<OutboxEntry[]> {
+  // Atomically claim rows: a bare `SELECT ... FOR UPDATE SKIP LOCKED` releases
+  // its locks the instant the statement ends, so in a multi-replica deployment
+  // two workers could select and deliver the same row (duplicate POSTs). Claim
+  // via `UPDATE ... RETURNING`, incrementing `attempts` and leasing the row 60s
+  // into the future so concurrent workers skip it; if delivery crashes without
+  // a mark, the lease expires and it retries (bounded by max_attempts).
   const { rows } = await pool.query(
-    `SELECT id, event_type, payload, destination_url, secret, attempts, max_attempts
-     FROM webhook_outbox
-     WHERE delivered_at IS NULL
-       AND attempts < max_attempts
-       AND next_attempt_at <= now()
-     ORDER BY next_attempt_at ASC
-     LIMIT $1
-     FOR UPDATE SKIP LOCKED`,
+    `UPDATE webhook_outbox
+     SET attempts = attempts + 1,
+         next_attempt_at = now() + interval '60 seconds'
+     WHERE id IN (
+       SELECT id FROM webhook_outbox
+       WHERE delivered_at IS NULL
+         AND attempts < max_attempts
+         AND next_attempt_at <= now()
+       ORDER BY next_attempt_at ASC
+       LIMIT $1
+       FOR UPDATE SKIP LOCKED
+     )
+     RETURNING id, event_type, payload, destination_url, secret, attempts, max_attempts`,
     [limit],
   );
 
@@ -81,11 +92,12 @@ export async function markWebhookFailed(
   error: string,
   attempts: number,
 ): Promise<void> {
+  // attempts was already incremented at claim time; here we only record the
+  // error and set the retry backoff (overriding the 60s claim lease).
   const delaySec = Math.min(60 * 15, 2 ** attempts);
   await pool.query(
     `UPDATE webhook_outbox
-     SET attempts = attempts + 1,
-         last_error = $2,
+     SET last_error = $2,
          next_attempt_at = now() + ($3 || ' seconds')::interval
      WHERE id = $1`,
     [id, error.slice(0, 2000), String(delaySec)],

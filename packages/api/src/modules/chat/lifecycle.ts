@@ -104,6 +104,8 @@ export interface ReserveOutcome {
 export interface TopUpOutcome {
   ok: boolean;
   failedScope?: BudgetScope;
+  /** The pricier fallback exceeded the user's remaining credit wallet. */
+  insufficientCredits?: boolean;
 }
 
 /**
@@ -348,6 +350,32 @@ export async function rejectTopUpBudgetExceeded(
   );
 }
 
+/** 402 insufficient_credits when a pricier fallback exceeds the credit wallet. */
+export async function rejectInsufficientCredits(
+  ctx: RejectionCtx,
+  decision: PolicyDecision,
+  safetyCostUsd: number,
+): Promise<ChatFailure> {
+  return recordRejection(
+    ctx,
+    {
+      ...baseLog(ctx.aiRequest, decision, ctx.policyMeta),
+      status: "failed",
+      error: "insufficient_credits",
+      reasonCode: "insufficient_credits",
+      ...(safetyCostUsd > 0 ? { actualCostUsd: safetyCostUsd } : {}),
+    },
+    { ...baseObs(ctx.aiRequest, decision), status: "blocked", reason: "insufficient_credits" },
+    fail(
+      402,
+      "insufficient_credits",
+      { reasonCode: "insufficient_credits" },
+      "Insufficient credits for the selected fallback model",
+    ),
+    { auditFailureRetryable: safetyCostUsd <= 0 },
+  );
+}
+
 /** Standard 502 provider failure after releaseWithSafety. */
 export async function rejectProviderFailure(
   ctx: RejectionCtx,
@@ -450,10 +478,12 @@ export async function executeProviderWithFallback(
           const topUp = await budget.topUp(fbReserve - budget.getReservedUsd());
           if (!topUp.ok) {
             await releaseWithSafety(budget.incur, budget.release, ctx.safetyCostUsd);
-            const failure = await rejectTopUpBudgetExceeded(ctx.rejection, ctx.decision, {
-              failedScope: topUp.failedScope!,
-              safetyCostUsd: ctx.safetyCostUsd,
-            });
+            const failure = topUp.insufficientCredits
+              ? await rejectInsufficientCredits(ctx.rejection, ctx.decision, ctx.safetyCostUsd)
+              : await rejectTopUpBudgetExceeded(ctx.rejection, ctx.decision, {
+                  failedScope: topUp.failedScope!,
+                  safetyCostUsd: ctx.safetyCostUsd,
+                });
             return { ok: false, failure };
           }
           budget.setReservedUsd(fbReserve);

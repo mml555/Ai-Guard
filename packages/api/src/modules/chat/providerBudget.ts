@@ -74,20 +74,45 @@ export function createFlatProviderBudget(args: {
       }
     },
     topUp: async (additionalUsd): Promise<TopUpOutcome> => {
+      // A pricier fallback must reserve the extra credits too, or a user with
+      // enough credits for the primary but not the fallback would run it and
+      // settlement would just clamp the overdraft at zero (free over-spend).
+      const usesCredits = billing?.usesCredits() === true && additionalUsd > 0;
+      if (usesCredits) {
+        const ok = await billing!.reserveCredits(tenantId ?? "", aiRequest.userId, additionalUsd);
+        if (!ok) return { ok: false, insufficientCredits: true };
+      }
       // credits_only skips the internal budget ledger, so there is no lease to
       // release a top-up against — writing reserved_usd here would leak it.
       // The credit wallet is the ledger in that mode.
       if (skipInternalBudget) return { ok: true };
-      const result = await topUpBudget(pool, {
-        projectId: aiRequest.projectId,
-        userId: aiRequest.userId,
-        feature: aiRequest.feature,
-        additionalCostUsd: additionalUsd,
-        caps: decision.reservationCaps,
-        now,
-        leaseId,
-        tenantId,
-      });
+      let result: Awaited<ReturnType<typeof topUpBudget>>;
+      try {
+        result = await topUpBudget(pool, {
+          projectId: aiRequest.projectId,
+          userId: aiRequest.userId,
+          feature: aiRequest.feature,
+          additionalCostUsd: additionalUsd,
+          caps: decision.reservationCaps,
+          now,
+          leaseId,
+          tenantId,
+        });
+      } catch (err) {
+        // topUpBudget re-throws non-rejection errors (lock timeout, DB failure)
+        // AFTER we reserved the extra credits — release them so they don't leak,
+        // then propagate the original error.
+        if (usesCredits) {
+          await billing!
+            .releaseCredits(tenantId ?? "", aiRequest.userId, additionalUsd)
+            .catch(() => {});
+        }
+        throw err;
+      }
+      if (!result.ok && usesCredits) {
+        // Internal top-up rejected after reserving the extra credits — release them.
+        await billing!.releaseCredits(tenantId ?? "", aiRequest.userId, additionalUsd);
+      }
       return {
         ok: result.ok,
         failedScope: result.failedScope as BudgetScope | undefined,
