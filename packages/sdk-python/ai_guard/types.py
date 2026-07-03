@@ -12,7 +12,7 @@ by the client's return-type annotations.
 from __future__ import annotations
 
 import sys
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Union
 
 if sys.version_info >= (3, 11):
     from typing import NotRequired, TypedDict
@@ -23,11 +23,42 @@ else:  # pragma: no cover - exercised on 3.9/3.10 runtimes
 # --- Chat -------------------------------------------------------------------
 
 
+class TextPart(TypedDict):
+    """A text segment of a multimodal message (``type`` is ``"text"``)."""
+
+    type: str
+    text: str
+
+
+class ImageUrl(TypedDict):
+    url: str
+    detail: NotRequired[str]  # "low" | "high" | "auto"
+
+
+class ImagePart(TypedDict):
+    """An image segment of a multimodal message (``type`` is ``"image_url"``).
+
+    ``image_url.url`` is an http(s) URL or a ``data:`` URI (base64) — e.g. a
+    page scan for OCR. Passed through to a vision model; the gateway still
+    governs budget, audit, and text-part safety.
+    """
+
+    type: str
+    image_url: ImageUrl
+
+
+ContentPart = Union[TextPart, ImagePart]
+
+
 class ChatMessage(TypedDict):
-    """A single chat message. ``role`` is one of system/user/assistant/tool."""
+    """A single chat message. ``role`` is one of system/user/assistant/tool.
+
+    ``content`` is a plain string, or a list of OpenAI-style content parts
+    (text + images) for vision / multimodal features.
+    """
 
     role: str
-    content: str
+    content: Union[str, List[ContentPart]]
 
 
 class Usage(TypedDict):
@@ -45,11 +76,18 @@ class BudgetRemaining(TypedDict):
     # null when no cap is configured (monthly_usd: 0).
     featureMonthlyUsd: Optional[float]
     globalMonthlyUsd: Optional[float]
+    # Token headroom; present when a token cap is configured, null otherwise.
+    userDailyTokens: NotRequired[Optional[int]]
+    featureMonthlyTokens: NotRequired[Optional[int]]
+    globalMonthlyTokens: NotRequired[Optional[int]]
 
 
 class Safety(TypedDict):
     piiMasked: bool
     injectionBlocked: bool
+    # Present only for grounded features: whether the answer's citations were
+    # verified against the provided context.
+    grounded: NotRequired[bool]
 
 
 class ResponseMessage(TypedDict):
@@ -62,11 +100,14 @@ class ChatResponse(TypedDict):
 
     message: ResponseMessage
     model: str
+    # Provider of the model that ran, e.g. "openai", "openrouter", "ollama".
+    provider: str
     decision: str  # "allow" | "degrade" | "fallback"
     reason: NotRequired[str]
     usage: Usage
     cost: Cost
-    budgetRemaining: BudgetRemaining
+    # null under hierarchical budgets (the node tree is the authority).
+    budgetRemaining: Optional[BudgetRemaining]
     safety: Safety
     requestId: str  # audit id ("req_<n>")
 
@@ -129,6 +170,28 @@ class ExplainResponse(TypedDict):
     summary: str
 
 
+# --- Embeddings -------------------------------------------------------------
+
+
+class EmbeddingsUsage(TypedDict):
+    inputTokens: Optional[int]
+
+
+class EmbeddingsResponse(TypedDict):
+    """``200`` body of ``POST /v1/embeddings``."""
+
+    embeddings: List[List[float]]  # one vector per input, in request order
+    model: str
+    provider: str
+    decision: str  # "allow" | "degrade" | "fallback"
+    reason: NotRequired[str]
+    usage: EmbeddingsUsage
+    cost: Cost
+    # null under hierarchical budgets (the node tree is the authority).
+    budgetRemaining: Optional[BudgetRemaining]
+    requestId: str
+
+
 # --- Usage ------------------------------------------------------------------
 
 # The /v1/usage and /v1/usage/summary bodies are operator-facing and not fully
@@ -140,11 +203,16 @@ UsageResponse = Dict[str, Any]
 
 ChatResult = ChatResponse
 ExplainResult = ExplainResponse
+EmbeddingsResult = EmbeddingsResponse
 UsageResult = UsageResponse
 
 
 __all__ = [
     "ChatMessage",
+    "TextPart",
+    "ImageUrl",
+    "ImagePart",
+    "ContentPart",
     "Usage",
     "Cost",
     "BudgetRemaining",
@@ -152,6 +220,9 @@ __all__ = [
     "ResponseMessage",
     "ChatResponse",
     "ChatResult",
+    "EmbeddingsUsage",
+    "EmbeddingsResponse",
+    "EmbeddingsResult",
     "ExplainRequested",
     "ExplainResolved",
     "ExplainSafety",

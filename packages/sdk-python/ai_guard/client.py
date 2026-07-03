@@ -20,7 +20,13 @@ from typing import Any, Dict, Iterator, List, Mapping, Optional, Sequence, Type,
 import httpx
 
 from .errors import AiGuardError, PolicyBlockedError, SafetyBlockedError
-from .types import ChatMessage, ChatResult, ExplainResult, UsageResult
+from .types import (
+    ChatMessage,
+    ChatResult,
+    EmbeddingsResult,
+    ExplainResult,
+    UsageResult,
+)
 
 __all__ = ["AiGuardClient"]
 
@@ -104,6 +110,7 @@ class AiGuardClient:
         user_type: str,
         feature: str,
         messages: Sequence[ChatMessage],
+        context: Optional[Sequence[str]] = None,
         model_class: Optional[str] = None,
         requested_model_class: Optional[str] = None,
         input_tokens_estimate: Optional[int] = None,
@@ -119,7 +126,13 @@ class AiGuardClient:
             user_id: Your end-user id. Required.
             user_type: Must match a user type in ``ai-guard.yaml``. Required.
             feature: Registered feature name. Required.
-            messages: List of ``{"role", "content"}`` messages.
+            messages: List of ``{"role", "content"}`` messages. ``content`` is a
+                string, or a list of content parts (``{"type": "text", ...}`` /
+                ``{"type": "image_url", "image_url": {"url": ...}}``) for vision.
+            context: Retrieved passages for a grounded feature (safety
+                ``grounding: strict``). The gateway answers ONLY from these,
+                forces verbatim citations, and verifies them; unverifiable
+                answers become a safe refusal.
             model_class: Requested model class (e.g. ``"cheap"``). Maps to the
                 API's ``modelClass`` field.
             requested_model_class: Alias for ``model_class``; if both are given,
@@ -148,6 +161,7 @@ class AiGuardClient:
             user_type=user_type,
             feature=feature,
             messages=messages,
+            context=context,
             model_class=model_class,
             requested_model_class=requested_model_class,
             input_tokens_estimate=input_tokens_estimate,
@@ -171,6 +185,7 @@ class AiGuardClient:
         user_type: str,
         feature: str,
         messages: Sequence[ChatMessage],
+        context: Optional[Sequence[str]] = None,
         model_class: Optional[str] = None,
         requested_model_class: Optional[str] = None,
         input_tokens_estimate: Optional[int] = None,
@@ -218,6 +233,7 @@ class AiGuardClient:
             user_type=user_type,
             feature=feature,
             messages=messages,
+            context=context,
             model_class=model_class,
             requested_model_class=requested_model_class,
             input_tokens_estimate=input_tokens_estimate,
@@ -290,6 +306,59 @@ class AiGuardClient:
         )
         return self._handle_json(response)  # type: ignore[return-value]
 
+    def embed(
+        self,
+        *,
+        user_id: str,
+        user_type: str,
+        feature: str,
+        input: Union[str, Sequence[str]],
+        model_class: Optional[str] = None,
+        requested_model_class: Optional[str] = None,
+        input_tokens_estimate: Optional[int] = None,
+        project_id: Optional[str] = None,
+        environment: Optional[str] = None,
+        metadata: Optional[Mapping[str, Any]] = None,
+    ) -> EmbeddingsResult:
+        """Embed one or more texts through the gateway (``POST /v1/embeddings``).
+
+        Policy-checked (``feature`` + ``user_type``), budget-reserved, and
+        audited exactly like :meth:`chat`, and raises the same typed errors on a
+        ``403`` policy/budget block.
+
+        Args:
+            input: A single text, or a batch of texts to embed. A list is sent
+                as a JSON array (one vector is returned per input, in order).
+
+        Returns:
+            The decoded :class:`~ai_guard.types.EmbeddingsResponse` body, whose
+            ``embeddings`` is one vector per input in request order.
+        """
+        body: Dict[str, Any] = {
+            "userId": user_id,
+            "userType": user_type,
+            "feature": feature,
+            "input": input if isinstance(input, str) else list(input),
+        }
+        resolved_model_class = model_class or requested_model_class
+        if resolved_model_class is not None:
+            body["modelClass"] = resolved_model_class
+        if input_tokens_estimate is not None:
+            body["inputTokensEstimate"] = input_tokens_estimate
+        if project_id is not None:
+            body["projectId"] = project_id
+        if environment is not None:
+            body["environment"] = environment
+        if metadata is not None:
+            body["metadata"] = dict(metadata)
+
+        response = self._client.post(
+            f"{self.base_url}/v1/embeddings",
+            headers=self._headers(),
+            json=body,
+        )
+        return self._handle_json(response)  # type: ignore[return-value]
+
     def get_usage(
         self,
         *,
@@ -356,6 +425,7 @@ class AiGuardClient:
         user_type: str,
         feature: str,
         messages: Sequence[ChatMessage],
+        context: Optional[Sequence[str]],
         model_class: Optional[str],
         requested_model_class: Optional[str],
         input_tokens_estimate: Optional[int],
@@ -371,6 +441,8 @@ class AiGuardClient:
             "feature": feature,
             "messages": [dict(m) for m in messages],
         }
+        if context is not None:
+            body["context"] = list(context)
         resolved_model_class = model_class or requested_model_class
         if resolved_model_class is not None:
             body["modelClass"] = resolved_model_class

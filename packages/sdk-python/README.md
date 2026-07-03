@@ -86,6 +86,43 @@ typed keys:
 }
 ```
 
+### Vision (multimodal)
+
+Pass content parts instead of a string to send images to a vision model. The
+gateway governs budget/audit and still runs safety on the text parts:
+
+```python
+res = ai.chat(
+    user_id="user_123",
+    user_type="logged_in",
+    feature="document_extraction",
+    messages=[{
+        "role": "user",
+        "content": [
+            {"type": "text", "text": "Extract the total from this receipt."},
+            {"type": "image_url", "image_url": {"url": "data:image/png;base64,..."}},
+        ],
+    }],
+)
+```
+
+### Grounding
+
+For a feature with safety `grounding: strict`, pass retrieved passages as
+`context`. The gateway answers only from them, forces verbatim citations, and
+verifies them — unverifiable answers become a safe refusal, and
+`res["safety"]["grounded"]` reports whether the citations checked out:
+
+```python
+res = ai.chat(
+    user_id="user_123",
+    user_type="logged_in",
+    feature="grounded_support",
+    messages=[{"role": "user", "content": "How long do refunds take?"}],
+    context=["Refunds are issued within 5 business days of approval."],
+)
+```
+
 ## Streaming
 
 `chat_stream()` yields incremental text chunks over Server-Sent Events. It
@@ -109,6 +146,21 @@ if the server's framing differs.
 
 The generator holds the connection open until fully consumed. Policy/safety
 blocks that occur before the stream begins raise the usual typed errors.
+
+## Embeddings
+
+`embed()` runs governed embeddings (`POST /v1/embeddings`) — policy-checked,
+budget-reserved, and audited like `chat()`. Pass one string or a batch:
+
+```python
+res = ai.embed(
+    user_id="user_123",
+    user_type="logged_in",
+    feature="rag_ingest",
+    input=["first passage", "second passage"],   # or a single string
+)
+vectors = res["embeddings"]   # one vector per input, in request order
+```
 
 ## Idempotency
 
