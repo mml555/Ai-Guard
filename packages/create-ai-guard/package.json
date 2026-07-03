@@ -1,6 +1,6 @@
 {
   "name": "create-ai-guard",
-  "version": "0.0.0",
+  "version": "1.0.0",
   "license": "MIT",
   "description": "Scaffold an ai-guard.yaml + .env for a new project.",
   "type": "module",

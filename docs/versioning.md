@@ -3,11 +3,10 @@
 How Ai-Guard versions its **HTTP API**, **SDKs**, and **config schema**; the
 supported-version window; and the compatibility guarantees you can build on.
 
-> **Status:** Ai-Guard is pre-1.0. [SECURITY.md](../SECURITY.md) lists **0.0.0**
-> as the only supported line (active development). The policy below is the
-> **intended policy from 1.0 onward**; while pre-1.0, minor versions may include
-> breaking changes (standard SemVer 0.x semantics). This document also defines the
-> checklist to cut a stable 1.0.
+> **Status:** Ai-Guard **1.0.0** is released, so the compatibility guarantees
+> below are now in effect: breaking changes to the HTTP API, SDKs, or config
+> schema require a new major version. [SECURITY.md](../SECURITY.md) lists the
+> currently supported version line.
 
 ---
 
@@ -76,7 +75,7 @@ not a hand-editable compatibility surface.
 
 ## Supported-versions window & EOL
 
-> Intended from 1.0. Current pre-1.0 support is **0.0.0** per SECURITY.md.
+> In effect as of **1.0.0**. See [SECURITY.md](../SECURITY.md) for the currently supported line.
 
 | Line | Support |
 | --- | --- |

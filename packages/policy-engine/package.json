@@ -1,6 +1,6 @@
 {
   "name": "@ai-guard/policy-engine",
-  "version": "0.0.0",
+  "version": "1.0.0",
   "license": "MIT",
   "description": "Pure, deterministic AI policy evaluator for Ai-Guard. No I/O.",
   "type": "module",

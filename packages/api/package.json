@@ -1,6 +1,6 @@
 {
   "name": "@ai-guard/api",
-  "version": "0.0.0",
+  "version": "1.0.0",
   "license": "MIT",
   "description": "Ai-Guard API: stateful control plane (Postgres + LiteLLM + Safety).",
   "type": "module",

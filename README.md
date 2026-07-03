@@ -133,7 +133,7 @@ AI_GUARD_API_KEY=sk-ai-guard-api-local \
 | `make up-prod` | Small self-hosted production (**not HA**) |
 | **Helm** | [Enterprise production](./docs/production-deploy.md) — recommended |
 
-**Current release:** `v0.0.0` — pin `ghcr.io/<org>/ai-guard-api:v0.0.0` in production.
+**Current release:** `v1.0.0` — pin `ghcr.io/<org>/ai-guard-api:v1.0.0` in production.
 
 | Command | Stack |
 | --- | --- |

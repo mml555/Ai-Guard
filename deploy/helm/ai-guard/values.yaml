@@ -23,7 +23,7 @@ image:
   # Matches the image published by .github/workflows/docker.yml
   # (ghcr.io/<owner>/<repo>/ai-guard-api). Override for a mirror/private registry.
   repository: ghcr.io/mml555/ai-guard/ai-guard-api
-  tag: v0.0.0
+  tag: v1.0.0
   pullPolicy: IfNotPresent
 
 api:

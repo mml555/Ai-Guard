@@ -12,7 +12,7 @@ helm install ai-guard ./deploy/helm/ai-guard \
   -f deploy/helm/ai-guard/values-selfhost.yaml \
   --namespace ai-guard --create-namespace \
   --set image.repository=ghcr.io/your-org/ai-guard-api \
-  --set image.tag=v0.0.0 \
+  --set image.tag=v1.0.0 \
   --set secret.aiGuardApiKey=$(openssl rand -hex 24) \
   --set secret.databaseUrl='postgres://user:pass@your-db:5432/aiguard' \
   --set-string secret.providerKeys.OPENAI_API_KEY=sk-...
@@ -33,7 +33,7 @@ Generic install (no profile overlay):
 helm install ai-guard ./deploy/helm/ai-guard \
   --namespace ai-guard --create-namespace \
   --set image.repository=ghcr.io/your-org/ai-guard-api \
-  --set image.tag=v0.0.0 \
+  --set image.tag=v1.0.0 \
   --set secret.aiGuardApiKey=$(openssl rand -hex 24) \
   --set secret.databaseUrl='postgres://user:pass@your-db:5432/aiguard' \
   --set-string secret.providerKeys.OPENAI_API_KEY=sk-...
@@ -92,7 +92,7 @@ can't silently drift:
 
 ```yaml
 production: true
-image: { tag: v0.0.0 }                                   # already pinned
+image: { tag: v1.0.0 }                                   # already pinned
 litellm: { image: "ghcr.io/berriai/litellm@sha256:…" }   # pin the rest
 redis:   { image: "redis:7.4.1-alpine" }
 presidio:

@@ -15,6 +15,15 @@ guarantees in `docs/versioning.md` apply.
 
 ## [Unreleased]
 
+## [1.0.0] - 2026-07-02
+
+First stable, public release under the MIT license. From this version the
+compatibility guarantees in [docs/versioning.md](docs/versioning.md) are in
+effect: breaking changes to the HTTP API, SDKs, or config schema require a new
+major version. This release consolidates the production-readiness hardening and
+multi-tenant isolation below with the embeddings / vision / grounding gateway
+extensions and reproducible container builds added since 0.6.0.
+
 Production-readiness hardening from the 2026-07-01 full audit. Multi-tenant
 isolation is now real end-to-end, the money path no longer leaks or
 double-books, and the operator console, observability, and migration
@@ -60,6 +69,10 @@ operability are completed.
   longer advertise unpublished install commands without a caveat.
 
 ### Added
+- **Gateway extensions:** governed embeddings (`POST /v1/embeddings`), vision /
+  multimodal chat (image content parts), and a grounding safety mode that
+  citation-verifies answers against caller-supplied `context`; plus a `pii_scope`
+  control (input / output / both) for PII masking. Both SDKs updated.
 - **Domain metrics** on `/metrics`: `ai_guard_chat_requests_total`,
   `ai_guard_chat_cost_usd_total`, `ai_guard_chat_fallbacks_total`,
   `ai_guard_budget_blocks_total`, `ai_guard_safety_blocks_total`.
@@ -74,6 +87,9 @@ operability are completed.
 ### Changed
 - Migrations run with statement/query timeouts disabled so a long index build or
   advisory-lock wait on a large database is never killed at 30s.
+- **Reproducible runtime image:** the API container's dependencies are now
+  resolved entirely from the workspace lockfile (`pnpm deploy`) rather than
+  re-resolved at build time, so the same commit yields the same dependency tree.
 
 ### ⚠ Breaking
 - **Config schema:** unknown/misspelled top-level or budget keys in
@@ -237,7 +253,8 @@ proceed against a known baseline. Full notes:
 - Request correlation IDs (`requestId` on success, `auditRequestId` on blocks)
   and host metadata in audit logs.
 
-[Unreleased]: https://github.com/mml555/Ai-Guard/compare/v0.0.0...HEAD
-[0.0.0]: https://github.com/mml555/Ai-Guard/releases/tag/v0.0.0
+[Unreleased]: https://github.com/mml555/Ai-Guard/compare/v1.0.0...HEAD
+[1.0.0]: https://github.com/mml555/Ai-Guard/releases/tag/v1.0.0
 [0.6.0]: https://github.com/mml555/Ai-Guard/compare/v0.5.0...v0.6.0
 [0.5.0]: https://github.com/mml555/Ai-Guard/compare/v0.0.0...v0.5.0
+[0.0.0]: https://github.com/mml555/Ai-Guard/releases/tag/v0.0.0

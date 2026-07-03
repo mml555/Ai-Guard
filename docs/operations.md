@@ -68,7 +68,7 @@ For Kubernetes, use the **Helm chart** ([deploy/helm/ai-guard](../deploy/helm/ai
 
 ```bash
 helm install ai-guard ./deploy/helm/ai-guard -n ai-guard --create-namespace \
-  --set image.repository=ghcr.io/your-org/ai-guard-api --set image.tag=v0.0.0 \
+  --set image.repository=ghcr.io/your-org/ai-guard-api --set image.tag=v1.0.0 \
   --set secret.aiGuardApiKey=... --set secret.databaseUrl=postgres://...
 ```
 

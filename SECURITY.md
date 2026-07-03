@@ -4,7 +4,7 @@
 
 | Version | Supported |
 | --- | --- |
-| 0.0.0 | Yes (pre-release baseline; active development) |
+| 1.0.x | Yes |
 
 ## Reporting a vulnerability
 

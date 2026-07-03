@@ -29,7 +29,7 @@ scripts/backup-postgres.sh ./backups
 # 2. Upgrade chart + image
 helm upgrade ai-guard deploy/helm/ai-guard \
   --namespace ai-guard \
-  --set image.tag=v0.0.0 \
+  --set image.tag=v1.0.0 \
   -f your-values.yaml
 
 # 3. Wait for rollout
