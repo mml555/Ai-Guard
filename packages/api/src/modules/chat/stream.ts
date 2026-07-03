@@ -3,7 +3,7 @@ import type { LiteLLMStreamFinal } from "../../services/litellm";
 import { logRequest } from "../usage/auditLogRepo";
 import { recordActualCost, recordIncurredCost, releaseBudget } from "../usage/repo";
 import { releasePath, settlePath } from "../budgets/repo";
-import { bookSafetyIfAny, releaseWithSafety } from "./lifecycle";
+import { bookSafetyIfAny, releaseBillingCredits, releaseWithSafety, settleBillingCredits } from "./lifecycle";
 import { prepareChatCall, type PreparedCall } from "./pipeline";
 import { createHierarchicalIncurSafety } from "./prep-hierarchical";
 import { baseLog, baseObs } from "./mapper";
@@ -76,6 +76,14 @@ export async function settleStream(
     piiMasked: ctx.piiMasked,
     injectionBlocked: ctx.injectionBlocked,
   });
+  await settleBillingCredits(deps.billing, log, {
+    tenantId: deps.policyMeta?.tenantId ?? "",
+    userId: aiRequest.userId,
+    feature: aiRequest.feature,
+    reservedUsd,
+    actualCostUsd,
+    requestId,
+  });
   return requestId;
 }
 
@@ -136,8 +144,9 @@ export async function settleStreamPartial(
     log?.error({ err }, "partial stream settlement failed; leaving lease for sweep");
   }
 
+  let requestId: string | undefined;
   try {
-    await logRequest(pool, {
+    requestId = await logRequest(pool, {
       ...baseLog(aiRequest, decision, deps.policyMeta),
       resolvedModel: model,
       status: "ok",
@@ -151,6 +160,14 @@ export async function settleStreamPartial(
   } catch (err) {
     log?.error({ err }, "failed to audit partial stream settlement");
   }
+  await settleBillingCredits(deps.billing, log, {
+    tenantId: deps.policyMeta?.tenantId ?? "",
+    userId: aiRequest.userId,
+    feature: aiRequest.feature,
+    reservedUsd: hold.reservedUsd,
+    actualCostUsd,
+    requestId: requestId ?? "",
+  });
   observability.recordChat({
     ...baseObs(aiRequest, decision),
     status: "ok",
@@ -193,12 +210,18 @@ export async function releaseStream(deps: ChatServiceDeps, ctx: StreamContext): 
           }),
         safetyCostUsd,
       );
-      return;
+    } else {
+      const incur = createHierarchicalIncurSafety(deps.pool, hold.nodes, now, hold.shardKey);
+      await bookSafetyIfAny(incur, safetyCostUsd);
+      await releasePath(deps.pool, hold.held);
     }
-    const incur = createHierarchicalIncurSafety(deps.pool, hold.nodes, now, hold.shardKey);
-    await bookSafetyIfAny(incur, safetyCostUsd);
-    await releasePath(deps.pool, hold.held);
   } catch (err) {
     deps.log?.error({ err }, "failed to release stream reservation; lease sweep will reconcile");
   }
+  // Release the credit reservation too — no model spend occurred on this path.
+  await releaseBillingCredits(deps.billing, deps.log, {
+    tenantId: deps.policyMeta?.tenantId ?? "",
+    userId: aiRequest.userId,
+    reservedUsd: hold.reservedUsd,
+  });
 }

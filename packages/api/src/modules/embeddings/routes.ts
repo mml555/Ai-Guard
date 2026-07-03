@@ -24,6 +24,7 @@ import {
 } from "./schemas";
 import { errorJsonSchema } from "../chat/schemas";
 import { handleEmbeddings, type EmbeddingsDeps } from "./service";
+import { assertAiRequestsNotPaused } from "../emergency/routes";
 
 export interface EmbeddingsRouteDeps {
   config: ModelgovConfig;
@@ -115,6 +116,19 @@ export function registerEmbeddingsRoute(
         "not_implemented",
         {},
         "Embeddings do not support hierarchical (node-tree) budgets; use a flat-budget API key",
+      );
+    }
+
+    // Emergency pause blocks ALL new provider traffic — embeddings included, so
+    // it isn't a bypass during an incident (parity with the chat pipeline).
+    const pause = await assertAiRequestsNotPaused(rdeps.pool);
+    if (pause.paused) {
+      return sendError(
+        reply,
+        503,
+        "ai_requests_paused",
+        { reason: pause.reason ?? "emergency pause" },
+        "AI requests are temporarily paused",
       );
     }
 

@@ -49,3 +49,11 @@ CREATE TABLE IF NOT EXISTS system_flags (
   value      jsonb       NOT NULL,
   updated_at timestamptz NOT NULL DEFAULT now()
 );
+
+-- Idempotency for Stripe webhook processing: Stripe delivers events at least
+-- once and operators can replay them, so a credit grant is keyed by event id
+-- and applied at most once (recorded in the same transaction as the top-up).
+CREATE TABLE IF NOT EXISTS stripe_processed_events (
+  event_id     text        PRIMARY KEY,
+  processed_at timestamptz NOT NULL DEFAULT now()
+);

@@ -7,6 +7,7 @@ import {
   executeProviderWithFallback,
   recordRejection,
   rejectPolicyBlock,
+  settleBillingCredits,
   type RejectionCtx,
 } from "./lifecycle";
 import { createFlatProviderBudget, createHierarchicalProviderBudget } from "./providerBudget";
@@ -485,7 +486,7 @@ export async function executeSyncChat(
   try {
     const outputSafety = await safety.inspectOutput(content, decision.safetyPlan);
     if (outputSafety.action === "block") {
-      return recordRejection(
+      const blocked = await recordRejection(
         { pool, observability },
         {
           ...baseLog(aiRequest, decision, deps.policyMeta),
@@ -516,6 +517,17 @@ export async function executeSyncChat(
         }),
         { auditFailureRetryable: false },
       );
+      // The model call ran and its cost is real — settle the credit reservation
+      // (and meter it) even though the response is blocked, or the hold leaks.
+      await settleBillingCredits(deps.billing, log, {
+        tenantId: deps.policyMeta?.tenantId ?? "",
+        userId: aiRequest.userId,
+        feature: aiRequest.feature,
+        reservedUsd: settledReservedUsd,
+        actualCostUsd,
+        requestId: blocked.auditRequestId ?? "",
+      });
+      return blocked;
     }
     content = outputSafety.content;
     if (outputSafety.piiMasked) piiMasked = true;
@@ -544,6 +556,16 @@ export async function executeSyncChat(
         });
         return auditUnavailableFailure(false);
       }
+      // Model call ran (spend is real) but output safety is down: settle the
+      // credit reservation so it isn't held forever (meter skipped — no audit id).
+      await settleBillingCredits(deps.billing, log, {
+        tenantId: deps.policyMeta?.tenantId ?? "",
+        userId: aiRequest.userId,
+        feature: aiRequest.feature,
+        reservedUsd: settledReservedUsd,
+        actualCostUsd,
+        requestId: "",
+      });
       return {
         ...fail(503, "safety_unavailable", {}, "Safety service unavailable"),
         retryable: false,
@@ -583,26 +605,14 @@ export async function executeSyncChat(
     return auditUnavailableFailure(false);
   }
 
-  const tenantId = deps.policyMeta?.tenantId ?? "";
-  if (deps.billing?.usesCredits()) {
-    try {
-      await deps.billing.settleCredits(
-        tenantId,
-        aiRequest.userId,
-        settledReservedUsd,
-        actualCostUsd,
-      );
-      await deps.billing.recordMeter({
-        requestId: auditRequestId,
-        tenantId,
-        userId: aiRequest.userId,
-        feature: aiRequest.feature,
-        costUsd: actualCostUsd,
-      });
-    } catch (err) {
-      log?.error({ err, auditRequestId }, "billing settlement failed");
-    }
-  }
+  await settleBillingCredits(deps.billing, log, {
+    tenantId: deps.policyMeta?.tenantId ?? "",
+    userId: aiRequest.userId,
+    feature: aiRequest.feature,
+    reservedUsd: settledReservedUsd,
+    actualCostUsd,
+    requestId: auditRequestId,
+  });
 
   // For grounded requests the gateway prepended a system message carrying the
   // (deliberately un-masked) retrieved context; don't ship that to the

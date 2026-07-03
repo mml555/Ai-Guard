@@ -159,8 +159,8 @@ export function createBillingService(
       await applyStripeEvent(pool, event, { planMap, usdPerCredit });
     },
 
-    adminTopUp(params) {
-      return topUpCreditsInTransaction(pool, params);
+    async adminTopUp(params) {
+      await topUpCreditsInTransaction(pool, params);
     },
   };
 }
@@ -195,6 +195,8 @@ async function applyStripeEvent(
           creditsUsd,
           stripeCustomerId: typeof session.customer === "string" ? session.customer : undefined,
           userType: session.metadata?.user_type,
+          // Replay-safe: the same event id grants credits at most once.
+          stripeEventId: event.id,
         });
       }
       break;

@@ -4,6 +4,7 @@ import { afterAll, beforeAll, beforeEach, describe, expect, it } from "vitest";
 import { applySchema } from "../src/db/init";
 import { createPool, type Pool } from "../src/db/pool";
 import { createBillingService } from "../src/modules/billing/service";
+import { topUpCreditsInTransaction } from "../src/modules/billing/repo";
 import {
   type LiteLLMChatResult,
   type LiteLLMClient,
@@ -69,7 +70,8 @@ describe.skipIf(!DATABASE_URL)("billing + emergency (integration)", () => {
   beforeEach(async () => {
     await pool.query(
       `TRUNCATE budget_counters, request_logs, idempotency_keys,
-       billing_accounts, meter_events, webhook_outbox, system_flags`,
+       billing_accounts, meter_events, webhook_outbox, system_flags,
+       stripe_processed_events`,
     );
   });
 
@@ -157,6 +159,25 @@ describe.skipIf(!DATABASE_URL)("billing + emergency (integration)", () => {
       `SELECT count(*)::int AS n FROM meter_events WHERE user_id = 'u1'`,
     );
     expect(meters.rows[0].n).toBe(1);
+  });
+
+  it("applies a Stripe top-up at most once per event id (replay-safe)", async () => {
+    const first = await topUpCreditsInTransaction(pool, {
+      tenantId: "",
+      userId: "u_evt",
+      creditsUsd: 3,
+      stripeEventId: "evt_replay_1",
+    });
+    const replay = await topUpCreditsInTransaction(pool, {
+      tenantId: "",
+      userId: "u_evt",
+      creditsUsd: 3,
+      stripeEventId: "evt_replay_1",
+    });
+    expect(first).toBe(true);
+    expect(replay).toBe(false);
+    const balance = await billing.getBalance("", "u_evt");
+    expect(balance.creditsUsd).toBeCloseTo(3, 6); // granted once, not doubled
   });
 
   it("rejects invalid stripe webhooks", async () => {

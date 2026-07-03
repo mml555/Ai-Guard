@@ -227,9 +227,21 @@ export async function topUpCreditsInTransaction(
     creditsUsd: number;
     stripeCustomerId?: string;
     userType?: string;
+    /** When set, the grant is idempotent per Stripe event id (replay-safe). */
+    stripeEventId?: string;
   },
-): Promise<void> {
-  await withTransaction(pool, async (client) => {
+): Promise<boolean> {
+  return withTransaction(pool, async (client) => {
+    if (params.stripeEventId) {
+      const { rowCount } = await client.query(
+        `INSERT INTO stripe_processed_events (event_id) VALUES ($1)
+         ON CONFLICT (event_id) DO NOTHING`,
+        [params.stripeEventId],
+      );
+      // Already processed (Stripe re-delivery or operator replay) — skip the
+      // grant so credits are added at most once for this event.
+      if ((rowCount ?? 0) === 0) return false;
+    }
     await client.query(
       `INSERT INTO billing_accounts (tenant_id, user_id, stripe_customer_id, user_type, credits_usd)
        VALUES ($1, $2, $3, $4, $5)
@@ -246,5 +258,6 @@ export async function topUpCreditsInTransaction(
         params.creditsUsd,
       ],
     );
+    return true;
   });
 }

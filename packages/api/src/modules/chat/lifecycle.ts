@@ -18,6 +18,60 @@ import { logRequest, type RequestLogRow } from "../usage/auditLogRepo";
 import { budgetErrorContext, policyErrorFromDecision, policyErrorMessage } from "../../policyErrors";
 import type { BudgetScope } from "../usage/repo";
 import type { ChatMessage } from "../../types";
+import type { BillingService } from "../billing/service";
+
+type SettleLog = { error(obj: unknown, msg: string): void } | undefined;
+
+/**
+ * Settle a credit reservation once the model call has run: book the actual
+ * spend against the wallet (releasing the full reservation) and record the
+ * Stripe meter event. No-op unless billing uses credits (hybrid/credits_only).
+ * Must be called on EVERY post-model-call exit — success AND
+ * output-safety/grounding blocks — or the reservation leaks. Metering is
+ * skipped when no request id is available (e.g. audit-write failure).
+ */
+export async function settleBillingCredits(
+  billing: BillingService | undefined,
+  log: SettleLog,
+  params: {
+    tenantId: string;
+    userId: string;
+    feature: string;
+    reservedUsd: number;
+    actualCostUsd: number;
+    requestId: string;
+  },
+): Promise<void> {
+  if (!billing?.usesCredits()) return;
+  try {
+    await billing.settleCredits(params.tenantId, params.userId, params.reservedUsd, params.actualCostUsd);
+    if (params.requestId) {
+      await billing.recordMeter({
+        requestId: params.requestId,
+        tenantId: params.tenantId,
+        userId: params.userId,
+        feature: params.feature,
+        costUsd: params.actualCostUsd,
+      });
+    }
+  } catch (err) {
+    log?.error({ err, requestId: params.requestId }, "billing credit settlement failed");
+  }
+}
+
+/** Release a credit reservation with nothing booked (no model spend occurred). */
+export async function releaseBillingCredits(
+  billing: BillingService | undefined,
+  log: SettleLog,
+  params: { tenantId: string; userId: string; reservedUsd: number },
+): Promise<void> {
+  if (!billing?.usesCredits()) return;
+  try {
+    await billing.releaseCredits(params.tenantId, params.userId, params.reservedUsd);
+  } catch (err) {
+    log?.error({ err }, "billing credit release failed");
+  }
+}
 import { auditUnavailableFailure, baseLog, baseObs, fail, type PolicyMeta } from "./mapper";
 import type { ChatFailure } from "./types";
 
