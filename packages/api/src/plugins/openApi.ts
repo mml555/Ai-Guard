@@ -13,14 +13,14 @@ import type { FastifyInstance } from "fastify";
  * inside a later `register(...)` so `onRoute` is attached first. `buildServer`
  * does exactly that.
  */
-export const OPENAPI_VERSION = "0.0.0";
+export const OPENAPI_VERSION = "1.0.0";
 
 export function registerOpenApi(app: FastifyInstance): void {
   app.register(fastifySwagger, {
     openapi: {
       openapi: "3.0.3",
       info: {
-        title: "Ai-Guard API",
+        title: "Modelgov API",
         version: OPENAPI_VERSION,
         description:
           "Self-hosted AI policy gateway. Every completion is checked against " +

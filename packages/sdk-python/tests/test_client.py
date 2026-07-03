@@ -1,4 +1,4 @@
-"""Tests for the Ai-Guard Python SDK, using respx to mock httpx transport."""
+"""Tests for the Modelgov Python SDK, using respx to mock httpx transport."""
 
 from __future__ import annotations
 
@@ -8,19 +8,19 @@ import httpx
 import pytest
 import respx
 
-from ai_guard import (
-    AiGuardClient,
-    AiGuardError,
+from modelgov import (
+    ModelgovClient,
+    ModelgovError,
     PolicyBlockedError,
     SafetyBlockedError,
 )
 
 BASE_URL = "http://localhost:3000"
-API_KEY = "sk-ai-guard-test"
+API_KEY = "sk-modelgov-test"
 
 
-def make_client() -> AiGuardClient:
-    return AiGuardClient(base_url=BASE_URL, api_key=API_KEY)
+def make_client() -> ModelgovClient:
+    return ModelgovClient(base_url=BASE_URL, api_key=API_KEY)
 
 
 CHAT_SUCCESS_BODY = {
@@ -97,6 +97,136 @@ def test_chat_converts_snake_case_to_camel_case() -> None:
     }
     # None-valued kwargs must be omitted entirely, not sent as null.
     assert "requestedModelClass" not in sent
+
+
+@respx.mock
+def test_chat_sends_context_and_multimodal_content() -> None:
+    route = respx.post(f"{BASE_URL}/v1/chat").mock(
+        return_value=httpx.Response(200, json=CHAT_SUCCESS_BODY)
+    )
+
+    with make_client() as client:
+        client.chat(
+            user_id="u",
+            user_type="logged_in",
+            feature="support_chat",
+            messages=[
+                {
+                    "role": "user",
+                    "content": [
+                        {"type": "text", "text": "What is on this receipt?"},
+                        {"type": "image_url", "image_url": {"url": "data:image/png;base64,AAAA"}},
+                    ],
+                }
+            ],
+            context=["Refunds are issued within 5 business days."],
+        )
+
+    sent = json.loads(route.calls.last.request.content)
+    assert sent["context"] == ["Refunds are issued within 5 business days."]
+    assert sent["messages"][0]["content"][0] == {"type": "text", "text": "What is on this receipt?"}
+    assert sent["messages"][0]["content"][1]["type"] == "image_url"
+
+
+@respx.mock
+def test_chat_omits_context_when_absent() -> None:
+    route = respx.post(f"{BASE_URL}/v1/chat").mock(
+        return_value=httpx.Response(200, json=CHAT_SUCCESS_BODY)
+    )
+
+    with make_client() as client:
+        client.chat(
+            user_id="u",
+            user_type="logged_in",
+            feature="support_chat",
+            messages=[{"role": "user", "content": "Hi"}],
+        )
+
+    assert "context" not in json.loads(route.calls.last.request.content)
+
+
+EMBEDDINGS_SUCCESS_BODY = {
+    "embeddings": [[0.1, 0.2, 0.3], [0.4, 0.5, 0.6]],
+    "model": "openai/text-embedding-3-small",
+    "provider": "openai",
+    "decision": "allow",
+    "usage": {"inputTokens": 9},
+    "cost": {"estimatedUsd": 0.0, "actualUsd": 0.0},
+    "budgetRemaining": {
+        "userDailyUsd": 0.24,
+        "featureMonthlyUsd": None,
+        "globalMonthlyUsd": 499.5,
+    },
+    "requestId": "req_77",
+}
+
+
+@respx.mock
+def test_embed_success_batch_and_auth() -> None:
+    route = respx.post(f"{BASE_URL}/v1/embeddings").mock(
+        return_value=httpx.Response(200, json=EMBEDDINGS_SUCCESS_BODY)
+    )
+
+    with make_client() as client:
+        res = client.embed(
+            user_id="user_123",
+            user_type="logged_in",
+            feature="rag_ingest",
+            input=["hello", "world"],
+            model_class="cheap",
+        )
+
+    assert res == EMBEDDINGS_SUCCESS_BODY
+    assert res["embeddings"][0] == [0.1, 0.2, 0.3]
+    assert res["requestId"] == "req_77"
+
+    request = route.calls.last.request
+    assert request.headers["authorization"] == f"Bearer {API_KEY}"
+    sent = json.loads(request.content)
+    assert sent == {
+        "userId": "user_123",
+        "userType": "logged_in",
+        "feature": "rag_ingest",
+        "input": ["hello", "world"],
+        "modelClass": "cheap",
+    }
+
+
+@respx.mock
+def test_embed_accepts_single_string_input() -> None:
+    route = respx.post(f"{BASE_URL}/v1/embeddings").mock(
+        return_value=httpx.Response(200, json=EMBEDDINGS_SUCCESS_BODY)
+    )
+
+    with make_client() as client:
+        client.embed(
+            user_id="u",
+            user_type="logged_in",
+            feature="rag_ingest",
+            input="just one",
+        )
+
+    sent = json.loads(route.calls.last.request.content)
+    assert sent["input"] == "just one"
+
+
+@respx.mock
+def test_embed_maps_policy_blocked() -> None:
+    respx.post(f"{BASE_URL}/v1/embeddings").mock(
+        return_value=httpx.Response(
+            403, json={"error": {"code": "budget_exceeded", "message": "over budget"}}
+        )
+    )
+
+    with make_client() as client:
+        with pytest.raises(PolicyBlockedError) as exc_info:
+            client.embed(
+                user_id="u",
+                user_type="logged_in",
+                feature="rag_ingest",
+                input="x",
+            )
+    assert exc_info.value.code == "budget_exceeded"
 
 
 @respx.mock
@@ -183,7 +313,7 @@ def test_policy_blocked_error_mapping() -> None:
             )
 
     err = exc_info.value
-    assert isinstance(err, AiGuardError)
+    assert isinstance(err, ModelgovError)
     assert err.status == 403
     assert err.code == "policy_blocked"
     assert err.message == "Model class not permitted for user type logged_in"
@@ -245,7 +375,7 @@ def test_generic_error_maps_to_base_error() -> None:
     )
 
     with make_client() as client:
-        with pytest.raises(AiGuardError) as exc_info:
+        with pytest.raises(ModelgovError) as exc_info:
             client.chat(
                 user_id="u",
                 user_type="logged_in",
@@ -265,7 +395,7 @@ def test_error_with_non_json_body() -> None:
     )
 
     with make_client() as client:
-        with pytest.raises(AiGuardError) as exc_info:
+        with pytest.raises(ModelgovError) as exc_info:
             client.chat(
                 user_id="u",
                 user_type="logged_in",
@@ -445,7 +575,7 @@ def test_base_url_trailing_slash_stripped() -> None:
         return_value=httpx.Response(200, json=CHAT_SUCCESS_BODY)
     )
 
-    client = AiGuardClient(base_url=f"{BASE_URL}/", api_key=API_KEY)
+    client = ModelgovClient(base_url=f"{BASE_URL}/", api_key=API_KEY)
     client.chat(
         user_id="u",
         user_type="logged_in",

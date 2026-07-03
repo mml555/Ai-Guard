@@ -1,10 +1,10 @@
 # Changelog
 
-All notable changes to Ai-Guard are documented here. The format is based on
+All notable changes to Modelgov are documented here. The format is based on
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and the project follows
 [Semantic Versioning](https://semver.org/) across its three compatibility
 surfaces — **HTTP API** (`/vN`), **SDKs**, and the **config schema**
-(`ai-guard.yaml`). See [docs/versioning.md](docs/versioning.md) for the bump
+(`modelgov.yaml`). See [docs/versioning.md](docs/versioning.md) for the bump
 rules per surface and the supported-version / EOL policy.
 
 Each release lists changes under **Added / Changed / Fixed / Deprecated /
@@ -14,6 +14,15 @@ may include breaking changes (standard SemVer 0.x semantics); from 1.0 onward th
 guarantees in `docs/versioning.md` apply.
 
 ## [Unreleased]
+
+## [1.0.0] - 2026-07-02
+
+First stable, public release under the MIT license. From this version the
+compatibility guarantees in [docs/versioning.md](docs/versioning.md) are in
+effect: breaking changes to the HTTP API, SDKs, or config schema require a new
+major version. This release consolidates the production-readiness hardening and
+multi-tenant isolation below with the embeddings / vision / grounding gateway
+extensions and reproducible container builds added since 0.6.0.
 
 Production-readiness hardening from the 2026-07-01 full audit. Multi-tenant
 isolation is now real end-to-end, the money path no longer leaks or
@@ -60,11 +69,15 @@ operability are completed.
   longer advertise unpublished install commands without a caveat.
 
 ### Added
-- **Domain metrics** on `/metrics`: `ai_guard_chat_requests_total`,
-  `ai_guard_chat_cost_usd_total`, `ai_guard_chat_fallbacks_total`,
-  `ai_guard_budget_blocks_total`, `ai_guard_safety_blocks_total`.
+- **Gateway extensions:** governed embeddings (`POST /v1/embeddings`), vision /
+  multimodal chat (image content parts), and a grounding safety mode that
+  citation-verifies answers against caller-supplied `context`; plus a `pii_scope`
+  control (input / output / both) for PII masking. Both SDKs updated.
+- **Domain metrics** on `/metrics`: `modelgov_chat_requests_total`,
+  `modelgov_chat_cost_usd_total`, `modelgov_chat_fallbacks_total`,
+  `modelgov_budget_blocks_total`, `modelgov_safety_blocks_total`.
 - **Request-log correlation:** one id per request across pino logs (`reqId`),
-  the error-envelope `requestId`, and the `x-ai-guard-request-id` header;
+  the error-envelope `requestId`, and the `x-modelgov-request-id` header;
   configurable `LOG_LEVEL`.
 - Python SDK ships a PEP 561 `py.typed` marker so consumer type checkers use its
   annotations.
@@ -74,11 +87,14 @@ operability are completed.
 ### Changed
 - Migrations run with statement/query timeouts disabled so a long index build or
   advisory-lock wait on a large database is never killed at 30s.
+- **Reproducible runtime image:** the API container's dependencies are now
+  resolved entirely from the workspace lockfile (`pnpm deploy`) rather than
+  re-resolved at build time, so the same commit yields the same dependency tree.
 
 ### ⚠ Breaking
 - **Config schema:** unknown/misspelled top-level or budget keys in
-  `ai-guard.yaml` are now rejected (previously ignored). Validate with
-  `ai-guard validate --production` before upgrading.
+  `modelgov.yaml` are now rejected (previously ignored). Validate with
+  `modelgov validate --production` before upgrading.
 - **HTTP API:** `POST /v1/chat` success responses return `budgetRemaining: null`
   under hierarchical budgets (the node tree is the authority) instead of a
   fabricated flat figure. The field is now nullable in the OpenAPI spec.
@@ -159,7 +175,7 @@ blocks, and idempotency replays expire. Full notes:
 - **Coverage gate measures the whole API surface** — previously a 19-file
   allow-list reported 95.7% while chat, db, and services went unmeasured;
   thresholds now reflect reality (81/72/89) and ratchet up only.
-- **CI runs the policy regression suite** (`ai-guard.policy-tests.yaml`) and
+- **CI runs the policy regression suite** (`modelgov.policy-tests.yaml`) and
   **Trivy scans all Docker builds** (previously PRs only), pinned to the
   release commit SHA.
 - **Production defaults hardened** — `.env.production.example` ships
@@ -190,13 +206,13 @@ blocks, and idempotency replays expire. Full notes:
 ## [0.5.0] - 2026-07-01
 
 First aligned, pinnable release — all packages move to a single `0.5.0` line
-(API, CLI, policy-engine, TS SDK, Python SDK, `create-ai-guard`). The flat,
+(API, CLI, policy-engine, TS SDK, Python SDK, `create-modelgov`). The flat,
 file-config path remains the default; every new capability is opt-in / behind a
 flag. Full notes: [`RELEASE_NOTES/v0.5.0.md`](RELEASE_NOTES/v0.5.0.md).
 
 ### Added
 - **DB-backed API keys** — issue / rotate / revoke without redeploy
-  (`/v1/admin/keys`, `ai-guard keys`); only SHA-256 hashes stored at rest.
+  (`/v1/admin/keys`, `modelgov keys`); only SHA-256 hashes stored at rest.
 - **Tamper-evident admin audit log** — hash-chained `admin_audit_log`;
   `GET /v1/admin/audit` + `/verify`; wired to key, policy, and erasure mutations.
 - **Versioned policy store** (opt-in, `POLICY_STORE_ENABLED`) — validate →
@@ -208,7 +224,7 @@ flag. Full notes: [`RELEASE_NOTES/v0.5.0.md`](RELEASE_NOTES/v0.5.0.md).
 - **Enterprise control plane** (opt-in, default-off): operator **SSO/OIDC + RBAC**
   and **hierarchical budgets** (node tree, atomic multi-level reservation, counter
   sharding, tenant-bound keys + per-tenant policy versions).
-- **Python SDK** (`ai-guard-sdk`) and a **Helm chart** (`deploy/helm/ai-guard`).
+- **Python SDK** (`modelgov`) and a **Helm chart** (`deploy/helm/modelgov`).
 - **`config_hash` + `policy_version` on every request log**, surfaced in
   `GET /v1/requests/:id`.
 
@@ -216,7 +232,7 @@ flag. Full notes: [`RELEASE_NOTES/v0.5.0.md`](RELEASE_NOTES/v0.5.0.md).
 - **Safety cost reserved upfront** — the input-safety classifier cost is included
   in the budget reservation (not just settled after), so model + safety can't
   overshoot a cap.
-- **Richer SDK errors** — `AiGuardError` exposes `reasonCode`, `auditRequestId`,
+- **Richer SDK errors** — `ModelgovError` exposes `reasonCode`, `auditRequestId`,
   `budgetRemaining`, `feature`, `userType`, `resolvedModelClass`.
 
 ### Migration
@@ -237,7 +253,8 @@ proceed against a known baseline. Full notes:
 - Request correlation IDs (`requestId` on success, `auditRequestId` on blocks)
   and host metadata in audit logs.
 
-[Unreleased]: https://github.com/mml555/Ai-Guard/compare/v0.0.0...HEAD
-[0.0.0]: https://github.com/mml555/Ai-Guard/releases/tag/v0.0.0
-[0.6.0]: https://github.com/mml555/Ai-Guard/compare/v0.5.0...v0.6.0
-[0.5.0]: https://github.com/mml555/Ai-Guard/compare/v0.0.0...v0.5.0
+[Unreleased]: https://github.com/mml555/modelgov/compare/v1.0.0...HEAD
+[1.0.0]: https://github.com/mml555/modelgov/releases/tag/v1.0.0
+[0.6.0]: https://github.com/mml555/modelgov/compare/v0.5.0...v0.6.0
+[0.5.0]: https://github.com/mml555/modelgov/compare/v0.0.0...v0.5.0
+[0.0.0]: https://github.com/mml555/modelgov/releases/tag/v0.0.0
