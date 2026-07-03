@@ -14,6 +14,7 @@ import {
 } from "../authz/scope";
 import type { TenantPolicyResolver } from "../policy/tenantResolver";
 import { useHierarchicalBudgets } from "../chat/routing";
+import { requestHash, withIdempotency } from "../idempotency/service";
 import type { Observability } from "../../services/observability";
 import {
   embeddingsBodyJsonSchema,
@@ -29,6 +30,7 @@ export interface EmbeddingsRouteDeps {
   pool: Pool;
   litellm: LiteLLMClient;
   observability?: Observability;
+  idempotencyCaptureContent?: boolean;
   /** Enables node-tree budgets on chat. Embeddings do NOT implement the
    * hierarchical path, so this is used only to fail closed (see below). */
   hierarchicalBudgets?: boolean;
@@ -91,18 +93,11 @@ export function registerEmbeddingsRoute(
       return sendError(reply, auth.status, auth.code, auth.details, auth.message);
     }
 
-    // Embeddings don't yet participate in the idempotency store (which is
-    // chat-shaped). Reject the header explicitly rather than silently ignoring
-    // it, so a client relying on exactly-once isn't misled into double-billing.
-    if (request.headers["idempotency-key"]) {
-      return sendError(
-        reply,
-        400,
-        "idempotency_not_supported",
-        {},
-        "Idempotency-Key is not supported on /v1/embeddings",
-      );
-    }
+    const rawKey = request.headers["idempotency-key"];
+    const idempotencyKey =
+      typeof rawKey === "string" && rawKey.trim() && rawKey.length <= 256
+        ? rawKey.trim()
+        : undefined;
 
     // Per-tenant policy resolution (MULTI_TENANT_POLICY), same as chat.
     const rdeps: EmbeddingsRouteDeps = deps.tenantPolicy
@@ -134,7 +129,27 @@ export function registerEmbeddingsRoute(
       log: request.log,
     };
 
-    const result = await handleEmbeddings(svc, auth.value);
+    const run = () => handleEmbeddings(svc, auth.value);
+
+    let result;
+    if (idempotencyKey) {
+      const outcome = await withIdempotency(
+        rdeps.pool,
+        {
+          key: idempotencyKey,
+          userId: auth.value.userId,
+          hash: requestHash(auth.value),
+          captureContent: rdeps.idempotencyCaptureContent ?? false,
+          tenantId: request.ctx.tenantId,
+        },
+        run,
+      );
+      result = outcome.result;
+      reply.header("x-idempotent-replay", outcome.replayed ? "true" : "false");
+    } else {
+      result = await run();
+    }
+
     if (!result.ok) {
       if (result.auditRequestId) reply.header("x-modelgov-request-id", result.auditRequestId);
       return sendError(reply, result.status, result.code, result.details, result.message, {

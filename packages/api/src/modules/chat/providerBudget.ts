@@ -23,9 +23,11 @@ export function createFlatProviderBudget(args: {
   leaseId?: string;
   initialReservedUsd: number;
   tenantId?: string;
+  billing?: import("../billing/service").BillingService;
+  skipInternalBudget?: boolean;
 }): ProviderBudgetCtx {
   let reservedUsd = args.initialReservedUsd;
-  const { pool, aiRequest, decision, now, leaseId, tenantId } = args;
+  const { pool, aiRequest, decision, now, leaseId, tenantId, billing, skipInternalBudget } = args;
 
   const incur: IncurFn = (costUsd) =>
     recordIncurredCost(pool, {
@@ -44,18 +46,24 @@ export function createFlatProviderBudget(args: {
       reservedUsd = usd;
     },
     incur,
-    release: () =>
-      releaseBudget(pool, {
-        projectId: aiRequest.projectId,
-        userId: aiRequest.userId,
-        feature: aiRequest.feature,
-        estimatedCostUsd: reservedUsd,
-        estimatedTokens: decision.estimatedTokens,
-        caps: decision.reservationCaps,
-        now,
-        leaseId,
-        tenantId,
-      }),
+    release: async () => {
+      if (!skipInternalBudget && leaseId) {
+        await releaseBudget(pool, {
+          projectId: aiRequest.projectId,
+          userId: aiRequest.userId,
+          feature: aiRequest.feature,
+          estimatedCostUsd: reservedUsd,
+          estimatedTokens: decision.estimatedTokens,
+          caps: decision.reservationCaps,
+          now,
+          leaseId,
+          tenantId,
+        });
+      }
+      if (billing?.usesCredits() && reservedUsd > 0) {
+        await billing.releaseCredits(tenantId ?? "", aiRequest.userId, reservedUsd);
+      }
+    },
     topUp: async (additionalUsd): Promise<TopUpOutcome> => {
       const result = await topUpBudget(pool, {
         projectId: aiRequest.projectId,

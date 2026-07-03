@@ -30,6 +30,7 @@ import {
 import { auditUnavailableFailure, baseLog, baseObs, chatSuccessBody, fail } from "./mapper";
 import { buildGroundedMessages, verifyGrounding } from "./grounding";
 import type { ChatFailure, ChatInput, ChatResult, ChatServiceDeps } from "./types";
+import { assertAiRequestsNotPaused } from "../emergency/routes";
 import type { ChatMessage } from "../../types";
 
 export type BudgetHold =
@@ -173,6 +174,16 @@ async function prepareFlatCall(
   body: ChatInput,
   stream: boolean,
 ): Promise<ChatFailure | { ok: true; prepared: PreparedCall }> {
+  const pause = await assertAiRequestsNotPaused(deps.pool);
+  if (pause.paused) {
+    return fail(
+      503,
+      "ai_requests_paused",
+      { reason: pause.reason ?? "emergency pause" },
+      "AI requests are temporarily paused",
+    );
+  }
+
   const evaluated = await evaluateFlatPolicy(deps, body);
   if (!evaluated.ok) return evaluated.failure;
   const { aiRequest, decision, usage, now } = evaluated;
@@ -249,6 +260,16 @@ async function prepareHierarchicalCall(
   leafNodeId: string,
   stream: boolean,
 ): Promise<ChatFailure | { ok: true; prepared: PreparedCall }> {
+  const pause = await assertAiRequestsNotPaused(deps.pool);
+  if (pause.paused) {
+    return fail(
+      503,
+      "ai_requests_paused",
+      { reason: pause.reason ?? "emergency pause" },
+      "AI requests are temporarily paused",
+    );
+  }
+
   const evaluated = await evaluateHierarchicalPolicy(deps, body);
   if (!evaluated.ok) return evaluated.failure;
   const { aiRequest, decision, now } = evaluated;
@@ -350,6 +371,9 @@ export async function executeSyncChat(
           leaseId: hold.leaseId,
           initialReservedUsd: hold.reservedUsd,
           tenantId: deps.policyMeta?.tenantId,
+          billing: deps.billing,
+          skipInternalBudget:
+            deps.billing?.enabled === true && deps.billing.mode === "credits_only",
         })
       : createHierarchicalProviderBudget({
           pool,
@@ -381,7 +405,13 @@ export async function executeSyncChat(
   const actualCostUsd = (llm.actualCostUsd ?? costBasis) + safetyCostUsd;
   const actualTokens = (llm.inputTokens ?? 0) + (llm.outputTokens ?? 0);
 
-  if (hold.mode === "flat") {
+  const skipInternalBudget =
+    deps.billing?.enabled === true && deps.billing.mode === "credits_only";
+
+  if (skipInternalBudget) {
+    // credits_only billing: skip the internal budget ledger entirely — billing
+    // settles the spend via credits below (settleCredits / recordMeter).
+  } else if (hold.mode === "flat") {
     try {
       await recordActualCost(pool, {
         projectId: aiRequest.projectId,
@@ -552,6 +582,28 @@ export async function executeSyncChat(
     });
     return auditUnavailableFailure(false);
   }
+
+  const tenantId = deps.policyMeta?.tenantId ?? "";
+  if (deps.billing?.usesCredits()) {
+    try {
+      await deps.billing.settleCredits(
+        tenantId,
+        aiRequest.userId,
+        settledReservedUsd,
+        actualCostUsd,
+      );
+      await deps.billing.recordMeter({
+        requestId: auditRequestId,
+        tenantId,
+        userId: aiRequest.userId,
+        feature: aiRequest.feature,
+        costUsd: actualCostUsd,
+      });
+    } catch (err) {
+      log?.error({ err, auditRequestId }, "billing settlement failed");
+    }
+  }
+
   // For grounded requests the gateway prepended a system message carrying the
   // (deliberately un-masked) retrieved context; don't ship that to the
   // observability provider — log only the caller's messages.

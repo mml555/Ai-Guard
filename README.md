@@ -104,7 +104,7 @@ or any LiteLLM-supported provider.
 | --- | --- |
 | [`support_chat`](./examples/support_chat) | Chat, PII masking, injection block, daily budget |
 | [`saas_tiers`](./examples/saas_tiers) | Free vs paid model access |
-| [`event_intake_app`](./examples/event_intake_app) | Jewgo-style flyer extraction — real integration pattern |
+| [`document_extraction`](./examples/document_extraction) | Structured extraction — real integration pattern |
 | [`nextjs_support_chat`](./examples/nextjs_support_chat) | Next.js API route — app auth → Modelgov SDK |
 
 ```bash

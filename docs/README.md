@@ -80,7 +80,7 @@ model request reaches a provider.
 
 ## Quick links
 
-- Example apps: [`event_intake_app`](../examples/event_intake_app), [`support_chat`](../examples/support_chat)
+- Example apps: [`document_extraction`](../examples/document_extraction), [`support_chat`](../examples/support_chat)
 - Production policy: [`modelgov.production.example.yaml`](../modelgov.production.example.yaml)
 - Production env: [`.env.production.example`](../.env.production.example)
 - OpenAPI: `GET /openapi.json` or release asset `openapi-v1.0.0.json`
