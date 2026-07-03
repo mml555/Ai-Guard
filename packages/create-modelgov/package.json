@@ -2,6 +2,11 @@
   "name": "create-modelgov",
   "version": "1.0.0",
   "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/mml555/modelgov.git",
+    "directory": "packages/create-modelgov"
+  },
   "description": "Scaffold an modelgov.yaml + .env for a new project.",
   "type": "module",
   "bin": {
