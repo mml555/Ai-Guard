@@ -9,12 +9,12 @@ import {
 } from "@modelgov/policy-engine";
 import type { FastifyBaseLogger } from "fastify";
 import type { Pool } from "pg";
-import {
-  loadUsageSnapshot,
-  recordActualCost,
-  reserveBudget,
-  topUpBudget,
-} from "../usage/repo";
+import type { BillingService } from "../billing/service";
+import { acquireCreditHold } from "../billing/reserve";
+import { releaseBillingCredits, settleBillingCredits } from "../billing/settlement";
+import { loadUsageSnapshot, reserveBudget, settleActualCostWithRetry } from "../usage/repo";
+import { createFlatProviderBudget } from "../chat/providerBudget";
+import type { TopUpOutcome } from "../chat/lifecycle";
 import { logRequest } from "../usage/auditLogRepo";
 import { baseLog, baseObs, remainingAfter } from "../chat/mapper";
 import type { Observability } from "../../services/observability";
@@ -32,6 +32,9 @@ export interface EmbeddingsDeps {
   /** Optional tracing/metrics sink. When set, every embeddings outcome is
    * recorded the same way chat outcomes are (spend + decision visibility). */
   observability?: Observability;
+  /** Prepaid-credit / metered billing. Embeddings incur real provider spend, so
+   * they must ride the same wallet/meter as chat or they'd be a billing bypass. */
+  billing?: BillingService;
   policyMeta?: { configHash?: string; policyVersion?: string; tenantId?: string };
   log?: FastifyBaseLogger;
 }
@@ -73,6 +76,10 @@ function estimateTokensFromText(texts: string[]): number {
  * screen — and no injection classifier). Every call declares its feature and
  * user type, is checked before the provider runs, reserves budget, settles the
  * real cost, and lands one audit row.
+ *
+ * The hold lifecycle (fallback top-up + release) rides the shared
+ * `createFlatProviderBudget` context so the credit/internal lease bookkeeping is
+ * the same code the chat pipeline uses — not a divergent copy.
  */
 export async function handleEmbeddings(
   deps: EmbeddingsDeps,
@@ -151,61 +158,106 @@ export async function handleEmbeddings(
     };
   }
 
-  // ── Reserve budget (row-locked) — a concurrent request may have consumed it ──
-  const reservation = await reserveBudget(pool, {
-    projectId: aiRequest.projectId,
-    userId: aiRequest.userId,
-    feature: aiRequest.feature,
-    estimatedCostUsd: decision.estimatedCostUsd,
-    estimatedTokens: decision.estimatedTokens,
-    caps: decision.reservationCaps,
-    now,
-    tenantId,
-  });
-  if (!reservation.ok) {
+  // ── Prepaid credits: reserve BEFORE the internal ledger (parity with the chat
+  // pipeline). In credits_only mode the wallet is the only ledger. ────────────
+  const billing = deps.billing;
+  const skipInternalBudget = billing?.enabled === true && billing.mode === "credits_only";
+  const reservedUsd = decision.estimatedCostUsd;
+
+  // Reserve prepaid credits under a per-request hold (shared with the chat
+  // pipeline via acquireCreditHold so the reserve/gate/hold-id step can't drift).
+  // The hold groups this request's wallet leases (base + fallback top-ups) for
+  // the sweep. reserveCredits checks the balance atomically inside its UPDATE, so
+  // the balance is read only on failure, to populate the 402 body.
+  const hold = await acquireCreditHold(billing, tenantId ?? "", aiRequest.userId, reservedUsd);
+  if (!hold.ok) {
     const auditRequestId = await tryLog(deps, {
       ...rowBase,
       status: "failed",
-      error: `budget_exceeded:${reservation.failedScope}`,
+      error: "insufficient_credits",
+      reasonCode: "insufficient_credits",
     });
     deps.observability?.recordChat({
       ...baseObs(aiRequest, decision),
       status: "blocked",
-      reason: `budget_exceeded:${reservation.failedScope}`,
+      reason: "insufficient_credits",
     });
     return {
       ok: false,
-      status: 403,
-      code: "budget_exceeded",
-      details: { scope: reservation.failedScope, budgetRemaining: decision.budgetRemaining },
-      message: "Budget exceeded",
+      status: 402,
+      code: "insufficient_credits",
+      details: {
+        reasonCode: "insufficient_credits",
+        creditsAvailableUsd: hold.availableUsd,
+        estimatedCostUsd: reservedUsd,
+      },
+      message: "Insufficient credits",
       auditRequestId,
     };
   }
-  const leaseId = reservation.leaseId;
-  // May grow if a pricier fallback tops up the hold (see the fallback path).
-  let reservedUsd = decision.estimatedCostUsd;
+  const creditHoldId = hold.holdId;
 
-  // Release a reservation without booking spend (provider failure path).
-  const releaseHold = async (): Promise<void> => {
-    try {
-      await recordActualCost(pool, {
-        projectId: aiRequest.projectId,
+  // ── Reserve budget (row-locked) — a concurrent request may have consumed it ──
+  let leaseId: string | undefined;
+  if (!skipInternalBudget) {
+    const reservation = await reserveBudget(pool, {
+      projectId: aiRequest.projectId,
+      userId: aiRequest.userId,
+      feature: aiRequest.feature,
+      estimatedCostUsd: decision.estimatedCostUsd,
+      estimatedTokens: decision.estimatedTokens,
+      caps: decision.reservationCaps,
+      now,
+      tenantId,
+    });
+    if (!reservation.ok) {
+      // No provider budget context yet (the internal reserve failed), so release
+      // the credit hold directly.
+      await releaseBillingCredits(billing, deps.log, {
+        tenantId: tenantId ?? "",
         userId: aiRequest.userId,
-        feature: aiRequest.feature,
-        actualCostUsd: 0,
-        estimatedCostUsd: reservedUsd,
-        actualTokens: 0,
-        estimatedTokens: decision.estimatedTokens,
-        caps: decision.reservationCaps,
-        now,
-        leaseId,
-        tenantId,
+        reservedUsd,
+        creditHoldId,
       });
-    } catch (err) {
-      deps.log?.error({ err }, "failed to release embeddings reservation; lease sweep will reconcile");
+      const auditRequestId = await tryLog(deps, {
+        ...rowBase,
+        status: "failed",
+        error: `budget_exceeded:${reservation.failedScope}`,
+      });
+      deps.observability?.recordChat({
+        ...baseObs(aiRequest, decision),
+        status: "blocked",
+        reason: `budget_exceeded:${reservation.failedScope}`,
+      });
+      return {
+        ok: false,
+        status: 403,
+        code: "budget_exceeded",
+        details: { scope: reservation.failedScope, budgetRemaining: decision.budgetRemaining },
+        message: "Budget exceeded",
+        auditRequestId,
+      };
     }
-  };
+    leaseId = reservation.leaseId;
+  }
+
+  // Shared flat budget context — its `release` (credit + internal) and `topUp`
+  // (pricier-fallback reserve/rollback) are the exact logic the chat pipeline
+  // uses, so the money paths can't drift. safetyCostUsd is 0: embeddings run no
+  // injection classifier.
+  const providerBudget = createFlatProviderBudget({
+    pool,
+    aiRequest,
+    decision,
+    now,
+    leaseId,
+    initialReservedUsd: reservedUsd,
+    tenantId,
+    billing,
+    skipInternalBudget,
+    safetyCostUsd: 0,
+    creditHoldId,
+  });
 
   // ── Provider call (single fallback on a provider-side failure) ──────────────
   let model = decision.resolvedModel;
@@ -220,7 +272,7 @@ export async function handleEmbeddings(
       // must not route restricted data to an unapproved provider.
       const fb = evaluateAiRequest({ request: { ...aiRequest, forceFallback: true }, config, usage });
       if (fb.decision === "block") {
-        await releaseHold();
+        await providerBudget.release();
         const auditRequestId = await tryLog(deps, {
           ...rowBase,
           resolvedModel: fb.resolvedModel,
@@ -237,83 +289,111 @@ export async function handleEmbeddings(
         };
       }
       // Grow the hold if the fallback estimate is pricier than the primary
-      // reservation, and reject if that top-up breaches a cap — otherwise a
-      // costlier fallback would silently overshoot the budget (mirrors chat's
-      // executeProviderWithFallback top-up).
-      if (fb.estimatedCostUsd > reservedUsd) {
-        const topUp = await topUpBudget(pool, {
-          projectId: aiRequest.projectId,
-          userId: aiRequest.userId,
-          feature: aiRequest.feature,
-          additionalCostUsd: fb.estimatedCostUsd - reservedUsd,
-          caps: decision.reservationCaps,
-          now,
-          leaseId,
-          tenantId,
-        });
-        if (!topUp.ok) {
-          await releaseHold();
+      // reservation (credits first, then internal); reject if that top-up
+      // breaches a cap. providerBudget.topUp does the same reserve/rollback the
+      // chat pipeline uses.
+      if (fb.estimatedCostUsd > providerBudget.getReservedUsd()) {
+        const additionalUsd = fb.estimatedCostUsd - providerBudget.getReservedUsd();
+        let topUp: TopUpOutcome;
+        try {
+          topUp = await providerBudget.topUp!(additionalUsd);
+        } catch (topErr) {
+          // topUp re-threw a non-rejection error (lock timeout / DB failure)
+          // AFTER rolling back the extra credit hold — free the base hold and
+          // surface a retryable 503.
+          await providerBudget.release();
+          deps.log?.error({ err: topErr }, "embeddings fallback budget top-up failed");
           const auditRequestId = await tryLog(deps, {
             ...rowBase,
             resolvedModel: fb.resolvedModel,
             status: "failed",
-            error: `budget_exceeded:${topUp.failedScope}`,
+            error: "budget_unavailable",
           });
           return {
             ok: false,
-            status: 403,
-            code: "budget_exceeded",
-            details: { scope: topUp.failedScope, budgetRemaining: decision.budgetRemaining },
-            message: "Budget exceeded",
+            status: 503,
+            code: "budget_unavailable",
+            details: {},
+            message: "Budget service unavailable",
+            retryable: true,
             auditRequestId,
           };
         }
-        reservedUsd = fb.estimatedCostUsd;
+        if (!topUp.ok) {
+          await providerBudget.release();
+          const auditRequestId = await tryLog(deps, {
+            ...rowBase,
+            resolvedModel: fb.resolvedModel,
+            status: "failed",
+            error: topUp.insufficientCredits ? "insufficient_credits" : `budget_exceeded:${topUp.failedScope}`,
+            ...(topUp.insufficientCredits ? { reasonCode: "insufficient_credits" as const } : {}),
+          });
+          return topUp.insufficientCredits
+            ? {
+                ok: false,
+                status: 402,
+                code: "insufficient_credits",
+                details: { reasonCode: "insufficient_credits" },
+                message: "Insufficient credits for the fallback model",
+                auditRequestId,
+              }
+            : {
+                ok: false,
+                status: 403,
+                code: "budget_exceeded",
+                details: { scope: topUp.failedScope, budgetRemaining: decision.budgetRemaining },
+                message: "Budget exceeded",
+                auditRequestId,
+              };
+        }
+        providerBudget.setReservedUsd(fb.estimatedCostUsd);
       }
       try {
         model = fb.resolvedModel;
         usedFallback = true;
         result = await deps.litellm.embed({ model, input: texts });
       } catch (fallbackErr) {
-        return providerFailure(deps, releaseHold, rowBase, model, fallbackErr, { aiRequest, decision });
+        return providerFailure(deps, providerBudget.release, rowBase, model, fallbackErr, { aiRequest, decision });
       }
     } else {
-      return providerFailure(deps, releaseHold, rowBase, model, err, { aiRequest, decision });
+      return providerFailure(deps, providerBudget.release, rowBase, model, err, { aiRequest, decision });
     }
   }
 
-  // ── Settle real cost against the reservation ────────────────────────────────
-  const actualCostUsd = result.actualCostUsd ?? reservedUsd;
+  // ── Settle real cost against the (possibly grown) reservation ───────────────
+  const settledReservedUsd = providerBudget.getReservedUsd();
+  const actualCostUsd = result.actualCostUsd ?? settledReservedUsd;
   const actualTokens = result.inputTokens ?? 0;
-  const settleArgs = {
-    projectId: aiRequest.projectId,
-    userId: aiRequest.userId,
-    feature: aiRequest.feature,
-    actualCostUsd,
-    estimatedCostUsd: reservedUsd,
-    actualTokens,
-    estimatedTokens: decision.estimatedTokens,
-    caps: decision.reservationCaps,
-    now,
-    leaseId,
-    tenantId,
-  };
-  try {
-    await recordActualCost(pool, settleArgs);
-  } catch (err) {
-    // recordActualCost atomically releases the lease AND books used_usd, so a
-    // failure leaves both undone. Retry once (mirrors executeSyncChat) before
-    // falling back to the lease-cleanup sweep, so the audit row and budget state
-    // don't disagree for a merely transient blip.
-    deps.log?.error({ err }, "failed to settle embeddings cost; retrying settlement once");
-    try {
-      await recordActualCost(pool, settleArgs);
-    } catch (retryErr) {
-      deps.log?.error(
-        { err: retryErr },
-        "cost settlement retry failed; leaving the reservation for the lease-cleanup sweep to reconcile",
-      );
-    }
+  // The ONE billing-settlement exit for the post-provider phase (wallet debit in
+  // credits modes, meter row in metered mode) — parity with executeSyncChat.
+  const settleBilling = (requestId: string) =>
+    settleBillingCredits(billing, deps.log, {
+      tenantId: tenantId ?? "",
+      userId: aiRequest.userId,
+      feature: aiRequest.feature,
+      reservedUsd: settledReservedUsd,
+      actualCostUsd,
+      requestId,
+      creditHoldId,
+    });
+  if (!skipInternalBudget) {
+    await settleActualCostWithRetry(
+      pool,
+      {
+        projectId: aiRequest.projectId,
+        userId: aiRequest.userId,
+        feature: aiRequest.feature,
+        actualCostUsd,
+        estimatedCostUsd: settledReservedUsd,
+        actualTokens,
+        estimatedTokens: decision.estimatedTokens,
+        caps: decision.reservationCaps,
+        now,
+        leaseId,
+        tenantId,
+      },
+      deps.log,
+    );
   }
 
   const responseDecision: "allow" | "degrade" | "fallback" = usedFallback
@@ -331,8 +411,13 @@ export async function handleEmbeddings(
       inputTokens: result.inputTokens,
     });
   } catch {
+    // The provider ran (spend is real) but the audit write failed — settle the
+    // reservation anyway (meter keyed by a synthetic id in metered mode).
+    await settleBilling("");
     return { ok: false, status: 503, code: "audit_unavailable", details: {}, message: "Audit log unavailable" };
   }
+
+  await settleBilling(auditRequestId);
 
   deps.observability?.recordChat({
     ...baseObs(aiRequest, decision),

@@ -8,46 +8,52 @@ export function verifyStripeWebhookSignature(
 ): boolean {
   const parts = signatureHeader.split(",").map((p) => p.trim());
   const timestampPart = parts.find((p) => p.startsWith("t="));
-  const sigPart = parts.find((p) => p.startsWith("v1="));
-  if (!timestampPart || !sigPart) return false;
+  // During webhook-secret rotation Stripe signs with BOTH secrets and sends
+  // multiple v1 entries — the event is authentic if ANY of them matches, so
+  // checking only the first would drop valid events mid-rotation.
+  const sigParts = parts.filter((p) => p.startsWith("v1="));
+  if (!timestampPart || sigParts.length === 0) return false;
 
-  const timestamp = Number(timestampPart.slice(2));
-  const expectedSig = sigPart.slice(3);
+  const timestampRaw = timestampPart.slice(2);
+  const timestamp = Number(timestampRaw);
   if (!Number.isFinite(timestamp)) return false;
 
   const age = Math.abs(Math.floor(Date.now() / 1000) - timestamp);
   if (age > toleranceSec) return false;
 
-  const payload = `${timestamp}.${rawBody.toString("utf8")}`;
+  // Sign over the EXACT timestamp bytes Stripe sent, not the Number()-normalized
+  // form: Stripe's scheme HMACs the literal `t=` value, so normalizing (e.g.
+  // stripping a leading zero or `+`) would hash a different payload than Stripe
+  // signed and reject an authentic event.
+  const payload = `${timestampRaw}.${rawBody.toString("utf8")}`;
   const digest = createHmac("sha256", secret).update(payload).digest("hex");
 
-  try {
-    return timingSafeEqual(Buffer.from(digest), Buffer.from(expectedSig));
-  } catch {
-    return false;
-  }
+  return sigParts.some((part) => {
+    try {
+      return timingSafeEqual(Buffer.from(digest), Buffer.from(part.slice(3)));
+    } catch {
+      return false;
+    }
+  });
 }
 
+// Partial views of Stripe payloads — exactly the fields the webhook handler
+// reads. Everything is optional: the shapes come off the wire, so the handler
+// must tolerate absence rather than trust a cast.
 export interface StripeCheckoutSession {
-  id: string;
   customer?: string | null;
   metadata?: Record<string, string>;
   amount_total?: number | null;
-  currency?: string | null;
 }
 
 export interface StripeSubscription {
-  id: string;
-  customer: string;
-  status: string;
+  customer?: string | null;
+  status?: string;
   items?: { data?: Array<{ price?: { id?: string } }> };
 }
 
 export interface StripeInvoice {
-  id: string;
   customer?: string | null;
-  subscription?: string | null;
-  status?: string | null;
 }
 
 export interface StripeEvent {

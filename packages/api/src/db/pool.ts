@@ -109,6 +109,38 @@ export async function withTransaction<T>(
 }
 
 /**
+ * Consume a reservation's single-use lease row inside the caller's transaction,
+ * returning whether THIS call actually removed it — i.e. the hold is still ours
+ * to settle or free.
+ *
+ * This is the one home for the money-safety invariant that every reservation
+ * ledger (flat budget counters, hierarchical budget nodes, the credit wallet)
+ * depends on: the lease row is the authoritative single-use token for a hold, so
+ * the settle/release MUST be gated on this delete. If the row is already gone the
+ * caller must treat its operation as a no-op — either a retried settle that
+ * already committed (booking again would double-charge) or the stale-lease sweep
+ * freed the hold (releasing again would double-free a shared counter and let
+ * other in-flight requests overshoot the cap). Deleting the lease before touching
+ * the counters also keeps a consistent lease→counter lock order with the sweep.
+ *
+ * A missing `leaseId` means leases are disabled for this caller, which preserves
+ * the legacy always-apply behaviour (returns true). Each caller keeps its own
+ * downstream ledger mutation — this only centralizes the token-consume step and
+ * its rationale, not the per-ledger settle semantics (which legitimately differ:
+ * the flat path skips both the used-book and the release when swept, whereas the
+ * hierarchical path still books used and only skips the release).
+ */
+export async function consumeReservationLease(
+  client: PoolClient,
+  deleteSql: string,
+  leaseId?: string,
+): Promise<boolean> {
+  if (!leaseId) return true;
+  const del = await client.query(deleteSql, [leaseId]);
+  return (del.rowCount ?? 0) > 0;
+}
+
+/**
  * Run `fn` inside a transaction with the RLS tenant context set for its duration:
  * `app.current_tenant` is set with `is_local=true` so it is scoped to this
  * transaction on this pooled connection and cannot leak to the next checkout.

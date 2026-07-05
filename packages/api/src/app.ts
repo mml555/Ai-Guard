@@ -112,7 +112,27 @@ function requestIdFromHeaders(headers: IncomingHttpHeaders): string {
 
 export function buildServer(opts: BuildServerOptions): FastifyInstance {
   const app = Fastify({
-    logger: opts.logger === false ? false : { level: opts.logLevel ?? "info" },
+    logger:
+      opts.logger === false
+        ? false
+        : {
+            level: opts.logLevel ?? "info",
+            // Defense-in-depth: even though the default request serializer omits
+            // headers, redact bearer/API-key/cookie material so a future
+            // `log.info({ req })` or custom serializer can never emit a secret.
+            redact: {
+              paths: [
+                "req.headers.authorization",
+                "req.headers.cookie",
+                'req.headers["x-api-key"]',
+                "headers.authorization",
+                "headers.cookie",
+                'headers["x-api-key"]',
+                "authorization",
+              ],
+              censor: "[redacted]",
+            },
+          },
     // Unify Fastify's log `reqId` with the client-facing request id: honor an
     // inbound x-request-id (bounded) or mint a UUID. requestContext reuses this
     // same request.id, so pino logs, the error-envelope requestId, and the
@@ -256,6 +276,9 @@ export function buildServer(opts: BuildServerOptions): FastifyInstance {
       policyMeta: opts.policyMeta,
       tenantPolicy: opts.tenantPolicy,
       idempotencyCaptureContent: opts.idempotencyCaptureContent,
+      // Embeddings incur real provider spend — they ride the same credit
+      // wallet / usage meter as chat, or billing modes would have a bypass.
+      billing: opts.billing,
     });
   });
 

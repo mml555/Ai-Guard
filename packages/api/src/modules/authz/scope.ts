@@ -103,9 +103,18 @@ export function resolveProjectScope(
   return ctx.projectId ?? queryProjectId ?? defaultProjectId;
 }
 
-/** Tenant partition for read APIs when the API key is tenant-bound. */
-export function resolveTenantScope(ctx: RequestContext): string | undefined {
-  return ctx.tenantId;
+/**
+ * Tenant partition a read API must be confined to. A tenant-bound key resolves
+ * to its own tenant; an UNBOUND key resolves to the default (untenanted)
+ * partition — the empty string sentinel — NOT "no filter". This is the crux of
+ * tenant isolation on reads: without it, an unbound key with a read permission
+ * would see every tenant's rows in a multi-tenant deployment. In a single-tenant
+ * deployment all data lives in the default partition, so the behaviour is
+ * unchanged. Repos translate "" to the storage convention for the default
+ * partition (`IS NULL` for request_logs, `= ''` for tenant-stamped tables).
+ */
+export function resolveTenantScope(ctx: RequestContext): string {
+  return ctx.tenantId ?? "";
 }
 
 /**

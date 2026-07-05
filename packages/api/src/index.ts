@@ -16,6 +16,7 @@ import {
   resolveBudgetAlert,
   resolvePolicy,
   startBackgroundJobs,
+  warnGroundingPiiExposure,
   warnMissingSafetyBackends,
 } from "./bootstrap";
 import { createBillingService } from "./modules/billing/service";
@@ -88,6 +89,7 @@ async function main(): Promise<void> {
   if (redis) app.log.info("rate limiting backed by Redis");
   warnUnpricedModels(config, app.log);
   warnMissingSafetyBackends(config, app.log, { hasPresidio, hasInjection });
+  warnGroundingPiiExposure(config, app.log);
 
   const maintenanceTimer = startBackgroundJobs(env, config, pool, app.log, billing);
   installLifecycle({ app, pool, redis, maintenanceTimer });

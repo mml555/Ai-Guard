@@ -1,4 +1,5 @@
 import { clientFromEnv } from "./api.js";
+import { flagValue } from "./flags.js";
 
 interface RequestRecord {
   id: string;
@@ -112,12 +113,6 @@ function parseListFlags(args: string[]): Record<string, string | undefined> {
     since: flagValue(args, "--since"),
     limit: flagValue(args, "--limit"),
   };
-}
-
-function flagValue(args: string[], flag: string): string | undefined {
-  const idx = args.indexOf(flag);
-  if (idx === -1) return undefined;
-  return args[idx + 1];
 }
 
 function formatRequestLine(item: RequestRecord): string {

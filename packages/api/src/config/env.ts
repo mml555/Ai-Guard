@@ -87,6 +87,13 @@ const baseEnvSchema = z.object({
   IDEMPOTENCY_CAPTURE_CONTENT_ALLOW: z.enum(["true", "false"]).default("false"),
   /** Allow DATABASE_SSL=disable for bundled/local Postgres only. */
   DATABASE_SSL_DISABLE_ALLOWED: z.enum(["true", "false"]).default("false"),
+  /**
+   * Allow DATABASE_SSL=require (encrypts but does NOT verify the server cert, so
+   * a remote connection is MITM-able) against a REMOTE Postgres in production.
+   * Prefer verify-full. Only set this for a trusted private network where the CA
+   * genuinely can't be distributed.
+   */
+  DATABASE_SSL_NO_VERIFY_ALLOWED: z.enum(["true", "false"]).default("false"),
   /** Set when the API sits behind a reverse proxy — requires TRUST_PROXY. */
   MODELGOV_BEHIND_PROXY: z.enum(["true", "false"]).default("false"),
   /**

@@ -2,7 +2,16 @@ name: ci
 
 on:
   push:
+    branches: [main]
+    tags: ["v*"]
   pull_request:
+
+# One live run per ref: a force-push or rapid re-push cancels the superseded
+# run instead of stacking duplicates (and a PR branch no longer runs twice via
+# push + pull_request).
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
 
 jobs:
   test:
@@ -33,6 +42,10 @@ jobs:
           cache: pnpm
       - run: pnpm install --frozen-lockfile
       - name: Audit production dependencies
+        # Gating: a PR must not introduce a production dependency with a known
+        # HIGH+ advisory. If a newly-disclosed upstream advisory reds main, that
+        # is the intended signal to bump the dependency (or add a reviewed
+        # `pnpm.auditConfig.ignoreCves` entry) — not to merge around it.
         run: pnpm audit --prod --audit-level high
       - name: Wait for Postgres
         run: npx wait-on tcp:localhost:55432 --timeout 60000
@@ -44,6 +57,7 @@ jobs:
       - run: pnpm build
       - run: pnpm typecheck
       - run: pnpm lint
+      - run: pnpm check:file-sizes
       - name: Policy regression tests
         run: pnpm modelgov test-policy --file modelgov.policy-tests.yaml
       - name: Verify version surfaces
@@ -57,10 +71,23 @@ jobs:
         run: pnpm exec tsx scripts/scaffold-smoke.ts
       - name: Integration tests ran (not skipped)
         run: |
-          if grep -E "↓ packages/api/test/(chat|usage|idempotency|reservationLeases|rejection-audit)" /tmp/test.log; then
-            echo "::error::Integration tests were skipped — DATABASE_URL must be set in CI"
+          # Every suite in this repo runs when DATABASE_URL is wired (the
+          # DB-gated ones are describe.skipIf(!DATABASE_URL)), so ANY skipped
+          # test file means the DB wasn't reachable and integration suites
+          # silently no-op'd. (vitest 4 dropped the per-file ↓ markers the old
+          # guard grepped for; the summary line is the stable signal.)
+          if grep -E "Test Files.*skipped" /tmp/test.log; then
+            echo "::error::Test files were skipped — DATABASE_URL must be set in CI"
             exit 1
           fi
+      - name: Upload coverage report
+        uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: coverage
+          path: coverage/
+          retention-days: 14
+          if-no-files-found: ignore
       - run: pnpm --filter @modelgov/api openapi:export
       - name: OpenAPI spec is committed and current
         run: |
@@ -105,11 +132,20 @@ jobs:
       - name: Feature-flag integration tests
         run: |
           pnpm exec vitest run \
+            --no-file-parallelism \
             packages/api/test/chat-hierarchical.integration.test.ts \
             packages/api/test/budget-nodes.integration.test.ts \
             packages/api/test/policy-tenant.integration.test.ts \
             packages/api/test/policy-store.integration.test.ts \
-            packages/api/test/rls-tenant.integration.test.ts
+            packages/api/test/rls-tenant.integration.test.ts 2>&1 | tee /tmp/ff-test.log
+      - name: Feature-flag integration tests ran (not skipped)
+        run: |
+          # Mirror the `test` job guard: these suites are all describe.skipIf(!DATABASE_URL),
+          # so a missing DATABASE_URL would make them silently no-op and pass.
+          if grep -E "Test Files.*skipped" /tmp/ff-test.log; then
+            echo "::error::Feature-flag integration tests were skipped — DATABASE_URL must be set in CI"
+            exit 1
+          fi
 
   compose-e2e:
     runs-on: ubuntu-latest

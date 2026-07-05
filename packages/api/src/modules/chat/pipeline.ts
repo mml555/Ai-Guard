@@ -1,356 +1,18 @@
-import type { PolicyDecision, SafetyPlan, UsageSnapshot } from "@modelgov/policy-engine";
 import { SafetyServiceError } from "../../services/safety";
 import { logRequest } from "../usage/auditLogRepo";
-import { recordActualCost } from "../usage/repo";
-import { settlePath, type BudgetNode, type PathReservation } from "../budgets/repo";
+import { settleActualCostWithRetry } from "../usage/repo";
+import { settlePath } from "../budgets/repo";
 import {
   executeProviderWithFallback,
   recordRejection,
-  rejectPolicyBlock,
   settleBillingCredits,
-  type RejectionCtx,
 } from "./lifecycle";
 import { createFlatProviderBudget, createHierarchicalProviderBudget } from "./providerBudget";
-import {
-  createIncurSafety,
-  evaluateFlatPolicy,
-  fireGlobalBudgetAlertIfNeeded,
-  reserveFlatBudgetOrReject,
-  runInputSafety,
-} from "./prep";
-import {
-  auditPathPrecheckBlock,
-  createHierarchicalIncurSafety,
-  evaluateHierarchicalPolicy,
-  isHonoredPolicyBlock,
-  loadHierarchicalPath,
-  rejectHonoredPolicyBlock,
-  reserveHierarchicalOrReject,
-  ZERO_USAGE,
-} from "./prep-hierarchical";
+import { ZERO_USAGE } from "./prep-hierarchical";
 import { auditUnavailableFailure, baseLog, baseObs, chatSuccessBody, fail } from "./mapper";
-import { buildGroundedMessages, verifyGrounding } from "./grounding";
-import type { ChatFailure, ChatInput, ChatResult, ChatServiceDeps } from "./types";
-import { assertAiRequestsNotPaused } from "../emergency/routes";
-import type { ChatMessage } from "../../types";
-
-export type BudgetHold =
-  | { mode: "flat"; usage: UsageSnapshot; leaseId?: string; reservedUsd: number }
-  | {
-      mode: "hierarchical";
-      nodes: BudgetNode[];
-      held: PathReservation;
-      reservedUsd: number;
-      shardKey: string;
-    };
-
-export interface PreparedCall {
-  aiRequest: import("@modelgov/policy-engine").AiRequest;
-  decision: PolicyDecision;
-  messages: ChatMessage[];
-  now: Date;
-  safetyCostUsd: number;
-  piiMasked: boolean;
-  injectionBlocked: boolean;
-  temperature?: number;
-  hold: BudgetHold;
-  rejection: RejectionCtx;
-  /** Present when grounding=strict: the context to verify the answer against. */
-  grounding?: { context: string[] };
-}
-
-function streamSafetyGate(decision: PolicyDecision): ChatFailure | null {
-  if (decision.safetyPlan.pii !== "off") {
-    return fail(
-      400,
-      "streaming_unsupported",
-      { reason: "output PII protection is enabled for this feature; streaming would bypass it" },
-      "Streaming is not supported when output PII protection is enabled",
-    );
-  }
-  // Grounding verification needs the full completion to check citations, so it
-  // is incompatible with token-by-token streaming.
-  if (decision.safetyPlan.grounding === "strict") {
-    return fail(
-      400,
-      "streaming_unsupported",
-      { reason: "grounding is enabled for this feature; the answer must be verified before it is sent" },
-      "Streaming is not supported when grounding is enabled",
-    );
-  }
-  return null;
-}
-
-/**
- * A grounded feature MUST be called with a non-empty context block. Rejected
- * before budget is reserved so a misconfigured caller doesn't hold a lease.
- */
-function groundingContextRequired(
-  decision: PolicyDecision,
-  body: ChatInput,
-): ChatFailure | null {
-  if (decision.safetyPlan.grounding !== "strict") return null;
-  if (Array.isArray(body.context) && body.context.length > 0) return null;
-  return fail(
-    400,
-    "grounding_context_required",
-    { feature: body.feature },
-    "This feature is grounded: it requires a non-empty `context` array to answer from",
-  );
-}
-
-/** When grounding=strict, replace the messages with the gateway-owned grounded
- * prompt (built from the context); otherwise pass the messages through. */
-function applyGrounding(
-  decision: PolicyDecision,
-  body: ChatInput,
-  messages: ChatMessage[],
-): { messages: ChatMessage[]; grounding?: { context: string[] } } {
-  if (decision.safetyPlan.grounding === "strict" && body.context && body.context.length > 0) {
-    return {
-      messages: buildGroundedMessages(messages, body.context),
-      grounding: { context: body.context },
-    };
-  }
-  return { messages };
-}
-
-/**
- * Screen the retrieved grounding context for prompt injection. RAG context is
- * externally sourced, so a poisoned passage could otherwise hijack the grounded
- * answer (and cite itself past the verifier). Only runs when the feature already
- * blocks injection. PII is deliberately NOT masked here — verbatim citation
- * matching needs the raw text — so this screens for injection only.
- *
- * Note: the context is still sent to the provider un-masked by design (grounding
- * requires verbatim text), so ground only on trusted sources.
- */
-async function screenGroundingContext(
-  deps: ChatServiceDeps,
-  decision: PolicyDecision,
-  body: ChatInput,
-): Promise<ChatFailure | null> {
-  if (decision.safetyPlan.grounding !== "strict") return null;
-  if (decision.safetyPlan.promptInjection !== "block") return null;
-  if (!body.context || body.context.length === 0) return null;
-
-  const ctxMessages: ChatMessage[] = body.context.map((c) => ({ role: "user", content: c }));
-  const injOnlyPlan: SafetyPlan = { ...decision.safetyPlan, pii: "off", grounding: "off" };
-  try {
-    const res = await deps.safety.inspectInput(ctxMessages, injOnlyPlan);
-    if (res.action === "block") {
-      return fail(
-        400,
-        "grounding_context_rejected",
-        { reason: "retrieved context failed prompt-injection screening" },
-        "The provided grounding context was rejected by prompt-injection screening",
-      );
-    }
-  } catch (err) {
-    if (err instanceof SafetyServiceError) {
-      return fail(503, "safety_unavailable", {}, "Safety service unavailable");
-    }
-    throw err;
-  }
-  return null;
-}
-
-/**
- * Unified pre-provider pipeline for flat and hierarchical budgets. Covers policy
- * evaluation, input safety, optional streaming gate, and budget reservation.
- */
-export async function prepareChatCall(
-  deps: ChatServiceDeps,
-  body: ChatInput,
-  opts: { leafNodeId?: string; stream?: boolean },
-): Promise<ChatFailure | { ok: true; prepared: PreparedCall }> {
-  if (opts.leafNodeId) {
-    return prepareHierarchicalCall(deps, body, opts.leafNodeId, opts.stream ?? false);
-  }
-  return prepareFlatCall(deps, body, opts.stream ?? false);
-}
-
-async function prepareFlatCall(
-  deps: ChatServiceDeps,
-  body: ChatInput,
-  stream: boolean,
-): Promise<ChatFailure | { ok: true; prepared: PreparedCall }> {
-  const pause = await assertAiRequestsNotPaused(deps.pool);
-  if (pause.paused) {
-    return fail(
-      503,
-      "ai_requests_paused",
-      { reason: pause.reason ?? "emergency pause" },
-      "AI requests are temporarily paused",
-    );
-  }
-
-  const evaluated = await evaluateFlatPolicy(deps, body);
-  if (!evaluated.ok) return evaluated.failure;
-  const { aiRequest, decision, usage, now } = evaluated;
-
-  fireGlobalBudgetAlertIfNeeded(deps, usage, now);
-
-  const rejection: RejectionCtx = {
-    pool: deps.pool,
-    observability: deps.observability,
-    aiRequest,
-    policyMeta: deps.policyMeta,
-  };
-  const incurSafety = createIncurSafety(deps.pool, aiRequest, decision, now, deps.policyMeta?.tenantId);
-
-  if (decision.decision === "block") {
-    return rejectPolicyBlock(rejection, decision);
-  }
-
-  const groundingFail = groundingContextRequired(decision, body);
-  if (groundingFail) return groundingFail;
-  const ctxScreenFail = await screenGroundingContext(deps, decision, body);
-  if (ctxScreenFail) return ctxScreenFail;
-
-  if (stream) {
-    const gate = streamSafetyGate(decision);
-    if (gate) return gate;
-  }
-
-  const safetyOutcome = await runInputSafety(
-    deps,
-    body.messages,
-    decision,
-    rejection,
-    incurSafety,
-    stream ? "stream" : "chat",
-  );
-  if ("status" in safetyOutcome) return safetyOutcome;
-
-  const reserved = await reserveFlatBudgetOrReject(deps, {
-    aiRequest,
-    decision,
-    safetyCostUsd: safetyOutcome.safetyCostUsd,
-    now,
-    rejection,
-    incurSafety,
-  });
-  if (!reserved.ok) return reserved.failure;
-
-  // Inject the grounded prompt AFTER safety so PII masking never rewrites the
-  // trusted context (which would break verbatim citation checks).
-  const grounded = applyGrounding(decision, body, safetyOutcome.messages);
-
-  return {
-    ok: true,
-    prepared: {
-      aiRequest,
-      decision,
-      messages: grounded.messages,
-      now,
-      safetyCostUsd: safetyOutcome.safetyCostUsd,
-      piiMasked: safetyOutcome.piiMasked,
-      injectionBlocked: safetyOutcome.injectionBlocked,
-      temperature: body.temperature,
-      hold: { mode: "flat", usage, leaseId: reserved.leaseId, reservedUsd: reserved.reservedUsd },
-      rejection,
-      grounding: grounded.grounding,
-    },
-  };
-}
-
-async function prepareHierarchicalCall(
-  deps: ChatServiceDeps,
-  body: ChatInput,
-  leafNodeId: string,
-  stream: boolean,
-): Promise<ChatFailure | { ok: true; prepared: PreparedCall }> {
-  const pause = await assertAiRequestsNotPaused(deps.pool);
-  if (pause.paused) {
-    return fail(
-      503,
-      "ai_requests_paused",
-      { reason: pause.reason ?? "emergency pause" },
-      "AI requests are temporarily paused",
-    );
-  }
-
-  const evaluated = await evaluateHierarchicalPolicy(deps, body);
-  if (!evaluated.ok) return evaluated.failure;
-  const { aiRequest, decision, now } = evaluated;
-
-  const rejection: RejectionCtx = {
-    pool: deps.pool,
-    observability: deps.observability,
-    aiRequest,
-    policyMeta: deps.policyMeta,
-  };
-  if (isHonoredPolicyBlock(decision)) {
-    return await rejectHonoredPolicyBlock(rejection, decision);
-  }
-
-  const groundingFail = groundingContextRequired(decision, body);
-  if (groundingFail) return groundingFail;
-  const ctxScreenFail = await screenGroundingContext(deps, decision, body);
-  if (ctxScreenFail) return ctxScreenFail;
-
-  const path = await loadHierarchicalPath(deps.pool, leafNodeId, decision, now, deps.policyMeta?.tenantId);
-  if ("status" in path) return path;
-  if (!path.ok) {
-    return auditPathPrecheckBlock(deps, aiRequest, decision, path.reason, path.failedNodeId);
-  }
-
-  const shardKey = body.userId;
-  const incurSafety = createHierarchicalIncurSafety(deps.pool, path.nodes, now, shardKey);
-
-  if (stream) {
-    const gate = streamSafetyGate(decision);
-    if (gate) return gate;
-  }
-
-  const safetyOutcome = await runInputSafety(
-    deps,
-    body.messages,
-    decision,
-    rejection,
-    incurSafety,
-    stream ? "stream-hierarchical" : "hierarchical",
-  );
-  if ("status" in safetyOutcome) return safetyOutcome;
-
-  const reserved = await reserveHierarchicalOrReject(deps, {
-    aiRequest,
-    decision,
-    nodes: path.nodes,
-    safetyCostUsd: safetyOutcome.safetyCostUsd,
-    now,
-    shardKey,
-    rejection,
-    incurSafety,
-  });
-  if (!reserved.ok) return reserved.failure;
-
-  const grounded = applyGrounding(decision, body, safetyOutcome.messages);
-
-  return {
-    ok: true,
-    prepared: {
-      aiRequest,
-      decision,
-      messages: grounded.messages,
-      now,
-      safetyCostUsd: safetyOutcome.safetyCostUsd,
-      piiMasked: safetyOutcome.piiMasked,
-      injectionBlocked: safetyOutcome.injectionBlocked,
-      temperature: body.temperature,
-      hold: {
-        mode: "hierarchical",
-        nodes: reserved.nodes,
-        held: reserved.held,
-        reservedUsd: reserved.reservedUsd,
-        shardKey: reserved.shardKey,
-      },
-      rejection,
-      grounding: grounded.grounding,
-    },
-  };
-}
+import { verifyGrounding } from "./grounding";
+import type { ChatResult, ChatServiceDeps } from "./types";
+import type { PreparedCall } from "./prepare";
 
 /** Provider execution, settlement, output safety, and success envelope. */
 export async function executeSyncChat(
@@ -376,6 +38,7 @@ export async function executeSyncChat(
           skipInternalBudget:
             deps.billing?.enabled === true && deps.billing.mode === "credits_only",
           safetyCostUsd,
+          creditHoldId: hold.creditHoldId,
         })
       : createHierarchicalProviderBudget({
           pool,
@@ -407,6 +70,22 @@ export async function executeSyncChat(
   const actualCostUsd = (llm.actualCostUsd ?? costBasis) + safetyCostUsd;
   const actualTokens = (llm.inputTokens ?? 0) + (llm.outputTokens ?? 0);
 
+  // The ONE billing-settlement exit point for this function. The model call ran
+  // and its cost is real, so every return below this line — success, blocked
+  // response, audit/safety failure — must pass through settleBilling exactly
+  // once, or the credit reservation leaks. Metering is keyed by audit request
+  // id; exits with no audit row pass "" and skip the meter (see lifecycle.ts).
+  const settleBilling = (requestId: string) =>
+    settleBillingCredits(deps.billing, log, {
+      tenantId: deps.policyMeta?.tenantId ?? "",
+      userId: aiRequest.userId,
+      feature: aiRequest.feature,
+      reservedUsd: settledReservedUsd,
+      actualCostUsd,
+      requestId,
+      creditHoldId: hold.mode === "flat" ? hold.creditHoldId : undefined,
+    });
+
   const skipInternalBudget =
     deps.billing?.enabled === true && deps.billing.mode === "credits_only";
 
@@ -414,8 +93,9 @@ export async function executeSyncChat(
     // credits_only billing: skip the internal budget ledger entirely — billing
     // settles the spend via credits below (settleCredits / recordMeter).
   } else if (hold.mode === "flat") {
-    try {
-      await recordActualCost(pool, {
+    await settleActualCostWithRetry(
+      pool,
+      {
         projectId: aiRequest.projectId,
         userId: aiRequest.userId,
         feature: aiRequest.feature,
@@ -427,35 +107,14 @@ export async function executeSyncChat(
         now,
         leaseId: hold.leaseId,
         tenantId: deps.policyMeta?.tenantId,
-      });
-      if (actualCostUsd > settledReservedUsd) {
-        log?.warn(
-          { reservedUsd: settledReservedUsd, actualCostUsd, model: usedModel },
-          "actual cost exceeded the reserved estimate — budget cap may be overshot",
-        );
-      }
-    } catch (err) {
-      log?.error({ err }, "failed to record actual cost; retrying settlement once");
-      try {
-        await recordActualCost(pool, {
-          projectId: aiRequest.projectId,
-          userId: aiRequest.userId,
-          feature: aiRequest.feature,
-          actualCostUsd,
-          estimatedCostUsd: settledReservedUsd,
-          actualTokens,
-          estimatedTokens: decision.estimatedTokens,
-          caps: decision.reservationCaps,
-          now,
-          leaseId: hold.leaseId,
-          tenantId: deps.policyMeta?.tenantId,
-        });
-      } catch (retryErr) {
-        log?.error(
-          { err: retryErr },
-          "cost settlement retry failed; leaving the reservation for the lease-cleanup sweep to reconcile",
-        );
-      }
+      },
+      log,
+    );
+    if (actualCostUsd > settledReservedUsd) {
+      log?.warn(
+        { reservedUsd: settledReservedUsd, actualCostUsd, model: usedModel },
+        "actual cost exceeded the reserved estimate — budget cap may be overshot",
+      );
     }
   } else {
     try {
@@ -518,16 +177,8 @@ export async function executeSyncChat(
         }),
         { auditFailureRetryable: false },
       );
-      // The model call ran and its cost is real — settle the credit reservation
-      // (and meter it) even though the response is blocked, or the hold leaks.
-      await settleBillingCredits(deps.billing, log, {
-        tenantId: deps.policyMeta?.tenantId ?? "",
-        userId: aiRequest.userId,
-        feature: aiRequest.feature,
-        reservedUsd: settledReservedUsd,
-        actualCostUsd,
-        requestId: blocked.auditRequestId ?? "",
-      });
+      // The response is blocked but the model call ran — its cost is real.
+      await settleBilling(blocked.auditRequestId ?? "");
       return blocked;
     }
     content = outputSafety.content;
@@ -555,29 +206,11 @@ export async function executeSyncChat(
           piiMasked,
           injectionBlocked,
         });
-        // The model ran (spend is real) but the audit write failed — settle the
-        // credit reservation anyway so it isn't stranded forever (there is no
-        // wallet reconciliation sweep); no audit id, so metering is skipped.
-        await settleBillingCredits(deps.billing, log, {
-          tenantId: deps.policyMeta?.tenantId ?? "",
-          userId: aiRequest.userId,
-          feature: aiRequest.feature,
-          reservedUsd: settledReservedUsd,
-          actualCostUsd,
-          requestId: "",
-        });
+        await settleBilling("");
         return auditUnavailableFailure(false);
       }
-      // Model call ran (spend is real) but output safety is down: settle the
-      // credit reservation so it isn't held forever (meter skipped — no audit id).
-      await settleBillingCredits(deps.billing, log, {
-        tenantId: deps.policyMeta?.tenantId ?? "",
-        userId: aiRequest.userId,
-        feature: aiRequest.feature,
-        reservedUsd: settledReservedUsd,
-        actualCostUsd,
-        requestId: "",
-      });
+      // Output safety is down but the model call ran — settle, meter skipped.
+      await settleBilling("");
       return {
         ...fail(503, "safety_unavailable", {}, "Safety service unavailable"),
         retryable: false,
@@ -614,28 +247,11 @@ export async function executeSyncChat(
       piiMasked,
       injectionBlocked,
     });
-    // The model ran (spend is real) but the final audit write failed — settle
-    // the credit reservation anyway so it isn't stranded (no wallet sweep
-    // reconciles it); no audit id, so metering is skipped.
-    await settleBillingCredits(deps.billing, log, {
-      tenantId: deps.policyMeta?.tenantId ?? "",
-      userId: aiRequest.userId,
-      feature: aiRequest.feature,
-      reservedUsd: settledReservedUsd,
-      actualCostUsd,
-      requestId: "",
-    });
+    await settleBilling("");
     return auditUnavailableFailure(false);
   }
 
-  await settleBillingCredits(deps.billing, log, {
-    tenantId: deps.policyMeta?.tenantId ?? "",
-    userId: aiRequest.userId,
-    feature: aiRequest.feature,
-    reservedUsd: settledReservedUsd,
-    actualCostUsd,
-    requestId: auditRequestId,
-  });
+  await settleBilling(auditRequestId);
 
   // For grounded requests the gateway prepended a system message carrying the
   // (deliberately un-masked) retrieved context; don't ship that to the

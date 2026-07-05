@@ -25,7 +25,7 @@ jobs:
     outputs:
       version: ${{ steps.v.outputs.version }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
       - id: v
         name: Resolve + verify version
         run: |
@@ -59,15 +59,60 @@ jobs:
             fi
           done
 
-  npm:
+  # Publishing must never ship an untested commit: tags can be pushed on any
+  # commit (including one that skipped or failed CI), so the release itself
+  # re-runs the full gate — build, typecheck, lint, and the DB-backed suite —
+  # on exactly the tagged tree.
+  test:
     needs: guard
     runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_DB: modelgov
+        ports:
+          - 55432:5432
+        options: >-
+          --health-cmd "pg_isready -U postgres"
+          --health-interval 5s
+          --health-timeout 3s
+          --health-retries 12
+    env:
+      DATABASE_URL: postgres://postgres:postgres@localhost:55432/modelgov
     steps:
-      - uses: actions/checkout@v4
-      - uses: pnpm/action-setup@v4
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+      - uses: pnpm/action-setup@b906affcce14559ad1aafd4ab0e942779e9f58b1 # v4
         with:
           version: 10.19.0
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version: 22
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile
+      - name: Wait for Postgres
+        run: npx wait-on tcp:localhost:55432 --timeout 60000
+      - run: pnpm build
+      - run: pnpm typecheck
+      - run: pnpm lint
+      - run: pnpm test 2>&1 | tee /tmp/test.log
+      - name: Integration tests ran (not skipped)
+        run: |
+          if grep -E "Test Files.*skipped" /tmp/test.log; then
+            echo "::error::Test files were skipped — DATABASE_URL must be set"
+            exit 1
+          fi
+
+  npm:
+    needs: [guard, test]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+      - uses: pnpm/action-setup@b906affcce14559ad1aafd4ab0e942779e9f58b1 # v4
+        with:
+          version: 10.19.0
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
         with:
           node-version: 22
           cache: pnpm
@@ -89,11 +134,11 @@ jobs:
           done
 
   pypi:
-    needs: guard
+    needs: [guard, test]
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
         with:
           python-version: "3.11"
       - name: Build sdist + wheel
@@ -105,15 +150,15 @@ jobs:
       # publisher configured on PyPI for this repo + this workflow (release.yml),
       # and the workflow-level `id-token: write` permission set above.
       - name: Publish to PyPI
-        uses: pypa/gh-action-pypi-publish@release/v1
+        uses: pypa/gh-action-pypi-publish@cef221092ed1bacb1cc03d23a2d87d1d172e277b # release/v1 2026-07
         with:
           packages-dir: packages/sdk-python/dist
 
   openapi-artifact:
-    needs: guard
+    needs: [guard, test]
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
       # openapi.json is committed and CI guarantees it is current on every push,
       # so it is the contract of record — publish it verbatim under a versioned
       # name rather than re-generating (which would need a full build).
@@ -126,7 +171,7 @@ jobs:
           fi
           cp packages/api/openapi.json "openapi-${{ github.ref_name }}.json"
       - name: Attach OpenAPI spec to the GitHub Release
-        uses: softprops/action-gh-release@v2
+        uses: softprops/action-gh-release@3bb12739c298aeb8a4eeaf626c5b8d85266b0e65 # v2
         with:
           files: openapi-${{ github.ref_name }}.json
           fail_on_unmatched_files: true

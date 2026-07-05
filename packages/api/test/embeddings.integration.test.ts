@@ -10,6 +10,7 @@ import {
 } from "../src/services/litellm";
 import { NoopObservability } from "../src/services/observability";
 import { NoopGuard } from "../src/services/safety";
+import { createBillingService } from "../src/modules/billing/service";
 import { buildServer } from "../src/server";
 
 const DATABASE_URL = process.env.DATABASE_URL;
@@ -77,7 +78,10 @@ describe.skipIf(!DATABASE_URL)("POST /v1/embeddings (integration)", () => {
     await pool.end();
   });
   beforeEach(async () => {
-    await pool.query("TRUNCATE budget_counters, request_logs, idempotency_keys");
+    await pool.query(
+      `TRUNCATE budget_counters, request_logs, idempotency_keys,
+       billing_accounts, billing_reservation_leases, meter_events`,
+    );
   });
 
   function appWith(litellm: LiteLLMClient): FastifyInstance {
@@ -230,5 +234,196 @@ describe.skipIf(!DATABASE_URL)("POST /v1/embeddings (integration)", () => {
     });
     expect(res.statusCode).toBe(501);
     expect(res.json().error.code).toBe("not_implemented");
+  });
+
+  describe("billing integration", () => {
+    const billingConfig = parseConfigObject({
+      ...RAW_CONFIG,
+      billing: { provider: "stripe", mode: "credits_only" },
+    });
+
+    function appWithBilling(litellm: LiteLLMClient) {
+      const billing = createBillingService(pool, { billing: billingConfig.billing })!;
+      return {
+        billing,
+        app: buildServer({
+          config: billingConfig,
+          pool,
+          litellm,
+          safety: new NoopGuard(),
+          observability: new NoopObservability(),
+          logger: false,
+          allowUnauthenticated: true,
+          billing,
+        }),
+      };
+    }
+
+    it("rejects with 402 when the wallet cannot cover the estimate (no provider call)", async () => {
+      let providerRan = false;
+      const spyEmbed = fakeEmbedClient(async (p) => {
+        providerRan = true;
+        return { embeddings: p.input.map(() => [0]), model: p.model, actualCostUsd: 0.1, inputTokens: 1, raw: {} };
+      });
+      const { app } = appWithBilling(spyEmbed);
+      const res = await post(app, {
+        userId: "u_broke",
+        userType: "workflow",
+        feature: "kb_embedding",
+        input: ["hello"],
+        // Large enough that the estimate is non-zero — a zero-rounded estimate
+        // legitimately passes the pre-call gate (actual cost settles instead).
+        inputTokensEstimate: 100_000,
+      });
+      expect(res.statusCode).toBe(402);
+      expect(res.json().error.code).toBe("insufficient_credits");
+      expect(providerRan).toBe(false);
+      // The rejection leaves an audit row, like every other block path.
+      const logs = await pool.query(
+        `SELECT error FROM request_logs WHERE user_id = 'u_broke'`,
+      );
+      expect(logs.rows).toEqual([{ error: "insufficient_credits" }]);
+    });
+
+    it("debits the wallet on success and releases the hold's leases", async () => {
+      const { app, billing } = appWithBilling(okEmbed);
+      await billing.adminTopUp({ tenantId: "", userId: "u_paid", creditsUsd: 1 });
+
+      const res = await post(app, {
+        userId: "u_paid",
+        userType: "workflow",
+        feature: "kb_embedding",
+        input: ["hello"],
+      });
+      expect(res.statusCode).toBe(200);
+
+      const balance = await billing.getBalance("", "u_paid");
+      expect(balance.creditsUsd).toBeCloseTo(1 - 0.00001, 6);
+      expect(balance.creditsReservedUsd).toBeCloseTo(0, 6);
+      const leases = await pool.query(`SELECT count(*)::int AS n FROM billing_reservation_leases`);
+      expect(leases.rows[0].n).toBe(0);
+    });
+
+    it("metered mode records a meter event for embeddings spend", async () => {
+      const meteredConfig = parseConfigObject({
+        ...RAW_CONFIG,
+        billing: {
+          provider: "stripe",
+          mode: "metered",
+          stripe: { secret_key: "sk_test", meter_event_name: "modelgov_usage" },
+        },
+      });
+      const billing = createBillingService(pool, { billing: meteredConfig.billing })!;
+      const app = buildServer({
+        config: meteredConfig,
+        pool,
+        litellm: okEmbed,
+        safety: new NoopGuard(),
+        observability: new NoopObservability(),
+        logger: false,
+        allowUnauthenticated: true,
+        billing,
+      });
+      const res = await post(app, {
+        userId: "u_metered_embed",
+        userType: "workflow",
+        feature: "kb_embedding",
+        input: ["hello"],
+      });
+      expect(res.statusCode).toBe(200);
+      const meters = await pool.query(
+        `SELECT cost_usd::float8 AS cost_usd FROM meter_events WHERE user_id = 'u_metered_embed'`,
+      );
+      expect(meters.rows).toHaveLength(1);
+      expect(Number(meters.rows[0].cost_usd)).toBeCloseTo(0.00001, 8);
+    });
+
+    // A pricier fallback grows the credit hold via the shared providerBudget.topUp
+    // (same code chat uses). Both models are openai so the data-sensitivity gate
+    // is irrelevant; the large model is 10x the price of the small one.
+    const fallbackConfig = parseConfigObject({
+      ...RAW_CONFIG,
+      budgets: {
+        ...RAW_CONFIG.budgets,
+        by_user_type: {
+          ...RAW_CONFIG.budgets.by_user_type,
+          workflow: { daily_usd: 1, daily_requests: 100, models: ["embed", "embed_fb"] },
+        },
+      },
+      features: { ...RAW_CONFIG.features, kb_embedding: { model_class: "embed_fb", max_tokens: 1 } },
+      model_classes: {
+        ...RAW_CONFIG.model_classes,
+        embed_fb: { primary: "openai/text-embedding-3-small", fallback: "openai/text-embedding-3-large" },
+      },
+      pricing: {
+        "openai/text-embedding-3-small": { input_per_1k: 0.00002, output_per_1k: 0 },
+        "openai/text-embedding-3-large": { input_per_1k: 0.0002, output_per_1k: 0 },
+      },
+      billing: { provider: "stripe", mode: "credits_only" },
+    });
+    const primaryDownThenFallback = () =>
+      fakeEmbedClient(async (p) => {
+        if (p.model === "openai/text-embedding-3-small") throw new ProviderError("primary down");
+        return { embeddings: p.input.map(() => [0.1]), model: p.model, actualCostUsd: 0.02, inputTokens: 8, raw: {} };
+      });
+    function appWithFallbackBilling(litellm: LiteLLMClient) {
+      const billing = createBillingService(pool, { billing: fallbackConfig.billing })!;
+      return {
+        billing,
+        app: buildServer({
+          config: fallbackConfig,
+          pool,
+          litellm,
+          safety: new NoopGuard(),
+          observability: new NoopObservability(),
+          logger: false,
+          allowUnauthenticated: true,
+          billing,
+        }),
+      };
+    }
+
+    it("tops up the credit hold for a pricier fallback and settles the actual cost", async () => {
+      const { app, billing } = appWithFallbackBilling(primaryDownThenFallback());
+      await billing.adminTopUp({ tenantId: "", userId: "u_fb", creditsUsd: 1 });
+
+      const res = await post(app, {
+        userId: "u_fb",
+        userType: "workflow",
+        feature: "kb_embedding",
+        input: ["hello"],
+        inputTokensEstimate: 100_000, // primary est ~0.002, fallback est ~0.02
+      });
+      expect(res.statusCode).toBe(200);
+      expect(res.json().decision).toBe("fallback");
+
+      const balance = await billing.getBalance("", "u_fb");
+      expect(balance.creditsUsd).toBeCloseTo(1 - 0.02, 6); // debited the actual fallback cost
+      expect(balance.creditsReservedUsd).toBeCloseTo(0, 6); // base + top-up hold fully released
+      const leases = await pool.query(`SELECT count(*)::int AS n FROM billing_reservation_leases`);
+      expect(leases.rows[0].n).toBe(0);
+    });
+
+    it("rejects a pricier fallback the wallet can't cover, releasing the base hold (no leak)", async () => {
+      const { app, billing } = appWithFallbackBilling(primaryDownThenFallback());
+      // Covers the primary estimate (~0.002) but not the fallback top-up (~0.02).
+      await billing.adminTopUp({ tenantId: "", userId: "u_fb_broke", creditsUsd: 0.005 });
+
+      const res = await post(app, {
+        userId: "u_fb_broke",
+        userType: "workflow",
+        feature: "kb_embedding",
+        input: ["hello"],
+        inputTokensEstimate: 100_000,
+      });
+      expect(res.statusCode).toBe(402);
+      expect(res.json().error.code).toBe("insufficient_credits");
+
+      const balance = await billing.getBalance("", "u_fb_broke");
+      expect(balance.creditsUsd).toBeCloseTo(0.005, 6); // nothing debited
+      expect(balance.creditsReservedUsd).toBeCloseTo(0, 6); // base hold released, not stranded
+      const leases = await pool.query(`SELECT count(*)::int AS n FROM billing_reservation_leases`);
+      expect(leases.rows[0].n).toBe(0);
+    });
   });
 });

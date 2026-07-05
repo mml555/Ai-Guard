@@ -111,6 +111,11 @@ or any LiteLLM-supported provider.
 | [`saas_tiers`](./examples/saas_tiers) | Free vs paid model access |
 | [`document_extraction`](./examples/document_extraction) | Structured extraction — real integration pattern |
 | [`nextjs_support_chat`](./examples/nextjs_support_chat) | Next.js API route — app auth → Modelgov SDK |
+| [`fastapi_support_chat`](./examples/fastapi_support_chat) | Python/FastAPI — the same pattern via the `modelgov` PyPI SDK |
+| [`chatbot`](./examples/chatbot) | Full Next.js chatbot app on a governed gateway |
+| [`rag_support`](./examples/rag_support) | RAG with grounded answers (context verification) |
+| [`ocr_pipeline`](./examples/ocr_pipeline) | Document/OCR extraction pipeline |
+| [`event_intake_app`](./examples/event_intake_app) | Server-side intake workflow with budgets |
 
 ```bash
 ./setup
@@ -140,7 +145,7 @@ MODELGOV_API_KEY=sk-modelgov-api-local \
 | `make up-prod` | Small self-hosted production (**not HA**) |
 | **Helm** | [Enterprise production](./docs/production-deploy.md) — recommended |
 
-**Current release:** `v1.1.0` — pin `ghcr.io/<org>/modelgov-api:v1.1.0` in production.
+**Current release:** `v1.1.0` — pin `ghcr.io/mml555/modelgov/modelgov-api:v1.1.0` in production.
 
 | Command | Stack |
 | --- | --- |

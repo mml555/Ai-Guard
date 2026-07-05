@@ -1,6 +1,6 @@
 import type { SafetyPlan } from "@modelgov/policy-engine";
 import type { ChatMessage } from "../../types";
-import type { OutputSafetyResult, SafetyGuard, SafetyResult } from "./index";
+import type { OutputSafetyResult, SafetyGuard, SafetyResult } from "./contracts";
 
 /** Pass-through guard for dev / `preset: dev` / tests. */
 export class NoopGuard implements SafetyGuard {

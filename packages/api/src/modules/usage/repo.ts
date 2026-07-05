@@ -1,6 +1,6 @@
 import type { ReservationCaps, UsageSnapshot } from "@modelgov/policy-engine";
 import type { Pool } from "pg";
-import { withTransaction } from "../../db/pool";
+import { consumeReservationLease, withTransaction } from "../../db/pool";
 import { dayWindowStart, monthWindowStart } from "../../services/windows";
 
 // lock_timeout for the budget-counter transactions: a contended row must fail
@@ -404,25 +404,12 @@ export async function recordActualCost(
   await withTransaction(
     pool,
     async (client) => {
-      // The lease row is the authoritative, single-use token for this
-      // reservation's hold. Delete it FIRST and make the WHOLE settle conditional
-      // on the row actually being removed. If it's already gone, this settle is a
-      // no-op: either (a) a caller retried a settle that already committed (the
-      // pipeline retries recordActualCost once — booking used_usd again here would
-      // double-charge the customer), or (b) the stale-lease sweep freed the hold,
-      // in which case decrementing reserved_usd again would double-free OTHER
-      // in-flight requests' holds on a shared scope and let them overshoot the cap.
-      // Gating both used_usd AND reserved_usd on the delete makes settle idempotent
-      // under retry — the lease is consumed exactly once, so the spend is booked
-      // exactly once. The only cost is that a settle arriving AFTER its own lease
-      // was swept (request outlived RESERVATION_STALE_MS — a pathological case the
-      // boot check already warns about) won't book its used_usd; that undercounts
-      // rather than double-charges, the safe direction for a budget gate. Deleting
-      // the lease before the counter update also keeps a consistent lease→counter
-      // lock order with the sweep, avoiding a deadlock window.
-      const holdOutstanding = params.leaseId
-        ? ((await client.query(LEASE_DELETE_SQL, [params.leaseId])).rowCount ?? 0) > 0
-        : true;
+      // Consume the single-use lease first and make the WHOLE settle conditional
+      // on it (see consumeReservationLease for the money-safety rationale). The
+      // flat path gates BOTH used_usd AND reserved_usd on the delete: a settle
+      // whose lease is already gone is a full no-op — it neither double-charges
+      // (retry) nor double-frees (sweep).
+      const holdOutstanding = await consumeReservationLease(client, LEASE_DELETE_SQL, params.leaseId);
       if (!holdOutstanding) return;
       for (const d of dims) {
         await client.query(RECORD_SQL, [
@@ -440,6 +427,33 @@ export async function recordActualCost(
     },
     { lockTimeoutMs: LOCK_TIMEOUT_MS },
   );
+}
+
+/**
+ * Settle actual cost against the internal ledger, retrying once on a transient
+ * failure before leaving the reservation for the lease-cleanup sweep. Shared by
+ * the chat pipeline and the embeddings service so the "settle → retry once →
+ * fall back to the sweep" policy is single-sourced. recordActualCost is
+ * lease-gated (idempotent), so the retry cannot double-book.
+ */
+export async function settleActualCostWithRetry(
+  pool: Pool,
+  params: Parameters<typeof recordActualCost>[1],
+  log?: { error(obj: unknown, msg: string): void },
+): Promise<void> {
+  try {
+    await recordActualCost(pool, params);
+  } catch (err) {
+    log?.error({ err }, "failed to settle cost; retrying settlement once");
+    try {
+      await recordActualCost(pool, params);
+    } catch (retryErr) {
+      log?.error(
+        { err: retryErr },
+        "cost settlement retry failed; leaving the reservation for the lease-cleanup sweep to reconcile",
+      );
+    }
+  }
 }
 
 // Books already-spent money with NO cap check and NO reservation change: the
@@ -544,16 +558,12 @@ export async function releaseBudget(
   await withTransaction(
     pool,
     async (client) => {
-      // Same lease-as-authoritative-token rule as recordActualCost: delete the
-      // lease first and only free the hold if this transaction actually removed
-      // it. If the row is gone the sweep (or a settle) already released this
-      // reservation, so releasing again would double-free the shared counters.
-      // A release with no lease id (leases disabled) always frees, preserving
-      // prior behaviour.
-      if (params.leaseId) {
-        const del = await client.query(LEASE_DELETE_SQL, [params.leaseId]);
-        if ((del.rowCount ?? 0) === 0) return;
-      }
+      // Consume the single-use lease first and only free the hold if this
+      // transaction removed it (see consumeReservationLease) — releasing after the
+      // sweep (or a prior settle) already dropped it would double-free the shared
+      // counters. No lease id (leases disabled) always frees, preserving prior
+      // behaviour.
+      if (!(await consumeReservationLease(client, LEASE_DELETE_SQL, params.leaseId))) return;
       for (const d of dims) {
         await client.query(RELEASE_SQL, [
           d.scope,

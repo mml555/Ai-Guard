@@ -1,5 +1,5 @@
 import type { Pool, PoolClient } from "pg";
-import { withTransaction } from "../../db/pool";
+import { consumeReservationLease, withTransaction } from "../../db/pool";
 
 export interface BillingAccountRow {
   tenantId: string;
@@ -73,49 +73,191 @@ export async function upsertBillingAccount(
   );
 }
 
+/**
+ * Atomically reserve credits (balance check inside the UPDATE) and record a
+ * lease row for the amount. The lease is the crash ledger: if neither settle
+ * nor release ever runs (worker crash, settle-write failure), the maintenance
+ * sweep finds the stale lease and returns the amount to the wallet.
+ */
 export async function reserveCredits(
   pool: Pool,
-  params: { tenantId: string; userId: string; amountUsd: number },
+  params: { tenantId: string; userId: string; amountUsd: number; holdId?: string },
 ): Promise<boolean> {
-  const { rowCount } = await pool.query(
-    `UPDATE billing_accounts
-     SET credits_reserved_usd = credits_reserved_usd + $3, updated_at = now()
-     WHERE tenant_id = $1 AND user_id = $2
-       AND credits_usd - credits_reserved_usd >= $3`,
-    [params.tenantId, params.userId, params.amountUsd],
-  );
-  return (rowCount ?? 0) > 0;
+  return withTransaction(pool, async (client) => {
+    // A zero-rounded estimate holds nothing (and must not require an account
+    // row to exist), but the lease row is still written below: settle is gated
+    // on deleting the hold's leases, and the ACTUAL cost of a zero-estimate
+    // request can be positive — without the lease it would never be debited.
+    if (params.amountUsd > 0) {
+      const { rowCount } = await client.query(
+        `UPDATE billing_accounts
+         SET credits_reserved_usd = credits_reserved_usd + $3, updated_at = now()
+         WHERE tenant_id = $1 AND user_id = $2
+           AND credits_usd - credits_reserved_usd >= $3`,
+        [params.tenantId, params.userId, params.amountUsd],
+      );
+      if ((rowCount ?? 0) === 0) return false;
+    }
+    if (params.holdId) {
+      await client.query(
+        `INSERT INTO billing_reservation_leases (hold_id, tenant_id, user_id, amount_usd)
+         VALUES ($1, $2, $3, $4)`,
+        [params.holdId, params.tenantId, params.userId, params.amountUsd],
+      );
+    }
+    return true;
+  });
 }
 
+/**
+ * Return a reserved amount to the wallet without booking spend. With a holdId,
+ * the release is gated on deleting one amount-matched lease (rows with equal
+ * (hold_id, amount) are fungible): a lease already gone means the sweep or a
+ * retry released it first, so the wallet is NOT decremented again. Without a
+ * holdId (hierarchical requests, which never lease), the legacy unconditional
+ * release applies.
+ */
 export async function releaseCredits(
   pool: Pool,
-  params: { tenantId: string; userId: string; amountUsd: number },
+  params: { tenantId: string; userId: string; amountUsd: number; holdId?: string },
 ): Promise<void> {
-  await pool.query(
-    `UPDATE billing_accounts
-     SET credits_reserved_usd = GREATEST(credits_reserved_usd - $3, 0), updated_at = now()
-     WHERE tenant_id = $1 AND user_id = $2`,
-    [params.tenantId, params.userId, params.amountUsd],
-  );
+  if (!params.holdId) {
+    await pool.query(
+      `UPDATE billing_accounts
+       SET credits_reserved_usd = GREATEST(credits_reserved_usd - $3, 0), updated_at = now()
+       WHERE tenant_id = $1 AND user_id = $2`,
+      [params.tenantId, params.userId, params.amountUsd],
+    );
+    return;
+  }
+  await withTransaction(pool, async (client) => {
+    // Match the amount rounded to the column scale: amount_usd is numeric(14,6),
+    // so a lease inserted from a JS float (e.g. 0.30000000000000004) is stored as
+    // 0.300000. Comparing against the raw float would match zero rows and skip the
+    // wallet decrement, stranding the reservation until the stale-lease sweep.
+    // Decrement by the DELETED lease's stored amount (RETURNING), never the raw
+    // caller float: the two can diverge (independent rounding) and decrementing by
+    // the caller's figure would drift credits_reserved_usd from what was reserved.
+    const { rows } = await client.query(
+      `DELETE FROM billing_reservation_leases
+       WHERE id IN (
+         SELECT id FROM billing_reservation_leases
+         WHERE hold_id = $1 AND amount_usd = round($2::numeric, 6)
+         ORDER BY id
+         LIMIT 1
+         FOR UPDATE SKIP LOCKED
+       )
+       RETURNING amount_usd::float8 AS amount_usd`,
+      [params.holdId, params.amountUsd],
+    );
+    const deleted = rows[0] as { amount_usd: number } | undefined;
+    if (!deleted) return; // already released/settled/swept
+    await client.query(
+      `UPDATE billing_accounts
+       SET credits_reserved_usd = GREATEST(credits_reserved_usd - $3, 0), updated_at = now()
+       WHERE tenant_id = $1 AND user_id = $2`,
+      [params.tenantId, params.userId, deleted.amount_usd],
+    );
+  });
 }
 
+/**
+ * Book actual spend against the wallet and release the full reservation.
+ * Deliberate overspend policy: `credits_usd` floors at 0 (GREATEST) — when
+ * actual cost exceeds the remaining balance (the reserve was an estimate), the
+ * excess is forgiven rather than driving the wallet negative. The reservation
+ * cap bounds how far a single request can overshoot.
+ *
+ * With a holdId the settle is gated on deleting the hold's remaining leases:
+ * retried settles (or a settle racing the stale-lease sweep) find no leases and
+ * skip the wallet update, so a request is never double-booked. The accepted
+ * trade-off (mirroring the internal ledger) is that a settle arriving after its
+ * own lease was swept undercounts — it never double-charges. Without a holdId
+ * (hierarchical requests, which never lease) the legacy unconditional update
+ * applies.
+ */
 export async function settleCredits(
   pool: Pool,
-  params: { tenantId: string; userId: string; reservedUsd: number; actualUsd: number },
+  params: {
+    tenantId: string;
+    userId: string;
+    reservedUsd: number;
+    actualUsd: number;
+    holdId?: string;
+  },
 ): Promise<void> {
-  const refund = Math.max(params.reservedUsd - params.actualUsd, 0);
-  await pool.query(
-    `UPDATE billing_accounts
-     SET credits_usd = GREATEST(credits_usd - $3, 0),
-         credits_reserved_usd = GREATEST(credits_reserved_usd - $4, 0),
-         updated_at = now()
-     WHERE tenant_id = $1 AND user_id = $2`,
-    [params.tenantId, params.userId, params.actualUsd, params.reservedUsd],
-  );
-  if (refund > 0) {
-    // reserved was higher than actual — settleCredits already released the full
-    // reservation; the GREATEST on credits_usd books actual spend only.
+  if (!params.holdId) {
+    await pool.query(
+      `UPDATE billing_accounts
+       SET credits_usd = GREATEST(credits_usd - $3, 0),
+           credits_reserved_usd = GREATEST(credits_reserved_usd - $4, 0),
+           updated_at = now()
+       WHERE tenant_id = $1 AND user_id = $2`,
+      [params.tenantId, params.userId, params.actualUsd, params.reservedUsd],
+    );
+    return;
   }
+  await withTransaction(pool, async (client) => {
+    // Route the wallet through the shared lease-consume invariant (the same one
+    // the flat/hierarchical ledgers use): the settle is gated on deleting the
+    // hold's leases, so retries and the stale-lease sweep can't double-book.
+    const consumed = await consumeReservationLease(
+      client,
+      `DELETE FROM billing_reservation_leases WHERE hold_id = $1`,
+      params.holdId,
+    );
+    if (!consumed) return; // already settled or swept — idempotent
+    await client.query(
+      `UPDATE billing_accounts
+       SET credits_usd = GREATEST(credits_usd - $3, 0),
+           credits_reserved_usd = GREATEST(credits_reserved_usd - $4, 0),
+           updated_at = now()
+       WHERE tenant_id = $1 AND user_id = $2`,
+      [params.tenantId, params.userId, params.actualUsd, params.reservedUsd],
+    );
+  });
+}
+
+/**
+ * Release credit reservations whose lease outlived the reservation TTL — the
+ * request that held them crashed or failed to settle. Batched; returns the
+ * number of leases released. Per-(tenant,user) aggregation keeps it to one
+ * wallet UPDATE per account per pass.
+ */
+export async function cleanupStaleBillingLeases(
+  pool: Pool,
+  staleMs: number,
+  batch = 500,
+): Promise<number> {
+  const { rows } = await pool.query(
+    `WITH stale AS (
+       DELETE FROM billing_reservation_leases
+       WHERE id IN (
+         SELECT id FROM billing_reservation_leases
+         WHERE created_at < now() - ($1 || ' milliseconds')::interval
+         ORDER BY created_at ASC
+         LIMIT $2
+         FOR UPDATE SKIP LOCKED
+       )
+       RETURNING tenant_id, user_id, amount_usd
+     ),
+     agg AS (
+       SELECT tenant_id, user_id, SUM(amount_usd) AS amount_usd, COUNT(*)::int AS n
+       FROM stale
+       GROUP BY tenant_id, user_id
+     ),
+     upd AS (
+       UPDATE billing_accounts a
+       SET credits_reserved_usd = GREATEST(a.credits_reserved_usd - agg.amount_usd, 0),
+           updated_at = now()
+       FROM agg
+       WHERE a.tenant_id = agg.tenant_id AND a.user_id = agg.user_id
+       RETURNING agg.n
+     )
+     SELECT COALESCE(SUM(n), 0)::int AS released FROM upd`,
+    [String(staleMs), batch],
+  );
+  return (rows[0] as { released: number } | undefined)?.released ?? 0;
 }
 
 export async function findAccountByStripeCustomer(
@@ -186,7 +328,10 @@ export async function markMeterReported(
 
 export async function listPendingMeterEvents(
   pool: Pool,
-  limit = 50,
+  // Reported with bounded concurrency (see flushPendingMeters), so a larger batch
+  // drains a backlog within one tick instead of ~50/min. Sized so the fan-out
+  // still finishes well inside the maintenance interval.
+  limit = 500,
 ): Promise<
   Array<{
     requestId: string;
@@ -194,13 +339,23 @@ export async function listPendingMeterEvents(
     userId: string;
     feature: string;
     costUsd: number;
+    stripeCustomerId: string;
   }>
 > {
+  // Only rows whose account has a Stripe customer are reportable. Rows without
+  // one must not be returned: they can never flush, and with this batch's
+  // ORDER BY + LIMIT they would permanently occupy batch slots and starve
+  // newer events (the retention sweep prunes them instead).
   const { rows } = await pool.query(
-    `SELECT request_id, tenant_id, user_id, feature, cost_usd::float8 AS cost_usd
-     FROM meter_events
-     WHERE reported_at IS NULL
-     ORDER BY created_at ASC
+    `SELECT m.request_id, m.tenant_id, m.user_id, m.feature,
+            m.cost_usd::float8 AS cost_usd,
+            a.stripe_customer_id
+     FROM meter_events m
+     JOIN billing_accounts a
+       ON a.tenant_id = m.tenant_id AND a.user_id = m.user_id
+     WHERE m.reported_at IS NULL
+       AND a.stripe_customer_id IS NOT NULL
+     ORDER BY m.created_at ASC
      LIMIT $1`,
     [limit],
   );
@@ -210,13 +365,98 @@ export async function listPendingMeterEvents(
     user_id: string;
     feature: string;
     cost_usd: number;
+    stripe_customer_id: string;
   }>).map((r) => ({
     requestId: r.request_id,
     tenantId: r.tenant_id,
     userId: r.user_id,
     feature: r.feature,
     costUsd: r.cost_usd,
+    stripeCustomerId: r.stripe_customer_id,
   }));
+}
+
+/**
+ * Retention for meter_events. Reported rows served their purpose (the Stripe
+ * meter has the usage) and are kept only for a debugging window. Unreported rows
+ * are dropped only when they can NEVER be reported — the account has no Stripe
+ * customer id; a row whose account was linked later stays pending so the meter
+ * flush still invoices it (real usage is not silently dropped). Both sweeps drain
+ * in a loop so a large backlog clears in one pass instead of one batch per tick;
+ * the abandoned count is returned separately so the caller can warn on it.
+ */
+export async function cleanupMeterEvents(
+  pool: Pool,
+  opts: { reportedRetentionMs: number; abandonedRetentionMs: number },
+  batch = 5000,
+): Promise<{ reported: number; abandoned: number }> {
+  let reported = 0;
+  for (;;) {
+    const { rowCount } = await pool.query(
+      `DELETE FROM meter_events
+       WHERE request_id IN (
+         SELECT request_id FROM meter_events
+         WHERE reported_at IS NOT NULL
+           AND reported_at < now() - ($1 || ' milliseconds')::interval
+         LIMIT $2
+       )`,
+      [String(opts.reportedRetentionMs), batch],
+    );
+    const n = rowCount ?? 0;
+    reported += n;
+    if (n < batch) break;
+  }
+  let abandoned = 0;
+  for (;;) {
+    const { rowCount } = await pool.query(
+      `DELETE FROM meter_events
+       WHERE request_id IN (
+         SELECT m.request_id FROM meter_events m
+         WHERE m.reported_at IS NULL
+           AND m.created_at < now() - ($1 || ' milliseconds')::interval
+           AND NOT EXISTS (
+             SELECT 1 FROM billing_accounts a
+             WHERE a.tenant_id = m.tenant_id
+               AND a.user_id = m.user_id
+               AND a.stripe_customer_id IS NOT NULL
+           )
+         LIMIT $2
+       )`,
+      [String(opts.abandonedRetentionMs), batch],
+    );
+    const n = rowCount ?? 0;
+    abandoned += n;
+    if (n < batch) break;
+  }
+  return { reported, abandoned };
+}
+
+/**
+ * Retention for Stripe webhook idempotency records. Stripe retries webhooks
+ * for days, not months; rows older than the retention window can no longer be
+ * replayed by Stripe, so keeping them buys no protection.
+ */
+export async function cleanupStripeProcessedEvents(
+  pool: Pool,
+  retentionMs: number,
+  batch = 5000,
+): Promise<number> {
+  let removed = 0;
+  for (;;) {
+    const { rowCount } = await pool.query(
+      `DELETE FROM stripe_processed_events
+       WHERE event_id IN (
+         SELECT event_id FROM stripe_processed_events
+         WHERE processed_at < now() - ($1 || ' milliseconds')::interval
+         LIMIT $2
+       )`,
+      [String(retentionMs), batch],
+    );
+    const n = rowCount ?? 0;
+    removed += n;
+    if (n < batch) break;
+  }
+  return removed;
 }
 
 export async function topUpCreditsInTransaction(

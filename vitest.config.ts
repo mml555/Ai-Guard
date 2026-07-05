@@ -13,11 +13,23 @@ export default defineConfig({
     },
   },
   test: {
-    include: ["packages/**/test/**/*.test.ts", "examples/**/test/**/*.test.ts"],
+    include: [
+      "packages/**/test/**/*.test.ts",
+      "examples/**/test/**/*.test.ts",
+      "apps/**/test/**/*.test.ts",
+    ],
     environment: "node",
     // Integration tests share one Postgres and TRUNCATE between cases; running
     // test files in parallel would let them stomp on each other's rows.
     fileParallelism: false,
+    // Every integration file's beforeAll runs applySchema (all 24 migrations
+    // under an advisory lock); whichever file the sequencer runs first bears the
+    // full cold-migration cost. Against a shared Docker Postgres that can exceed
+    // vitest's default 5s test / 10s hook timeouts under load — producing
+    // non-deterministic timeouts and whole-file skips. Match the DB
+    // statement_timeout (30s) so a slow-but-completing op isn't killed early.
+    testTimeout: 30_000,
+    hookTimeout: 30_000,
     coverage: {
       provider: "v8",
       // Measure the WHOLE api + policy-engine surface, not an allow-list — a
@@ -28,6 +40,7 @@ export default defineConfig({
         "packages/policy-engine/src/**/*.ts",
         "packages/api/src/**/*.ts",
         "packages/sdk-typescript/src/**/*.ts",
+        "packages/cli/src/**/*.ts",
       ],
       exclude: [
         "**/*.test.ts",
@@ -42,11 +55,46 @@ export default defineConfig({
       // Set just below measured coverage so a regression fails CI while leaving
       // headroom for legitimate refactors. Ratchet these UP as gaps close;
       // never widen them back down.
+      //
+      // 2026-07-03 re-baseline (two changes at once, both documented so the
+      // lower absolute numbers aren't mistaken for a coverage regression):
+      //  1. The CLI joined the measured surface (previously invisible to the
+      //     ratchet) at a much lower starting point.
+      //  2. vitest 2 → 4: the v8 provider's AST-aware remapping counts
+      //     statements/branches differently, shifting every package's numbers
+      //     down several points for the same tests.
+      // The per-package globs pin each package at its own measured level, so
+      // the global gate can't hide a regression in one package behind gains in
+      // another. (Vitest counts glob-matched files in the global gate too.)
       thresholds: {
-        lines: 88,
-        functions: 90,
-        branches: 80,
-        statements: 88,
+        lines: 75,
+        functions: 78,
+        branches: 65,
+        statements: 73,
+        "packages/api/src/**/*.ts": {
+          lines: 83,
+          functions: 85,
+          branches: 70,
+          statements: 80,
+        },
+        "packages/policy-engine/src/**/*.ts": {
+          lines: 95,
+          functions: 98,
+          branches: 91,
+          statements: 94,
+        },
+        "packages/sdk-typescript/src/**/*.ts": {
+          lines: 82,
+          functions: 67,
+          branches: 73,
+          statements: 79,
+        },
+        "packages/cli/src/**/*.ts": {
+          lines: 25,
+          functions: 27,
+          branches: 21,
+          statements: 24,
+        },
       },
     },
   },

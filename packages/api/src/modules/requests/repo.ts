@@ -1,4 +1,5 @@
 import type { Pool } from "pg";
+import { appendRequestLogTenantScope } from "../../db/requestLogScope";
 import { apiStatusToDbStatus, inferReasonCode, mapDbStatus, providerFromModel } from "./reasonCode";
 import type { RequestListQuery, RequestRecord } from "./types";
 
@@ -98,10 +99,7 @@ export async function getRequestById(
 ): Promise<RequestRecord | null> {
   const conditions = ["id = $1"];
   const values: unknown[] = [id];
-  if (scope?.tenantScope) {
-    values.push(scope.tenantScope);
-    conditions.push(`tenant_id = $${values.length}`);
-  }
+  appendRequestLogTenantScope(conditions, values, scope?.tenantScope);
   if (scope?.projectScope) {
     values.push(scope.projectScope);
     conditions.push(`project_id = $${values.length}`);
@@ -127,10 +125,7 @@ export async function listRequests(
   const conditions: string[] = [];
   const values: unknown[] = [];
 
-  if (params.tenantScope) {
-    values.push(params.tenantScope);
-    conditions.push(`tenant_id = $${values.length}`);
-  }
+  appendRequestLogTenantScope(conditions, values, params.tenantScope);
   if (params.projectScope) {
     values.push(params.projectScope);
     conditions.push(`project_id = $${values.length}`);

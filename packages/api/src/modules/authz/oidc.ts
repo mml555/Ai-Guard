@@ -24,7 +24,27 @@ export interface OidcConfig {
   roleMap?: Record<string, string | string[]>;
   /** Claim used as the principal display name. Default "sub". */
   nameClaim?: string;
+  /**
+   * Accepted JWS signing algorithms. Defaults to the common asymmetric set — an
+   * explicit allowlist is defense-in-depth so verification can never accept an
+   * algorithm the IdP didn't intend (e.g. a symmetric alg the JWKS shouldn't key).
+   */
+  algorithms?: string[];
 }
+
+/** Asymmetric signing algorithms accepted for operator JWTs by default. */
+const DEFAULT_JWT_ALGORITHMS = [
+  "RS256",
+  "RS384",
+  "RS512",
+  "ES256",
+  "ES384",
+  "ES512",
+  "PS256",
+  "PS384",
+  "PS512",
+  "EdDSA",
+];
 
 export interface OidcVerifier {
   verify(token: string): Promise<ResolvedPrincipal | null>;
@@ -58,6 +78,7 @@ export function createOidcVerifier(
   const jwks = getKey ?? createRemoteJWKSet(new URL(config.jwksUri));
   const rolesClaim = config.rolesClaim ?? "roles";
   const nameClaim = config.nameClaim ?? "sub";
+  const algorithms = config.algorithms ?? DEFAULT_JWT_ALGORITHMS;
 
   return {
     async verify(token: string): Promise<ResolvedPrincipal | null> {
@@ -66,6 +87,7 @@ export function createOidcVerifier(
         ({ payload } = await jwtVerify(token, jwks, {
           issuer: config.issuer,
           audience: config.audience,
+          algorithms,
         }));
       } catch {
         // Bad signature / expired / wrong issuer|audience → not an operator.

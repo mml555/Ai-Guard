@@ -1,5 +1,5 @@
 import type { Pool, PoolClient } from "pg";
-import { withTransaction } from "../../db/pool";
+import { consumeReservationLease, withTransaction } from "../../db/pool";
 import { dayWindowStart, monthWindowStart } from "../../services/windows";
 
 // Hierarchical budgets. Standalone from the flat budget_counters path (which
@@ -400,13 +400,11 @@ export async function releasePath(pool: Pool, reservation: PathReservation): Pro
 
 /**
  * Delete a node reservation lease, returning whether this call actually removed
- * it (i.e. the hold is ours to free). Returns true when there is no lease id so
- * lease-less callers keep their prior always-release behaviour.
+ * it (i.e. the hold is ours to free). Thin wrapper over the shared
+ * consumeReservationLease invariant with this path's lease table.
  */
-async function deleteNodeLease(client: PoolClient, leaseId?: string): Promise<boolean> {
-  if (!leaseId) return true;
-  const del = await client.query("DELETE FROM budget_node_leases WHERE id = $1", [leaseId]);
-  return (del.rowCount ?? 0) > 0;
+function deleteNodeLease(client: PoolClient, leaseId?: string): Promise<boolean> {
+  return consumeReservationLease(client, "DELETE FROM budget_node_leases WHERE id = $1", leaseId);
 }
 
 /**

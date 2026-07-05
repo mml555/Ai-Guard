@@ -24,7 +24,7 @@ import {
 } from "./schemas";
 import { errorJsonSchema } from "../chat/schemas";
 import { handleEmbeddings, type EmbeddingsDeps } from "./service";
-import { assertAiRequestsNotPaused } from "../emergency/routes";
+import { assertAiRequestsNotPaused } from "../emergency/service";
 
 export interface EmbeddingsRouteDeps {
   config: ModelgovConfig;
@@ -37,6 +37,8 @@ export interface EmbeddingsRouteDeps {
   hierarchicalBudgets?: boolean;
   policyMeta?: { configHash?: string; policyVersion?: string; tenantId?: string };
   tenantPolicy?: TenantPolicyResolver;
+  /** Prepaid-credit / metered billing — embeddings must not bypass the wallet. */
+  billing?: import("../billing/service").BillingService;
 }
 
 /**
@@ -75,6 +77,7 @@ export function registerEmbeddingsRoute(
         200: embeddingsSuccessJsonSchema,
         400: errorJsonSchema,
         401: errorJsonSchema,
+        402: errorJsonSchema,
         403: errorJsonSchema,
         501: errorJsonSchema,
         502: errorJsonSchema,
@@ -121,7 +124,7 @@ export function registerEmbeddingsRoute(
 
     // Emergency pause blocks ALL new provider traffic — embeddings included, so
     // it isn't a bypass during an incident (parity with the chat pipeline).
-    const pause = await assertAiRequestsNotPaused(rdeps.pool);
+    const pause = await assertAiRequestsNotPaused(rdeps.pool, request.ctx.tenantId);
     if (pause.paused) {
       return sendError(
         reply,
@@ -137,6 +140,7 @@ export function registerEmbeddingsRoute(
       pool: rdeps.pool,
       litellm: rdeps.litellm,
       observability: rdeps.observability,
+      billing: rdeps.billing,
       policyMeta: rdeps.policyMeta
         ? { ...rdeps.policyMeta, tenantId: request.ctx.tenantId }
         : (request.ctx.tenantId ? { tenantId: request.ctx.tenantId } : undefined),

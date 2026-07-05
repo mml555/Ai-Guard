@@ -1,4 +1,7 @@
-# Cloud-provider overlay for local development with real OpenAI/Anthropic keys.
+# Cloud-provider OVERLAY for local development with real OpenAI/Anthropic keys.
+# This is an overlay, not a standalone stack — it only redefines the litellm
+# service and will NOT run on its own. Layer it over the simple base file:
+#   docker compose -f docker-compose.simple.yml -f docker-compose.cloud.yml up --build
 
 name: modelgov
 

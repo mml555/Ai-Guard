@@ -1,4 +1,5 @@
 import type { Pool } from "pg";
+import { appendRequestLogTenantScope } from "../../db/requestLogScope";
 
 export interface UsageSummaryFilters {
   since: Date;
@@ -98,10 +99,7 @@ function usageSummaryWhere(filters: UsageSummaryFilters): {
   const conditions = ["created_at >= $1::timestamptz"];
   const values: unknown[] = [filters.since.toISOString()];
 
-  if (filters.tenantScope) {
-    values.push(filters.tenantScope);
-    conditions.push(`tenant_id = $${values.length}`);
-  }
+  appendRequestLogTenantScope(conditions, values, filters.tenantScope);
   if (filters.projectScope) {
     values.push(filters.projectScope);
     conditions.push(`project_id = $${values.length}`);

@@ -33,8 +33,6 @@ export const ROLE_PERMISSIONS: Record<string, Permission[]> = {
   owner: [...KNOWN_PERMISSIONS],
 };
 
-export const KNOWN_ROLES = Object.keys(ROLE_PERMISSIONS);
-
 /** Expand a set of role names into the union of their permissions. */
 export function permissionsForRoles(roles: readonly string[]): string[] {
   const out = new Set<string>();

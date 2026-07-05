@@ -1,4 +1,5 @@
-import { prepareChatCall, executeSyncChat } from "./pipeline";
+import { prepareChatCall } from "./prepare";
+import { executeSyncChat } from "./pipeline";
 import type { ChatInput, ChatResult, ChatServiceDeps } from "./types";
 
 export async function handleChat(

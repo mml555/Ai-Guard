@@ -3,6 +3,7 @@ import type { Pool } from "pg";
 import { monthWindowStart } from "../../services/windows";
 import { claimGlobalMonthlyBudgetAlert } from "./budgetAlertRepo";
 import { enqueueWebhook } from "../../services/webhookOutbox";
+import { assertPublicHttpUrl } from "../../util/httpUrlGuard";
 
 export interface BudgetAlertPayload {
   globalSpendUsd: number;
@@ -17,6 +18,8 @@ export interface BudgetAlertWebhookConfig {
   secret?: string;
   fetchImpl?: typeof fetch;
   timeoutMs?: number;
+  /** Mirrors BUDGET_ALERT_WEBHOOK_ALLOW_PRIVATE (set by resolveBudgetAlert). */
+  allowPrivateHosts?: boolean;
 }
 
 /**
@@ -99,13 +102,26 @@ async function deliverWebhook(
     webhook.timeoutMs ?? 10_000,
   );
   try {
-    const res = await doFetch(webhook.url, {
+    // Re-apply the SSRF guard at this fallback sink (parity with the outbox sink):
+    // POST the guard-checked, normalized URL and refuse redirects, so a validated
+    // public host can't bounce the signed payload to an internal/link-local
+    // address (e.g. the cloud metadata endpoint).
+    const target = assertPublicHttpUrl(webhook.url, {
+      allowPrivate: webhook.allowPrivateHosts,
+    });
+    const res = await doFetch(target.href, {
       method: "POST",
       headers,
       body: json,
       signal: controller.signal,
+      redirect: "manual",
     });
-    if (!res.ok) {
+    if (res.type === "opaqueredirect" || (res.status >= 300 && res.status < 400)) {
+      log?.error?.(
+        { status: res.status, url: webhook.url },
+        "budget alert webhook attempted a redirect; refusing to follow (SSRF guard)",
+      );
+    } else if (!res.ok) {
       log?.error?.(
         { status: res.status, url: webhook.url },
         "budget alert webhook returned non-2xx",

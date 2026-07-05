@@ -4,7 +4,7 @@ import { logRequest } from "../usage/auditLogRepo";
 import { recordActualCost, recordIncurredCost, releaseBudget } from "../usage/repo";
 import { releasePath, settlePath } from "../budgets/repo";
 import { bookSafetyIfAny, releaseBillingCredits, releaseWithSafety, settleBillingCredits } from "./lifecycle";
-import { prepareChatCall, type PreparedCall } from "./pipeline";
+import { prepareChatCall, type PreparedCall } from "./prepare";
 import { createHierarchicalIncurSafety } from "./prep-hierarchical";
 import { baseLog, baseObs } from "./mapper";
 import type { ChatFailure, ChatInput, ChatServiceDeps } from "./types";
@@ -33,9 +33,17 @@ export async function settleStream(
   const reservedUsd = hold.reservedUsd;
   const actualCostUsd =
     final.actualCostUsd != null ? final.actualCostUsd + safetyCostUsd : reservedUsd;
+  // credits_only: the wallet is the sole ledger; the internal reserve was skipped
+  // so there is no lease to settle — touching budget_counters here would UPSERT a
+  // spurious row. settleBillingCredits below debits the wallet. (Parity with
+  // executeSyncChat's skipInternalBudget guard.)
+  const skipInternalBudget =
+    deps.billing?.enabled === true && deps.billing.mode === "credits_only";
 
   try {
-    if (hold.mode === "flat") {
+    if (skipInternalBudget) {
+      // no internal ledger in credits_only
+    } else if (hold.mode === "flat") {
       await recordActualCost(pool, {
         projectId: aiRequest.projectId,
         userId: aiRequest.userId,
@@ -91,6 +99,7 @@ export async function settleStream(
     reservedUsd,
     actualCostUsd,
     requestId,
+    creditHoldId: ctx.hold.mode === "flat" ? ctx.hold.creditHoldId : undefined,
   });
   return requestId;
 }
@@ -129,9 +138,14 @@ export async function settleStreamPartial(
     hold.reservedUsd,
   );
   const estInputTokens = aiRequest.inputTokensEstimate ?? 0;
+  // credits_only: wallet is the sole ledger (no internal lease to settle).
+  const skipInternalBudget =
+    deps.billing?.enabled === true && deps.billing.mode === "credits_only";
 
   try {
-    if (hold.mode === "flat") {
+    if (skipInternalBudget) {
+      // no internal ledger in credits_only
+    } else if (hold.mode === "flat") {
       await recordActualCost(pool, {
         projectId: aiRequest.projectId,
         userId: aiRequest.userId,
@@ -175,6 +189,7 @@ export async function settleStreamPartial(
     reservedUsd: hold.reservedUsd,
     actualCostUsd,
     requestId: requestId ?? "",
+    creditHoldId: hold.mode === "flat" ? hold.creditHoldId : undefined,
   });
   observability.recordChat({
     ...baseObs(aiRequest, decision),
@@ -191,8 +206,15 @@ export async function settleStreamPartial(
 
 export async function releaseStream(deps: ChatServiceDeps, ctx: StreamContext): Promise<void> {
   const { hold, aiRequest, decision, now, safetyCostUsd } = ctx;
+  // credits_only: wallet is the sole ledger — releaseBillingCredits below books
+  // any incurred safety spend and frees the hold. Touching the internal counters
+  // here (recordIncurredCost UPSERTs) would create spurious budget_counters rows.
+  const skipInternalBudget =
+    deps.billing?.enabled === true && deps.billing.mode === "credits_only";
   try {
-    if (hold.mode === "flat") {
+    if (skipInternalBudget) {
+      // no internal ledger in credits_only
+    } else if (hold.mode === "flat") {
       await releaseWithSafety(
         (costUsd) =>
           recordIncurredCost(deps.pool, {
@@ -233,5 +255,6 @@ export async function releaseStream(deps: ChatServiceDeps, ctx: StreamContext): 
     userId: aiRequest.userId,
     reservedUsd: hold.reservedUsd,
     incurredUsd: safetyCostUsd,
+    creditHoldId: hold.mode === "flat" ? hold.creditHoldId : undefined,
   });
 }

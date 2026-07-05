@@ -86,42 +86,46 @@ describe.skipIf(!DATABASE_URL)("safety cost is reserved upfront (integration)", 
     });
   }
 
-  async function userDailyCounter(): Promise<{ used: number; reserved: number }> {
+  async function userDailyCounter(userId: string): Promise<{ used: number; reserved: number }> {
     const { rows } = await pool.query(
-      "SELECT used_usd, reserved_usd FROM budget_counters WHERE scope = 'user_daily'",
+      "SELECT used_usd, reserved_usd FROM budget_counters WHERE scope = 'user_daily' AND key = $1",
+      [userId],
     );
     return rows.length === 0
       ? { used: 0, reserved: 0 }
       : { used: Number(rows[0].used_usd), reserved: Number(rows[0].reserved_usd) };
   }
 
-  const body = {
-    userId: "u1", userType: "logged_in", feature: "support_chat",
+  const body = (userId: string) => ({
+    userId, userType: "logged_in", feature: "support_chat",
     messages: [{ role: "user", content: "hi" }], inputTokensEstimate: INPUT_TOKENS,
-  };
+  });
 
-  function post(server: FastifyInstance) {
-    return server.inject({ method: "POST", url: "/v1/chat", headers: { authorization: "Bearer secret" }, payload: body });
+  function post(server: FastifyInstance, userId: string) {
+    return server.inject({ method: "POST", url: "/v1/chat", headers: { authorization: "Bearer secret" }, payload: body(userId) });
   }
 
   it("blocks when model estimate fits but model + safety exceeds the cap — and still books the safety spend", async () => {
     // cap 0.15: model (~0.0975) alone fits, but model + safety (~0.1975) does not.
-    const res = await post(app(0.15));
+    const userId = "safety-cap-block";
+    const res = await post(app(0.15), userId);
     expect(res.statusCode).toBe(403);
     expect(res.json().error.code).toBe("budget_exceeded");
     // The reservation rolled back, but the classifier call already happened:
     // its cost lands in used_usd (no cap check — booking never gates), with
     // nothing left reserved.
-    const c = await userDailyCounter();
+    const c = await userDailyCounter(userId);
     expect(c.used).toBeCloseTo(SAFETY_COST, 4);
     expect(c.reserved).toBeCloseTo(0, 6);
   });
 
   it("admits when the cap covers model + safety, and settles both", async () => {
-    const res = await post(app(0.3));
+    const userId = "safety-admit";
+    const res = await post(app(0.3), userId);
     expect(res.statusCode).toBe(200);
     const { rows } = await pool.query(
-      "SELECT used_usd FROM budget_counters WHERE scope = 'user_daily'",
+      "SELECT used_usd FROM budget_counters WHERE scope = 'user_daily' AND key = $1",
+      [userId],
     );
     // settled used = model actual (0.0975) + safety (0.10) ≈ 0.1975
     expect(Number(rows[0].used_usd)).toBeCloseTo(0.1975, 4);
@@ -129,6 +133,7 @@ describe.skipIf(!DATABASE_URL)("safety cost is reserved upfront (integration)", 
 
   it("books the classifier cost when input safety BLOCKS the request", async () => {
     let providerCalls = 0;
+    const userId = "safety-input-block";
     const res = await post(
       app(10, {
         safety: new CostlyBlockingSafety(),
@@ -139,19 +144,21 @@ describe.skipIf(!DATABASE_URL)("safety cost is reserved upfront (integration)", 
           },
         },
       }),
+      userId,
     );
     expect(res.statusCode).toBe(403);
     expect(res.json().error.code).toBe("safety_blocked");
     expect(providerCalls).toBe(0); // blocked before any model call
 
     // The scan was real spend: booked to used_usd with no reservation residue.
-    const c = await userDailyCounter();
+    const c = await userDailyCounter(userId);
     expect(c.used).toBeCloseTo(SAFETY_COST, 4);
     expect(c.reserved).toBeCloseTo(0, 6);
 
     // The audit row carries the incurred cost.
     const { rows } = await pool.query(
-      "SELECT status, actual_cost_usd FROM request_logs",
+      "SELECT status, actual_cost_usd FROM request_logs WHERE user_id = $1",
+      [userId],
     );
     expect(rows).toHaveLength(1);
     expect(rows[0].status).toBe("safety_blocked");
@@ -164,6 +171,7 @@ describe.skipIf(!DATABASE_URL)("safety cost is reserved upfront (integration)", 
     // cap rejects. Historically this branch released the reservation WITHOUT
     // booking the classifier spend — the one rejection path 1.3 missed.
     let fallbackCalled = false;
+    const userId = "safety-fallback-topup";
     const server = buildServer({
       config: config(0.25, "anthropic/claude-haiku"),
       pool,
@@ -183,23 +191,24 @@ describe.skipIf(!DATABASE_URL)("safety cost is reserved upfront (integration)", 
       method: "POST",
       url: "/v1/chat",
       headers: { authorization: "Bearer secret" },
-      payload: body,
+      payload: body(userId),
     });
     expect(res.statusCode).toBe(403);
     expect(res.json().error.code).toBe("budget_exceeded");
     expect(fallbackCalled).toBe(false); // top-up rejected before the fallback call
 
-    const c = await userDailyCounter();
+    const c = await userDailyCounter(userId);
     expect(c.used).toBeCloseTo(SAFETY_COST, 4);
     expect(c.reserved).toBeCloseTo(0, 6);
 
-    const { rows } = await pool.query("SELECT status, actual_cost_usd FROM request_logs");
+    const { rows } = await pool.query("SELECT status, actual_cost_usd FROM request_logs WHERE user_id = $1", [userId]);
     expect(rows).toHaveLength(1);
     expect(rows[0].status).toBe("failed");
     expect(Number(rows[0].actual_cost_usd)).toBeCloseTo(SAFETY_COST, 4);
   });
 
   it("retains the safety spend when the provider fails after reservation", async () => {
+    const userId = "safety-provider-down";
     const res = await post(
       app(0.3, {
         litellm: {
@@ -208,15 +217,17 @@ describe.skipIf(!DATABASE_URL)("safety cost is reserved upfront (integration)", 
           },
         },
       }),
+      userId,
     );
     expect(res.statusCode).toBe(502);
     // Model portion released, safety portion kept as used.
-    const c = await userDailyCounter();
+    const c = await userDailyCounter(userId);
     expect(c.used).toBeCloseTo(SAFETY_COST, 4);
     expect(c.reserved).toBeCloseTo(0, 6);
 
     const { rows } = await pool.query(
-      "SELECT status, actual_cost_usd FROM request_logs",
+      "SELECT status, actual_cost_usd FROM request_logs WHERE user_id = $1",
+      [userId],
     );
     expect(rows).toHaveLength(1);
     expect(rows[0].status).toBe("failed");

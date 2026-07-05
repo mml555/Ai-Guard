@@ -25,5 +25,8 @@ fi
 
 cd "$ROOT"
 npx wait-on "tcp:localhost:${PG_PORT}" --timeout 60000
+until docker exec "$CONTAINER_NAME" pg_isready -U postgres -d modelgov >/dev/null 2>&1; do
+  sleep 1
+done
 export DATABASE_URL
 pnpm test "$@"

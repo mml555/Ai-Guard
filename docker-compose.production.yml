@@ -60,6 +60,13 @@ services:
       RATE_LIMIT_FAIL_OPEN: ${RATE_LIMIT_FAIL_OPEN:-false}
       REQUEST_LOG_RETENTION_MS: ${REQUEST_LOG_RETENTION_MS:-2592000000}
       BUDGET_ALERT_WEBHOOK_ALLOW_PRIVATE: ${BUDGET_ALERT_WEBHOOK_ALLOW_PRIVATE:-false}
+      # Stripe billing (modelgov.yaml `billing:` section). This env allowlist is
+      # the only thing the container sees — without these lines, setting the
+      # vars in .env.production silently does nothing.
+      STRIPE_SECRET_KEY: ${STRIPE_SECRET_KEY:-}
+      STRIPE_WEBHOOK_SECRET: ${STRIPE_WEBHOOK_SECRET:-}
+      # selfhost (default) or multitenant — gates tenant-isolation posture checks.
+      MODELGOV_DEPLOY_PROFILE: ${MODELGOV_DEPLOY_PROFILE:-}
     volumes:
       - ./modelgov.yaml:/app/modelgov.yaml:ro
     ports:

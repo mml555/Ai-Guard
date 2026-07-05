@@ -13,8 +13,8 @@ always server-side. Every request declares a **user**, **user type**, and
 pip install modelgov
 ```
 
-> Note: `modelgov` is not yet published to PyPI. Until then, install from
-> source with the editable install below (see also [self-host.md](../../docs/self-host.md)).
+Published on PyPI as `modelgov` (>= 1.1.0). To develop against local SDK
+changes, install from source instead (see also [self-host.md](../../docs/self-host.md)).
 
 From the monorepo (editable, with test deps):
 

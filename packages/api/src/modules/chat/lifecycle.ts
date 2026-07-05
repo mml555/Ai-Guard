@@ -18,77 +18,11 @@ import { logRequest, type RequestLogRow } from "../usage/auditLogRepo";
 import { budgetErrorContext, policyErrorFromDecision, policyErrorMessage } from "../../policyErrors";
 import type { BudgetScope } from "../usage/repo";
 import type { ChatMessage } from "../../types";
-import type { BillingService } from "../billing/service";
 
-type SettleLog = { error(obj: unknown, msg: string): void } | undefined;
-
-/**
- * Settle a credit reservation once the model call has run: book the actual
- * spend against the wallet (releasing the full reservation) and record the
- * Stripe meter event. No-op unless billing uses credits (hybrid/credits_only).
- * Must be called on EVERY post-model-call exit — success AND
- * output-safety/grounding blocks — or the reservation leaks. Metering is
- * skipped when no request id is available (e.g. audit-write failure).
- *
- * Billing model: prepaid credits are the single source of truth for usage
- * billing — the wallet debit here IS the charge. The recorded meter event is
- * only forwarded to Stripe when `stripe.meter_event_name` is set, and config
- * validation forbids setting that alongside a credits mode (it would bill the
- * same usage twice). So under prepaid credits `recordMeter` writes only the
- * local usage row; nothing reaches a priced Stripe meter.
- */
-export async function settleBillingCredits(
-  billing: BillingService | undefined,
-  log: SettleLog,
-  params: {
-    tenantId: string;
-    userId: string;
-    feature: string;
-    reservedUsd: number;
-    actualCostUsd: number;
-    requestId: string;
-  },
-): Promise<void> {
-  if (!billing?.usesCredits()) return;
-  try {
-    await billing.settleCredits(params.tenantId, params.userId, params.reservedUsd, params.actualCostUsd);
-    if (params.requestId) {
-      await billing.recordMeter({
-        requestId: params.requestId,
-        tenantId: params.tenantId,
-        userId: params.userId,
-        feature: params.feature,
-        costUsd: params.actualCostUsd,
-      });
-    }
-  } catch (err) {
-    log?.error({ err, requestId: params.requestId }, "billing credit settlement failed");
-  }
-}
-
-/**
- * Release a credit reservation when the model call did not run. If safety /
- * prompt-injection spend was already incurred (`incurredUsd`), that portion is
- * booked from the wallet and only the remainder is released — a full refund
- * would give back credits for classifier work that was actually paid for.
- */
-export async function releaseBillingCredits(
-  billing: BillingService | undefined,
-  log: SettleLog,
-  params: { tenantId: string; userId: string; reservedUsd: number; incurredUsd?: number },
-): Promise<void> {
-  if (!billing?.usesCredits()) return;
-  try {
-    const incurred = params.incurredUsd ?? 0;
-    if (incurred > 0) {
-      await billing.settleCredits(params.tenantId, params.userId, params.reservedUsd, incurred);
-    } else {
-      await billing.releaseCredits(params.tenantId, params.userId, params.reservedUsd);
-    }
-  } catch (err) {
-    log?.error({ err }, "billing credit release failed");
-  }
-}
+// Billing settlement/release semantics are shared with non-chat surfaces
+// (embeddings); they live in the billing module and are re-exported here so
+// the chat composers keep one import site for lifecycle vocabulary.
+export { releaseBillingCredits, settleBillingCredits } from "../billing/settlement";
 import { auditUnavailableFailure, baseLog, baseObs, fail, type PolicyMeta } from "./mapper";
 import type { ChatFailure } from "./types";
 
@@ -113,26 +47,6 @@ export interface TopUpOutcome {
   failedScope?: BudgetScope;
   /** The pricier fallback exceeded the user's remaining credit wallet. */
   insufficientCredits?: boolean;
-}
-
-/**
- * Per-request budget operations. A strategy is stateful: `reserve` captures the
- * hold (lease / path reservation) that `release` and `settle` later operate on.
- * Flat injects `usage/repo`; hierarchical injects `budgets/repo` with the
- * request's node path and shard key. Consumed by the provider-execution helper
- * (Phase B); the rejection helpers below need only `incur`.
- */
-export interface BudgetStrategy {
-  reserve(estimateUsd: number): Promise<ReserveOutcome>;
-  /** Book already-spent money (classifier cost). No cap check; no-op at <= 0. */
-  incur(costUsd: number): Promise<void>;
-  /** Free the current hold in full. */
-  release(): Promise<void>;
-  /** Book actual cost against the hold and drop the lease. */
-  settle(actualUsd: number, actualTokens?: number): Promise<void>;
-  /** Grow the hold for a pricier fallback. Flat only — hierarchical omits it
-   * (a pricier fallback settles truthfully, overshooting the estimate). */
-  topUp?(additionalUsd: number): Promise<TopUpOutcome>;
 }
 
 export type IncurFn = (costUsd: number) => Promise<void>;

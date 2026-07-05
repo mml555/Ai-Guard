@@ -7,6 +7,7 @@ import {
   type UsageSnapshot,
 } from "@modelgov/policy-engine";
 import { resolveUserPath } from "./paths.js";
+import { zeroUsage } from "./flags.js";
 
 export interface ExplainFlags {
   userId: string;
@@ -29,12 +30,14 @@ export function loadConfigFromPath(path: string): ModelgovConfig {
 export function explainLocally(
   config: ModelgovConfig,
   flags: ExplainFlags,
-  usage: UsageSnapshot = emptyUsage(),
+  usage: UsageSnapshot = zeroUsage(),
 ): Record<string, unknown> {
-  const feature = config.features[flags.feature!];
-  const userBudget = config.budgets.byUserType[flags.userType!];
-  const requestedFeature = flags.feature!;
-  const requestedUserType = flags.userType!;
+  if (!flags.feature) throw new Error("--feature is required");
+  if (!flags.userType) throw new Error("--userType is required");
+  const requestedFeature = flags.feature;
+  const requestedUserType = flags.userType;
+  const feature = config.features[requestedFeature];
+  const userBudget = config.budgets.byUserType[requestedUserType];
   const requestedModelClass = flags.modelClass ?? feature?.modelClass ?? "";
 
   try {
@@ -135,25 +138,13 @@ export async function runExplain(flags: ExplainFlags): Promise<void> {
     }),
   });
 
-  const body = (await res.json()) as Record<string, unknown>;
+  const body = (await res.json().catch(() => ({}))) as Record<string, unknown>;
   if (!res.ok) {
     const err = body.error as { message?: string; code?: string } | undefined;
     throw new Error(err?.message ?? `explain failed (${res.status})`);
   }
 
   print(body, flags.json);
-}
-
-function emptyUsage(): UsageSnapshot {
-  return {
-    userDailyUsdUsed: 0,
-    userDailyUsdReserved: 0,
-    userDailyRequestsUsed: 0,
-    featureMonthlyUsdUsed: 0,
-    featureMonthlyUsdReserved: 0,
-    globalMonthlyUsdUsed: 0,
-    globalMonthlyUsdReserved: 0,
-  };
 }
 
 function formatSummary(body: {

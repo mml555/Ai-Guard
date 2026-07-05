@@ -19,6 +19,12 @@ vi.mock("../src/modules/budgets/repo", () => ({
   cleanupStaleNodeLeases: vi.fn(),
 }));
 
+vi.mock("../src/modules/billing/repo", () => ({
+  cleanupStaleBillingLeases: vi.fn(),
+  cleanupMeterEvents: vi.fn(async () => ({ reported: 0, abandoned: 0 })),
+  cleanupStripeProcessedEvents: vi.fn(async () => 0),
+}));
+
 vi.mock("../src/modules/usage/auditLogRepo", () => ({
   cleanupOldRequestLogs: vi.fn(),
   cleanupOldRequestLogsForFeature: vi.fn(),
@@ -33,6 +39,7 @@ vi.mock("../src/db/advisoryLock", () => ({
 
 vi.mock("../src/services/webhookOutbox", () => ({
   claimPendingWebhooks: vi.fn(async () => []),
+  cleanupWebhookOutbox: vi.fn(async () => 0),
   markWebhookDelivered: vi.fn(),
   markWebhookFailed: vi.fn(),
 }));
@@ -42,6 +49,7 @@ import {
   cleanupStaleIdempotencyKeys,
 } from "../src/modules/idempotency/repo";
 import { cleanupStaleNodeLeases } from "../src/modules/budgets/repo";
+import { cleanupStaleBillingLeases } from "../src/modules/billing/repo";
 import {
   cleanupOldRequestLogs,
   cleanupOldRequestLogsForFeature,
@@ -66,6 +74,7 @@ describe("runMaintenanceSweep", () => {
     vi.mocked(cleanupCompletedIdempotencyKeys).mockResolvedValue(0);
     vi.mocked(cleanupStaleReservationLeases).mockResolvedValue(0);
     vi.mocked(cleanupStaleNodeLeases).mockResolvedValue(0);
+    vi.mocked(cleanupStaleBillingLeases).mockResolvedValue(0);
     vi.mocked(cleanupOldRequestLogs).mockResolvedValue(0);
     vi.mocked(cleanupOldRequestLogsForFeature).mockResolvedValue(0);
   });
@@ -143,6 +152,7 @@ describe("startMaintenance", () => {
     vi.mocked(cleanupCompletedIdempotencyKeys).mockResolvedValue(0);
     vi.mocked(cleanupStaleReservationLeases).mockResolvedValue(0);
     vi.mocked(cleanupStaleNodeLeases).mockResolvedValue(0);
+    vi.mocked(cleanupStaleBillingLeases).mockResolvedValue(0);
     vi.mocked(cleanupOldRequestLogs).mockResolvedValue(0);
     vi.mocked(tryWithAdvisoryLock).mockImplementation(async (_p, _k, fn) => {
       await fn();

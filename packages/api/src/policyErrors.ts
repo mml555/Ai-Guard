@@ -8,7 +8,7 @@ export interface PolicyErrorContext {
   userType: string;
   userId: string;
   reason?: string;
-  reasonCode?: PolicyReasonCode | string;
+  reasonCode?: PolicyReasonCode;
   budgetRemaining?: BudgetRemaining;
   resolvedModelClass?: string;
   scope?: BudgetScope;

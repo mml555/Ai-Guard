@@ -1,6 +1,6 @@
 fastapi>=0.110
 uvicorn>=0.29
-# The Modelgov Python SDK (packages/sdk-python). It is not yet published to
-# PyPI, so install it from source (editable) from this repo:
--e ../../packages/sdk-python
-# Once published, this becomes: modelgov
+# The Modelgov Python SDK is published on PyPI as `modelgov` (>= 1.1.0):
+modelgov>=1.1.0
+# To develop against local SDK changes instead, install it editable from source:
+#   pip install -e ../../packages/sdk-python

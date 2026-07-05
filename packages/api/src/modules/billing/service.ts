@@ -1,4 +1,4 @@
-import type { BillingConfig, BillingMode } from "@modelgov/policy-engine";
+import type { BillingMode } from "@modelgov/policy-engine";
 import type { Pool } from "pg";
 import {
   findAccountByStripeCustomer,
@@ -12,26 +12,48 @@ import {
   topUpCreditsInTransaction,
   upsertBillingAccount,
 } from "./repo";
-import { createStripeMeterEvent, verifyStripeWebhookSignature, type StripeEvent } from "./stripe";
+import {
+  createStripeMeterEvent,
+  verifyStripeWebhookSignature,
+  type StripeCheckoutSession,
+  type StripeEvent,
+  type StripeInvoice,
+  type StripeSubscription,
+} from "./stripe";
+import { mapWithConcurrency } from "../../util/concurrency";
 import type { BillingBalance, BillingServiceConfig } from "./types";
 
 export interface BillingService {
   readonly enabled: boolean;
   readonly mode: BillingMode;
   usesCredits(): boolean;
+  /** True when usage is invoiced via a Stripe Billing Meter (mode "metered"). */
+  usesMeter(): boolean;
   getBalance(tenantId: string, userId: string): Promise<BillingBalance>;
   checkCredits(
     tenantId: string,
     userId: string,
     estimatedUsd: number,
   ): Promise<{ ok: true; availableUsd: number } | { ok: false; availableUsd: number }>;
-  reserveCredits(tenantId: string, userId: string, amountUsd: number): Promise<boolean>;
-  releaseCredits(tenantId: string, userId: string, amountUsd: number): Promise<void>;
+  /** holdId groups a request's leases so a crashed request can be swept. */
+  reserveCredits(
+    tenantId: string,
+    userId: string,
+    amountUsd: number,
+    holdId?: string,
+  ): Promise<boolean>;
+  releaseCredits(
+    tenantId: string,
+    userId: string,
+    amountUsd: number,
+    holdId?: string,
+  ): Promise<void>;
   settleCredits(
     tenantId: string,
     userId: string,
     reservedUsd: number,
     actualUsd: number,
+    holdId?: string,
   ): Promise<void>;
   recordMeter(
     params: {
@@ -71,16 +93,31 @@ export function createBillingService(
   const planMap = billing.stripe?.planMap ?? {};
   const usdPerCredit = billing.stripe?.usdPerCredit ?? 0.01;
   const meterEventName = billing.stripe?.meterEventName;
+  const fetchImpl = opts.fetchImpl ?? fetch;
+  const usesCredits = billing.mode === "hybrid" || billing.mode === "credits_only";
 
-  // Defense in depth (config validation already enforces this): reaching here
-  // means mode is hybrid|credits_only, i.e. usage is billed via prepaid credits.
-  // A Stripe usage meter would invoice that same usage a second time, so refuse
-  // to construct a service that would double-bill.
-  if (meterEventName) {
+  // Defense in depth (config validation already enforces both): prepaid credits
+  // and a Stripe usage meter must never coexist — the wallet debit and the
+  // metered invoice would charge the same usage twice. Conversely, metered mode
+  // has no other way to bill usage, so the meter event name is mandatory there.
+  if (usesCredits && meterEventName) {
     throw new Error(
       `billing.mode "${billing.mode}" bills usage by debiting the prepaid credit wallet ` +
         "and cannot be combined with a Stripe usage meter (stripe.meterEventName) — the " +
-        "same usage would be invoiced a second time. Remove stripe.meterEventName.",
+        'same usage would be invoiced a second time. Remove stripe.meterEventName, or switch to mode "metered".',
+    );
+  }
+  if (billing.mode === "metered" && !meterEventName) {
+    throw new Error(
+      'billing.mode "metered" requires stripe.meterEventName — usage is billed by reporting it to that Stripe Billing Meter.',
+    );
+  }
+  if (billing.mode === "metered" && !stripeSecret) {
+    // Without a Stripe secret the meter flush no-ops, so metered usage is
+    // recorded, never reported, then pruned as "abandoned" — silently unbilled.
+    // Fail fast instead of losing revenue.
+    throw new Error(
+      'billing.mode "metered" requires a Stripe secret key (stripe.secretKey / STRIPE_SECRET_KEY) — usage is billed by reporting meter events to Stripe, which cannot happen without it.',
     );
   }
 
@@ -88,7 +125,10 @@ export function createBillingService(
     enabled: true,
     mode: billing.mode,
     usesCredits() {
-      return billing.mode === "hybrid" || billing.mode === "credits_only";
+      return usesCredits;
+    },
+    usesMeter() {
+      return Boolean(meterEventName);
     },
 
     async getBalance(tenantId, userId) {
@@ -114,18 +154,36 @@ export function createBillingService(
       return { ok: false, availableUsd: balance.creditsAvailableUsd };
     },
 
-    reserveCredits(tenantId, userId, amountUsd) {
-      if (amountUsd <= 0) return Promise.resolve(true);
-      return reserveCredits(pool, { tenantId, userId, amountUsd });
+    async reserveCredits(tenantId, userId, amountUsd, holdId) {
+      const amount = Math.max(amountUsd, 0);
+      if (amount <= 0) {
+        // Without a hold a zero-amount reserve records nothing and trivially
+        // succeeds. With a hold the repo still writes the (zero) lease so the
+        // lease-gated settle can book the actual cost — but the zero amount skips
+        // the balance UPDATE, so an out-of-credit wallet would slip past the gate
+        // and later be debited (floored at 0) for real spend. Gate it: require a
+        // funded wallet, so an empty account still gets a 402 instead of free use.
+        if (!holdId) return true;
+        const account = await getBillingAccount(pool, tenantId, userId);
+        const available = Math.max(
+          (account?.creditsUsd ?? 0) - (account?.creditsReservedUsd ?? 0),
+          0,
+        );
+        if (available <= 0) return false;
+      }
+      return reserveCredits(pool, { tenantId, userId, amountUsd: amount, holdId });
     },
 
-    releaseCredits(tenantId, userId, amountUsd) {
-      if (amountUsd <= 0) return Promise.resolve();
-      return releaseCredits(pool, { tenantId, userId, amountUsd });
+    releaseCredits(tenantId, userId, amountUsd, holdId) {
+      // With a holdId even a zero-amount release must reach the repo: reserve
+      // recorded a (possibly zero-amount) lease, and only deleting it cleans the
+      // hold — otherwise the lease lingers until the stale-lease sweep.
+      if (amountUsd <= 0 && !holdId) return Promise.resolve();
+      return releaseCredits(pool, { tenantId, userId, amountUsd: Math.max(amountUsd, 0), holdId });
     },
 
-    settleCredits(tenantId, userId, reservedUsd, actualUsd) {
-      return settleCredits(pool, { tenantId, userId, reservedUsd, actualUsd });
+    settleCredits(tenantId, userId, reservedUsd, actualUsd, holdId) {
+      return settleCredits(pool, { tenantId, userId, reservedUsd, actualUsd, holdId });
     },
 
     async recordMeter(params) {
@@ -140,27 +198,37 @@ export function createBillingService(
 
     async flushPendingMeters(log) {
       if (!stripeSecret || !meterEventName) return 0;
+      // The repo query only returns rows whose billing account has a Stripe
+      // customer id: a row without one can never be reported, and with the
+      // batch's ORDER BY created_at LIMIT it would otherwise permanently occupy
+      // batch slots and starve newer events. Customer-less rows are left
+      // pending for the retention sweep to prune.
       const pending = await listPendingMeterEvents(pool);
-      let reported = 0;
-      for (const event of pending) {
-        const account = await getBillingAccount(pool, event.tenantId, event.userId);
-        if (!account?.stripeCustomerId) continue;
+      // Independent, idempotent POSTs (keyed by requestId) — report them with
+      // bounded concurrency so a large backlog drains within a tick instead of
+      // serializing up to `limit` round trips at hundreds of ms each.
+      const outcomes = await mapWithConcurrency(pending, 8, async (event) => {
         try {
-          const id = await createStripeMeterEvent(stripeSecret, {
-            eventName: meterEventName,
-            stripeCustomerId: account.stripeCustomerId,
-            value: event.costUsd,
-            identifier: event.requestId,
-          });
+          const id = await createStripeMeterEvent(
+            stripeSecret,
+            {
+              eventName: meterEventName,
+              stripeCustomerId: event.stripeCustomerId,
+              value: event.costUsd,
+              identifier: event.requestId,
+            },
+            fetchImpl,
+          );
           if (id) {
             await markMeterReported(pool, event.requestId, id);
-            reported += 1;
+            return true;
           }
         } catch (err) {
           log?.error({ err, requestId: event.requestId }, "stripe meter report failed");
         }
-      }
-      return reported;
+        return false;
+      });
+      return outcomes.filter(Boolean).length;
     },
 
     async handleStripeWebhook(rawBody, signature, log) {
@@ -172,7 +240,12 @@ export function createBillingService(
       }
 
       const event = JSON.parse(rawBody.toString("utf8")) as StripeEvent;
-      await applyStripeEvent(pool, event, { planMap, usdPerCredit, log });
+      await applyStripeEvent(pool, event, {
+        planMap,
+        usdPerCredit,
+        downgradeUserType: billing.stripe?.downgradeUserType ?? "free_user",
+        log,
+      });
     },
 
     async adminTopUp(params) {
@@ -187,6 +260,8 @@ async function applyStripeEvent(
   opts: {
     planMap: Record<string, string>;
     usdPerCredit: number;
+    /** user_type applied on invoice.payment_failed (config: stripe.downgrade_user_type). */
+    downgradeUserType: string;
     log?: { warn(obj: unknown, msg: string): void };
   },
 ): Promise<void> {
@@ -194,11 +269,7 @@ async function applyStripeEvent(
 
   switch (event.type) {
     case "checkout.session.completed": {
-      const session = obj as {
-        customer?: string;
-        metadata?: Record<string, string>;
-        amount_total?: number;
-      };
+      const session = obj as StripeCheckoutSession;
       const userId = session.metadata?.user_id ?? session.metadata?.userId;
       if (!userId) return;
       const customerId = typeof session.customer === "string" ? session.customer : undefined;
@@ -221,13 +292,18 @@ async function applyStripeEvent(
         );
         tenantId = "";
       }
+      // metadata.credits_usd is integrator-set free text: only honor a finite,
+      // positive number (guards against NaN / Infinity, e.g. "1e309", which the
+      // numeric column would reject and 500 the webhook). Otherwise fall back to
+      // the Stripe-authoritative amount_total.
+      const metaCredits = Number(session.metadata?.credits_usd);
       const creditsUsd =
-        Number(session.metadata?.credits_usd ?? 0) > 0
-          ? Number(session.metadata?.credits_usd)
+        Number.isFinite(metaCredits) && metaCredits > 0
+          ? metaCredits
           : session.amount_total != null
             ? session.amount_total / 100
             : 0;
-      if (creditsUsd > 0) {
+      if (creditsUsd > 0 && Number.isFinite(creditsUsd)) {
         await topUpCreditsInTransaction(pool, {
           tenantId,
           userId,
@@ -242,11 +318,7 @@ async function applyStripeEvent(
     }
     case "customer.subscription.updated":
     case "customer.subscription.created": {
-      const sub = obj as {
-        customer?: string;
-        status?: string;
-        items?: { data?: Array<{ price?: { id?: string } }> };
-      };
+      const sub = obj as StripeSubscription;
       const customerId = typeof sub.customer === "string" ? sub.customer : undefined;
       if (!customerId) return;
       const account = await findAccountByStripeCustomer(pool, customerId);
@@ -264,7 +336,7 @@ async function applyStripeEvent(
       break;
     }
     case "invoice.payment_failed": {
-      const invoice = obj as { customer?: string };
+      const invoice = obj as StripeInvoice;
       const customerId = typeof invoice.customer === "string" ? invoice.customer : undefined;
       if (!customerId) return;
       const account = await findAccountByStripeCustomer(pool, customerId);
@@ -272,7 +344,7 @@ async function applyStripeEvent(
       await upsertBillingAccount(pool, {
         tenantId: account.tenantId,
         userId: account.userId,
-        userType: "free_user",
+        userType: opts.downgradeUserType,
         stripeCustomerId: customerId,
       });
       break;
@@ -280,10 +352,4 @@ async function applyStripeEvent(
     default:
       break;
   }
-}
-
-export function resolveBillingFromConfig(config: {
-  billing?: BillingConfig;
-}): BillingConfig | undefined {
-  return config.billing;
 }

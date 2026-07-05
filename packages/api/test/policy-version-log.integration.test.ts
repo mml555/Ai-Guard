@@ -58,7 +58,10 @@ describe.skipIf(!DATABASE_URL)("config_hash / policy_version on request logs (in
     const requestId = chat.json().requestId as string;
 
     // Column is populated in the DB...
-    const { rows } = await pool.query("SELECT config_hash, policy_version FROM request_logs WHERE feature = 'support_chat'");
+    const { rows } = await pool.query(
+      "SELECT config_hash, policy_version FROM request_logs WHERE id = $1",
+      [requestId.replace(/^req_/, "")],
+    );
     expect(rows[0].config_hash).toBe("hash-abc123");
     expect(rows[0].policy_version).toBe("v7");
 

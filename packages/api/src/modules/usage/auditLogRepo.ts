@@ -1,4 +1,19 @@
 import type { Pool } from "pg";
+import type { PolicyReasonCode } from "@modelgov/policy-engine";
+import { appendRequestLogTenantScope } from "../../db/requestLogScope";
+
+/**
+ * Stable, machine-readable reason codes written to the audit log. Extends the
+ * pure engine's {@link PolicyReasonCode} contract with API-layer outcomes the
+ * engine has no concept of (grounding verification, credits+hierarchical). Kept
+ * as a union so a typo'd code fails to compile instead of silently shipping an
+ * undocumented value to clients that key off `reasonCode`.
+ */
+export type RequestReasonCode =
+  | PolicyReasonCode
+  | "billing_hierarchical_unsupported"
+  | "grounded"
+  | "grounding_refused";
 
 export interface RequestLogRow {
   tenantId?: string;
@@ -19,7 +34,7 @@ export interface RequestLogRow {
   piiMasked?: boolean;
   injectionBlocked?: boolean;
   error?: string;
-  reasonCode?: string;
+  reasonCode?: RequestReasonCode;
   traceTags?: unknown;
   safetyFindings?: unknown;
   /** Host-app metadata from the chat request (non-authoritative). */
@@ -104,64 +119,35 @@ export async function cleanupOldRequestLogsForFeature(
   return total;
 }
 
-const RECENT_STATS_SQL = `
-  SELECT
-    count(*)::text AS total,
-    count(*) FILTER (WHERE status <> 'ok')::text AS failed
-  FROM request_logs
-  WHERE created_at >= $1::timestamptz
-`;
-
-const RECENT_STATS_SQL_SCOPED = `
-  SELECT
-    count(*)::text AS total,
-    count(*) FILTER (WHERE status <> 'ok')::text AS failed
-  FROM request_logs
-  WHERE created_at >= $1::timestamptz
-    AND project_id = $2
-`;
-
-const RECENT_STATS_SQL_TENANT = `
-  SELECT
-    count(*)::text AS total,
-    count(*) FILTER (WHERE status <> 'ok')::text AS failed
-  FROM request_logs
-  WHERE created_at >= $1::timestamptz
-    AND tenant_id = $2
-`;
-
-const RECENT_STATS_SQL_TENANT_PROJECT = `
-  SELECT
-    count(*)::text AS total,
-    count(*) FILTER (WHERE status <> 'ok')::text AS failed
-  FROM request_logs
-  WHERE created_at >= $1::timestamptz
-    AND tenant_id = $2
-    AND project_id = $3
-`;
-
 /**
  * Count request_logs rows (total and failed) since `since`, optionally scoped to
- * a project partition. Powers the operator usage summary.
+ * a tenant and/or project partition. Powers the operator usage summary.
+ *
+ * The tenant partition MUST go through {@link appendRequestLogTenantScope}: the
+ * caller passes resolveTenantScope's "" sentinel for an unbound key, which means
+ * the default (untenanted) partition (`tenant_id IS NULL`) — NOT "no filter". A
+ * truthy check here would drop the filter and count every tenant's rows.
  */
 export async function getRecentRequestStats(
   pool: Pool,
   since: Date,
   scope?: { projectId?: string; tenantId?: string },
 ): Promise<{ total: number; failed: number }> {
-  let sql = RECENT_STATS_SQL;
+  const conditions = ["created_at >= $1::timestamptz"];
   const values: unknown[] = [since.toISOString()];
-  if (scope?.tenantId && scope.projectId) {
-    sql = RECENT_STATS_SQL_TENANT_PROJECT;
-    values.push(scope.tenantId, scope.projectId);
-  } else if (scope?.tenantId) {
-    sql = RECENT_STATS_SQL_TENANT;
-    values.push(scope.tenantId);
-  } else if (scope?.projectId) {
-    sql = RECENT_STATS_SQL_SCOPED;
+  appendRequestLogTenantScope(conditions, values, scope?.tenantId);
+  if (scope?.projectId) {
     values.push(scope.projectId);
+    conditions.push(`project_id = $${values.length}`);
   }
-  const { rows } = await pool.query<{ total: string; failed: string }>(sql, values);
+  const { rows } = await pool.query<{ total: string; failed: string }>(
+    `SELECT
+       count(*)::text AS total,
+       count(*) FILTER (WHERE status <> 'ok')::text AS failed
+     FROM request_logs
+     WHERE ${conditions.join(" AND ")}`,
+    values,
+  );
   const row = rows[0];
   return {
     total: Number(row?.total ?? 0),

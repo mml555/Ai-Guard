@@ -198,14 +198,40 @@ model_classes:
     expect(cfg.billing?.stripe?.meterEventName).toBeUndefined();
   });
 
-  it("allows a Stripe usage meter when not using prepaid credits (internal_only)", () => {
+  it("rejects a usage meter in internal_only mode (nothing would ever report to it)", () => {
+    expect(() =>
+      parseConfigObject(
+        withBilling({
+          provider: "stripe",
+          mode: "internal_only",
+          stripe: { meter_event_name: "modelgov_usage" },
+        }),
+      ),
+    ).toThrow(PolicyConfigError);
+  });
+
+  it("accepts metered mode with a Stripe meter event name", () => {
     const cfg = parseConfigObject(
       withBilling({
         provider: "stripe",
-        mode: "internal_only",
-        stripe: { meter_event_name: "modelgov_usage" },
+        mode: "metered",
+        stripe: { secret_key: "sk_test", meter_event_name: "modelgov_usage" },
       }),
     );
+    expect(cfg.billing?.mode).toBe("metered");
     expect(cfg.billing?.stripe?.meterEventName).toBe("modelgov_usage");
+  });
+
+  it("rejects metered mode without a meter event name or without the stripe provider", () => {
+    expect(() =>
+      parseConfigObject(
+        withBilling({ provider: "stripe", mode: "metered", stripe: { secret_key: "sk_test" } }),
+      ),
+    ).toThrow(PolicyConfigError);
+    expect(() =>
+      parseConfigObject(
+        withBilling({ provider: "custom", mode: "metered", stripe: { meter_event_name: "m" } }),
+      ),
+    ).toThrow(PolicyConfigError);
   });
 });

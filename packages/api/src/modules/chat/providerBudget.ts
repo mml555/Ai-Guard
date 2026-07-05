@@ -27,20 +27,27 @@ export function createFlatProviderBudget(args: {
   skipInternalBudget?: boolean;
   /** Safety/classifier spend already incurred — booked from credits on release. */
   safetyCostUsd?: number;
+  /** Wallet-lease hold id from the credit reserve (see billing/repo leases). */
+  creditHoldId?: string;
 }): ProviderBudgetCtx {
   let reservedUsd = args.initialReservedUsd;
-  const { pool, aiRequest, decision, now, leaseId, tenantId, billing, skipInternalBudget, safetyCostUsd } = args;
+  const { pool, aiRequest, decision, now, leaseId, tenantId, billing, skipInternalBudget, safetyCostUsd, creditHoldId } = args;
 
   const incur: IncurFn = (costUsd) =>
-    recordIncurredCost(pool, {
-      projectId: aiRequest.projectId,
-      userId: aiRequest.userId,
-      feature: aiRequest.feature,
-      costUsd,
-      caps: decision.reservationCaps,
-      now,
-      tenantId,
-    });
+    // credits_only: the wallet is the sole ledger and `release` books incurred
+    // safety spend to it via settleCredits — booking to budget_counters here
+    // would UPSERT a spurious internal row for spend already charged elsewhere.
+    skipInternalBudget
+      ? Promise.resolve()
+      : recordIncurredCost(pool, {
+          projectId: aiRequest.projectId,
+          userId: aiRequest.userId,
+          feature: aiRequest.feature,
+          costUsd,
+          caps: decision.reservationCaps,
+          now,
+          tenantId,
+        });
 
   return {
     getReservedUsd: () => reservedUsd,
@@ -62,15 +69,13 @@ export function createFlatProviderBudget(args: {
           tenantId,
         });
       }
-      if (billing?.usesCredits() && reservedUsd > 0) {
+      // Also run when reservedUsd is 0 but a hold exists: reserve wrote a
+      // (zero-amount) lease that settleCredits must delete, or it leaks. incurred
+      // safety spend is booked from credits and the rest released; incurred = 0
+      // is a pure release (a full refund would give back credits already paid).
+      if (billing?.usesCredits() && (reservedUsd > 0 || creditHoldId)) {
         const incurred = safetyCostUsd ?? 0;
-        if (incurred > 0) {
-          // Book the incurred safety spend from credits and release the rest —
-          // a full refund would give back credits for work already paid for.
-          await billing.settleCredits(tenantId ?? "", aiRequest.userId, reservedUsd, incurred);
-        } else {
-          await billing.releaseCredits(tenantId ?? "", aiRequest.userId, reservedUsd);
-        }
+        await billing.settleCredits(tenantId ?? "", aiRequest.userId, reservedUsd, incurred, creditHoldId);
       }
     },
     topUp: async (additionalUsd): Promise<TopUpOutcome> => {
@@ -79,7 +84,7 @@ export function createFlatProviderBudget(args: {
       // settlement would just clamp the overdraft at zero (free over-spend).
       const usesCredits = billing?.usesCredits() === true && additionalUsd > 0;
       if (usesCredits) {
-        const ok = await billing!.reserveCredits(tenantId ?? "", aiRequest.userId, additionalUsd);
+        const ok = await billing!.reserveCredits(tenantId ?? "", aiRequest.userId, additionalUsd, creditHoldId);
         if (!ok) return { ok: false, insufficientCredits: true };
       }
       // credits_only skips the internal budget ledger, so there is no lease to
@@ -104,14 +109,14 @@ export function createFlatProviderBudget(args: {
         // then propagate the original error.
         if (usesCredits) {
           await billing!
-            .releaseCredits(tenantId ?? "", aiRequest.userId, additionalUsd)
+            .releaseCredits(tenantId ?? "", aiRequest.userId, additionalUsd, creditHoldId)
             .catch(() => {});
         }
         throw err;
       }
       if (!result.ok && usesCredits) {
         // Internal top-up rejected after reserving the extra credits — release them.
-        await billing!.releaseCredits(tenantId ?? "", aiRequest.userId, additionalUsd);
+        await billing!.releaseCredits(tenantId ?? "", aiRequest.userId, additionalUsd, creditHoldId);
       }
       return {
         ok: result.ok,

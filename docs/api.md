@@ -15,6 +15,7 @@ Authentication: **`Authorization: Bearer <API_KEY>`** on all routes except
 | `GET` | `/ready` | — | Readiness (database-gated; dependencies reported) |
 | `GET` | `/openapi.json` | — | OpenAPI 3 document |
 | `POST` | `/v1/chat` | `chat:create` | Guarded chat completion |
+| `POST` | `/v1/embeddings` | `chat:create` | Guarded embeddings (same policy/budget/billing spine as chat) |
 | `POST` | `/v1/explain` | `chat:create` or `policy:explain` | Dry-run policy (no model call) |
 | `GET` | `/v1/usage` | `usage:read` | Budget snapshots and recent stats |
 | `GET` | `/v1/usage/summary` | `usage:read` | Aggregated cost/request summary |
@@ -34,6 +35,16 @@ Authentication: **`Authorization: Bearer <API_KEY>`** on all routes except
 | `GET` | `/v1/admin/policy/active` | `policy:read` | Active policy version metadata |
 | `GET` | `/v1/admin/policy/versions/:id/diff` | `policy:read` | Diff a stored version against another (`?against=<id>`) or the active one |
 | `POST` | `/v1/admin/policy/versions/:id/activate` | `policy:write` | Activate/rollback to a version |
+| `GET` | `/v1/users/:userId/balance` | `usage:read` | Prepaid-credit wallet balance (billing enabled only) |
+| `POST` | `/v1/admin/billing/top-up` | `billing:write` | Add credits to a user wallet |
+| `POST` | `/v1/webhooks/stripe` | — (Stripe-signed) | Stripe webhook receiver: credit top-ups, plan changes, payment failures |
+| `GET` | `/v1/admin/emergency/status` | `policy:read` | Emergency pause state (platform + caller's tenant) |
+| `POST` | `/v1/admin/emergency/pause` | `policy:write` | Pause AI requests — tenant-bound keys pause only their tenant; platform keys pause everyone |
+| `POST` | `/v1/admin/emergency/resume` | `policy:write` | Resume after a pause (same scoping as pause) |
+
+The Stripe webhook route registers only when billing is enabled; it requires no
+API key — a valid `stripe-signature` header (HMAC over the raw body, verified
+against `STRIPE_WEBHOOK_SECRET`, replay-safe per event id) is the authentication.
 
 Default API keys include `chat:create` only. Add `usage:read` for the usage endpoint
 (see [Configuration](./configuration.md#scoped-api-keys-production)).

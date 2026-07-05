@@ -1,3 +1,5 @@
+import { DEFAULT_BASE_URL } from "./flags.js";
+
 export interface ApiClientOptions {
   baseUrl: string;
   apiKey?: string;
@@ -65,7 +67,7 @@ export function clientFromEnv(): ApiClient {
     throw new Error("MODELGOV_API_KEY is required");
   }
   return new ApiClient({
-    baseUrl: process.env.MODELGOV_URL ?? "http://localhost:3090",
+    baseUrl: process.env.MODELGOV_URL ?? DEFAULT_BASE_URL,
     apiKey,
   });
 }

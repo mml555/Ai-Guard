@@ -7,7 +7,7 @@ ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 
 if [ -n "${DATABASE_URL:-}" ]; then
   cd "$ROOT"
-  exec pnpm exec vitest run "$@"
+  exec pnpm exec vitest run --no-file-parallelism --maxWorkers=1 "$@"
 fi
 
 if ! command -v docker >/dev/null 2>&1; then

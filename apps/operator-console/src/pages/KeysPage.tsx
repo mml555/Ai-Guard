@@ -41,7 +41,14 @@ export function KeysPage() {
   }
 
   async function revoke(id: string) {
-    await apiFetch(`/v1/admin/keys/${id}/revoke`, { method: "POST" });
+    setError("");
+    try {
+      await apiFetch(`/v1/admin/keys/${id}/revoke`, { method: "POST" });
+    } catch (e) {
+      // Surface the failure — a silent unhandled rejection leaves the key
+      // showing "active" with no explanation.
+      setError(e instanceof Error ? e.message : String(e));
+    }
     reload();
   }
 

@@ -14,8 +14,9 @@ issues, set up the project, and open a pull request.
 
 ## Development setup
 
-Requirements: **Node 22**, **pnpm 10** (via `corepack enable`), Docker (for the
-integration test database and image builds).
+Requirements: **Node 20+** (the `engines` floor; CI runs Node 22), **pnpm 10**
+(via `corepack enable`), Docker (for the integration test database and image
+builds).
 
 ```bash
 corepack enable

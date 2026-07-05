@@ -18,7 +18,7 @@ import {
 } from "./services/rateLimitRedis";
 import type { BudgetAlertWebhookConfig } from "./modules/usage/budgetAlerts";
 import { createDbKeyResolver } from "./modules/keys/resolver";
-import { isPrivateHttpHost } from "./util/httpUrlGuard";
+import { assertPublicHttpUrl } from "./util/httpUrlGuard";
 import { createOidcVerifier } from "./modules/authz/oidc";
 import type { ResolvedPrincipal } from "./plugins/auth";
 import {
@@ -70,24 +70,11 @@ export function parseCsv(value: string | undefined): string[] | undefined {
   return items.length ? items : undefined;
 }
 
-/** Reject webhook URLs pointing at loopback / link-local / private ranges (SSRF-adjacent). */
-export function assertPublicHttpUrl(raw: string): void {
-  let url: URL;
-  try {
-    url = new URL(raw);
-  } catch {
-    throw new Error(`invalid webhook URL: ${raw}`);
-  }
-  if (url.protocol !== "https:" && url.protocol !== "http:") {
-    throw new Error(`webhook URL must be http(s): ${raw}`);
-  }
-  const host = url.hostname.toLowerCase();
-  if (isPrivateHttpHost(host)) {
-    throw new Error(
-      `budget alert webhook host '${host}' is private/link-local; set BUDGET_ALERT_WEBHOOK_ALLOW_PRIVATE=true to allow it`,
-    );
-  }
-}
+// Webhook-URL SSRF guard (loopback / link-local / private ranges) is the shared
+// `assertPublicHttpUrl` in util/httpUrlGuard — single-sourced with the runtime
+// delivery sinks so a rule added in one place can't drift from the other.
+// Re-exported here for existing importers (bootstrap tests, resolveBudgetAlert).
+export { assertPublicHttpUrl };
 
 /** Create the Postgres pool and fail fast if it is unreachable at startup. */
 export async function createDbPool(env: Env): Promise<Pool> {
@@ -257,10 +244,15 @@ export async function connectRedisIfConfigured(env: Env): Promise<Redis | undefi
 /** Resolve the budget-alert webhook config, validating the URL is not private. */
 export function resolveBudgetAlert(env: Env): BudgetAlertWebhookConfig | undefined {
   if (!env.BUDGET_ALERT_WEBHOOK_URL) return undefined;
-  if (env.BUDGET_ALERT_WEBHOOK_ALLOW_PRIVATE !== "true") {
+  const allowPrivateHosts = env.BUDGET_ALERT_WEBHOOK_ALLOW_PRIVATE === "true";
+  if (!allowPrivateHosts) {
     assertPublicHttpUrl(env.BUDGET_ALERT_WEBHOOK_URL);
   }
-  return { url: env.BUDGET_ALERT_WEBHOOK_URL, secret: env.BUDGET_ALERT_WEBHOOK_SECRET };
+  return {
+    url: env.BUDGET_ALERT_WEBHOOK_URL,
+    secret: env.BUDGET_ALERT_WEBHOOK_SECRET,
+    allowPrivateHosts,
+  };
 }
 
 export interface AuthProviders {
@@ -373,6 +365,32 @@ export function warnMissingSafetyBackends(
   if (!backends.hasInjection && plans.some((plan) => plan.promptInjection === "block")) {
     log.warn(
       "prompt-injection protection is enabled but safety.injection_model is not configured — affected requests will fail with 503",
+    );
+  }
+}
+
+/**
+ * Warn when a feature enables BOTH PII masking and grounding. Grounding ships the
+ * retrieved context to the provider VERBATIM (un-masked) so citation
+ * verification can match quotes, so PII inside grounded context is NOT masked
+ * even though the feature requests PII protection. This is by design (ground only
+ * on trusted sources) — surface it at boot so the weaker guarantee for grounded
+ * features is explicit rather than a silent surprise.
+ */
+export function warnGroundingPiiExposure(
+  config: ModelgovConfig,
+  log: FastifyInstance["log"],
+): void {
+  const affected = Object.entries(config.features)
+    .filter(([, feature]) => {
+      const plan = resolveSafetyPlan(config, feature);
+      return plan.grounding === "strict" && plan.pii !== "off";
+    })
+    .map(([name]) => name);
+  if (affected.length > 0) {
+    log.warn(
+      { features: affected },
+      "features enable both PII masking and grounding — grounded context is sent to the provider un-masked (verbatim citation requires it), so PII in retrieved context is NOT masked; ground only on trusted sources",
     );
   }
 }

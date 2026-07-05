@@ -141,7 +141,7 @@ export interface RoutingConfig {
   retry?: ProviderRetryConfig;
 }
 
-export type BillingMode = "internal_only" | "hybrid" | "credits_only";
+export type BillingMode = "internal_only" | "metered" | "hybrid" | "credits_only";
 export type BillingProviderName = "none" | "stripe" | "custom";
 
 export interface StripeBillingConfig {
@@ -153,6 +153,8 @@ export interface StripeBillingConfig {
   usdPerCredit?: number;
   /** Stripe Billing Meter event name for post-settle reporting. */
   meterEventName?: string;
+  /** user_type applied when a customer's invoice payment fails (default "free_user"). */
+  downgradeUserType?: string;
 }
 
 export interface BillingConfig {

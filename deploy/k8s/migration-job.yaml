@@ -10,7 +10,7 @@ spec:
       restartPolicy: OnFailure
       containers:
         - name: migrate
-          image: ghcr.io/your-org/modelgov-api:REPLACE_TAG
+          image: ghcr.io/mml555/modelgov/modelgov-api:REPLACE_TAG
           command: ["node", "dist/migrate.js"]
           envFrom:
             - secretRef:

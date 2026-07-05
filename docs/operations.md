@@ -12,6 +12,21 @@ That path uses the built-in demo provider and requires no cloud keys. Use
 `make start-cloud` only when you intentionally want local calls to reach
 OpenAI/Anthropic through LiteLLM.
 
+## Compose stacks
+
+The repo ships six compose files. `simple` is the base; `local`, `cloud`, and
+`dev.full` are overlays layered on top of it (the `modelgov up <mode>` CLI and
+Makefile targets handle the layering); `production` and `ci-e2e` stand alone.
+
+| File | Mode | Purpose |
+| --- | --- | --- |
+| `docker-compose.simple.yml` | `./setup`, `make start` | Zero-secret local stack with the built-in demo provider |
+| `docker-compose.local.yml` | `make start-local` | Overlay: routes models to local Ollama (API bound to 127.0.0.1) |
+| `docker-compose.cloud.yml` | `make start-cloud` | Overlay: real OpenAI/Anthropic keys through LiteLLM |
+| `docker-compose.dev.full.yml` | `make start-full` | Overlay: adds Langfuse with **hardcoded dev secrets** — never layer over production |
+| `docker-compose.production.yml` | `make up-prod` | Standalone hardened production stack (pinned images, healthchecks, boot guards) |
+| `docker-compose.ci-e2e.yml` | CI only | End-to-end example stack used by `scripts/example-e2e-ci.sh` |
+
 ## Production checklist
 
 - [ ] TLS termination (nginx, ALB, Cloudflare) in front of the API

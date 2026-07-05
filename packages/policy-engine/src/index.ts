@@ -38,3 +38,11 @@ export {
   type DeployProfileCheck,
   type ProfileEnvFlags,
 } from "./deployProfiles";
+export {
+  KNOWN_DEV_API_KEYS,
+  KNOWN_DEV_LANGFUSE_KEYS,
+  MIN_PRODUCTION_SECRET_LENGTH,
+  isRemoteDatabaseUrl,
+  isWeakSecret,
+  productionPostureChecks,
+} from "./productionPosture";

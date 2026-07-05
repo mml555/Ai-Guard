@@ -154,7 +154,7 @@ const routingSchema = z
 const billingSchema = z
   .object({
     provider: z.enum(["none", "stripe", "custom"]).default("none"),
-    mode: z.enum(["internal_only", "hybrid", "credits_only"]).default("internal_only"),
+    mode: z.enum(["internal_only", "metered", "hybrid", "credits_only"]).default("internal_only"),
     stripe: z
       .object({
         secret_key: z.string().optional(),
@@ -162,6 +162,7 @@ const billingSchema = z
         plan_map: z.record(z.string(), z.string()).optional(),
         usd_per_credit: z.number().positive().optional(),
         meter_event_name: z.string().optional(),
+        downgrade_user_type: z.string().optional(),
       })
       .strict()
       .optional(),
@@ -182,8 +183,39 @@ const billingSchema = z
           `billing.mode "${b.mode}" bills usage by debiting the prepaid credit wallet, ` +
           "so billing.stripe.meter_event_name (a Stripe usage meter) must not be set — " +
           "it would invoice the same usage a second time. Remove meter_event_name; Stripe " +
-          "is still used to sell credits (plan_map / Checkout webhooks).",
+          'is still used to sell credits (plan_map / Checkout webhooks). To bill usage via a Stripe meter instead, use mode "metered".',
       });
+    }
+    // A meter event name outside metered mode is a config smell: in
+    // internal_only nothing would ever report to it (the billing service is not
+    // constructed), so the operator who set it is expecting invoices that will
+    // never arrive. Fail fast and point at the mode that delivers them.
+    if (b.mode === "internal_only" && b.stripe?.meter_event_name) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ["stripe", "meter_event_name"],
+        message:
+          'billing.stripe.meter_event_name has no effect in mode "internal_only" — usage is never reported. Use mode "metered" to bill usage via this Stripe Billing Meter.',
+      });
+    }
+    // Metered mode invoices usage through a Stripe Billing Meter, so it needs
+    // the meter's event name and the Stripe provider — nothing else can deliver
+    // the usage records.
+    if (b.mode === "metered") {
+      if (b.provider !== "stripe") {
+        ctx.addIssue({
+          code: z.ZodIssueCode.custom,
+          path: ["provider"],
+          message: 'billing.mode "metered" requires billing.provider "stripe" (usage is reported to a Stripe Billing Meter).',
+        });
+      }
+      if (!b.stripe?.meter_event_name) {
+        ctx.addIssue({
+          code: z.ZodIssueCode.custom,
+          path: ["stripe", "meter_event_name"],
+          message: 'billing.mode "metered" requires billing.stripe.meter_event_name — the Stripe Billing Meter event that usage is reported to.',
+        });
+      }
     }
   })
   .transform((b) => ({
@@ -196,6 +228,7 @@ const billingSchema = z
           planMap: b.stripe.plan_map,
           usdPerCredit: b.stripe.usd_per_credit,
           meterEventName: b.stripe.meter_event_name,
+          downgradeUserType: b.stripe.downgrade_user_type,
         }
       : undefined,
   }));

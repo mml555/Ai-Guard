@@ -1,5 +1,5 @@
 import type { ChatMessage } from "../../types";
-import { SafetyServiceError, type PiiGuard, type SafetyFinding } from "./index";
+import { SafetyServiceError, type PiiGuard, type SafetyFinding } from "./contracts";
 
 interface PresidioEntity {
   entity_type: string;

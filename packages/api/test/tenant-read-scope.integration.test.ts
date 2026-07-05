@@ -7,6 +7,10 @@ import { NoopGuard } from "../src/services/safety";
 import { buildServer } from "../src/server";
 
 const DATABASE_URL = process.env.DATABASE_URL;
+const TENANT_A = "tenant-read-a";
+const TENANT_B = "tenant-read-b";
+const USER_A = "tenant-read-u1";
+const USER_B = "tenant-read-u2";
 
 const config = parseConfigObject({
   project: { name: "test", environment: "test" },
@@ -31,17 +35,19 @@ describe.skipIf(!DATABASE_URL)("tenant-scoped request reads (integration)", () =
     await pool.end();
   });
   beforeEach(async () => {
-    await pool.query("TRUNCATE request_logs");
+    await pool.query("TRUNCATE request_logs RESTART IDENTITY");
     await pool.query(
       `INSERT INTO request_logs (
         tenant_id, project_id, user_id, user_type, feature, decision, status
-      ) VALUES ('tenant-a', 'test', 'u1', 'logged_in', 'support_chat', 'allow', 'ok')`,
+      ) VALUES ($1, 'test', $2, 'logged_in', 'support_chat', 'allow', 'ok')`,
+      [TENANT_A, USER_A],
     );
     const b = await pool.query<{ id: string }>(
       `INSERT INTO request_logs (
         tenant_id, project_id, user_id, user_type, feature, decision, status
-      ) VALUES ('tenant-b', 'test', 'u2', 'logged_in', 'support_chat', 'allow', 'ok')
+      ) VALUES ($1, 'test', $2, 'logged_in', 'support_chat', 'allow', 'ok')
       RETURNING id`,
+      [TENANT_B, USER_B],
     );
     tenantBId = Number(b.rows[0]!.id);
   });
@@ -66,33 +72,33 @@ describe.skipIf(!DATABASE_URL)("tenant-scoped request reads (integration)", () =
   }
 
   it("lists only rows for the caller's tenant", async () => {
-    const res = await app("tenant-a").inject({
+    const res = await app(TENANT_A).inject({
       method: "GET",
-      url: "/v1/requests",
-      headers: { authorization: "Bearer tenant-a-key" },
+      url: `/v1/requests?userId=${USER_A}`,
+      headers: { authorization: `Bearer ${TENANT_A}-key` },
     });
     expect(res.statusCode).toBe(200);
     const body = res.json() as { items: Array<{ id: string; userId?: string }> };
     expect(body.items).toHaveLength(1);
-    expect(body.items[0]!.userId).toBe("u1");
+    expect(body.items[0]!.userId).toBe(USER_A);
   });
 
   it("returns 404 for a cross-tenant request id", async () => {
-    const res = await app("tenant-a").inject({
+    const res = await app(TENANT_A).inject({
       method: "GET",
       url: `/v1/requests/req_${tenantBId}`,
-      headers: { authorization: "Bearer tenant-a-key" },
+      headers: { authorization: `Bearer ${TENANT_A}-key` },
     });
     expect(res.statusCode).toBe(404);
   });
 
   it("returns a row for the caller's own tenant id", async () => {
-    const res = await app("tenant-b").inject({
+    const res = await app(TENANT_B).inject({
       method: "GET",
       url: `/v1/requests/req_${tenantBId}`,
-      headers: { authorization: "Bearer tenant-b-key" },
+      headers: { authorization: `Bearer ${TENANT_B}-key` },
     });
     expect(res.statusCode).toBe(200);
-    expect(res.json().userId).toBe("u2");
+    expect(res.json().userId).toBe(USER_B);
   });
 });

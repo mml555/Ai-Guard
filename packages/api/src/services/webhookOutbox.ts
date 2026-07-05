@@ -1,4 +1,6 @@
+import { createHmac } from "node:crypto";
 import type { Pool } from "pg";
+import { assertPublicHttpUrl } from "../util/httpUrlGuard";
 
 export interface OutboxEntry {
   id: number;
@@ -84,6 +86,117 @@ export async function markWebhookDelivered(pool: Pool, id: number): Promise<void
     `UPDATE webhook_outbox SET delivered_at = now(), last_error = NULL WHERE id = $1`,
     [id],
   );
+}
+
+/**
+ * Deliver one claimed outbox row: HMAC-signed POST with a 10s timeout. Lives
+ * here (not in a routes file) because it is the generic delivery sink — budget
+ * alerts, a non-billing feature, flow through it too.
+ */
+export async function deliverOutboxWebhook(
+  entry: {
+    id: number;
+    payload: Record<string, unknown>;
+    destinationUrl: string;
+    secret?: string;
+    attempts: number;
+  },
+  fetchImpl: typeof fetch = fetch,
+  opts: { allowPrivateHosts?: boolean } = {},
+): Promise<void> {
+  // Re-apply the SSRF host guard at the delivery sink. The only enqueue path
+  // today (budget alerts) validates the URL at boot, but the sink must not trust
+  // that: a future enqueue path, a tampered row, or a config change could put a
+  // private/link-local destination in the outbox. Throwing here marks the row
+  // failed (retried, then dead-lettered) instead of POSTing to an internal host.
+  // allowPrivateHosts mirrors BUDGET_ALERT_WEBHOOK_ALLOW_PRIVATE so an operator
+  // who deliberately points alerts at a private host is not blocked.
+  const target = assertPublicHttpUrl(entry.destinationUrl, {
+    allowPrivate: opts.allowPrivateHosts,
+  });
+
+  const json = JSON.stringify(entry.payload);
+  const headers: Record<string, string> = {
+    "content-type": "application/json",
+    "user-agent": "modelgov/1.0",
+  };
+  if (entry.secret) {
+    const digest = createHmac("sha256", entry.secret).update(json).digest("hex");
+    headers["x-modelgov-signature"] = `sha256=${digest}`;
+  }
+
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), 10_000);
+  try {
+    // POST the guard-checked, normalized URL (target.href), NOT the raw string —
+    // and refuse redirects. Following a 30x would let a validated public host
+    // bounce the POST to an internal/link-local address (e.g. the cloud metadata
+    // endpoint), bypassing the SSRF guard above, which only saw the first hop.
+    const res = await fetchImpl(target.href, {
+      method: "POST",
+      headers,
+      body: json,
+      signal: controller.signal,
+      redirect: "manual",
+    });
+    if (res.type === "opaqueredirect" || (res.status >= 300 && res.status < 400)) {
+      throw new Error("webhook endpoint attempted a redirect; refusing to follow (SSRF guard)");
+    }
+    if (!res.ok) {
+      throw new Error(`webhook returned ${res.status}`);
+    }
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+/**
+ * Retention for terminal outbox rows. Delivered rows are kept for a debugging
+ * window; rows that exhausted max_attempts (dead-lettered) are kept longer so
+ * an operator can inspect/replay them, then dropped — without this the table
+ * grows forever.
+ */
+export async function cleanupWebhookOutbox(
+  pool: Pool,
+  opts: { deliveredRetentionMs: number; deadRetentionMs: number },
+  batch = 5000,
+): Promise<number> {
+  // Drain each class in a loop so a large backlog clears in one pass rather than
+  // one batch per maintenance tick (the empty case still costs a single query).
+  let delivered = 0;
+  for (;;) {
+    const { rowCount } = await pool.query(
+      `DELETE FROM webhook_outbox
+       WHERE id IN (
+         SELECT id FROM webhook_outbox
+         WHERE delivered_at IS NOT NULL
+           AND delivered_at < now() - ($1 || ' milliseconds')::interval
+         LIMIT $2
+       )`,
+      [String(opts.deliveredRetentionMs), batch],
+    );
+    const n = rowCount ?? 0;
+    delivered += n;
+    if (n < batch) break;
+  }
+  let dead = 0;
+  for (;;) {
+    const { rowCount } = await pool.query(
+      `DELETE FROM webhook_outbox
+       WHERE id IN (
+         SELECT id FROM webhook_outbox
+         WHERE delivered_at IS NULL
+           AND attempts >= max_attempts
+           AND created_at < now() - ($1 || ' milliseconds')::interval
+         LIMIT $2
+       )`,
+      [String(opts.deadRetentionMs), batch],
+    );
+    const n = rowCount ?? 0;
+    dead += n;
+    if (n < batch) break;
+  }
+  return delivered + dead;
 }
 
 export async function markWebhookFailed(

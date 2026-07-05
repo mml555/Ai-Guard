@@ -279,6 +279,65 @@ Override at runtime with `OBSERVABILITY_PROVIDER=langfuse` and Langfuse env vars
 
 ---
 
+## `billing` (optional — Stripe billing)
+
+Charge users for their AI usage, on top of (or instead of) the internal budget
+ledger. Two Stripe charge paths are supported — **prepaid credits** and
+**usage metering** — and they are mutually exclusive per deployment (charging
+the same usage through both would double-bill; config validation rejects it).
+
+```yaml
+billing:
+  provider: stripe          # none (default) | stripe | custom
+  mode: credits_only        # internal_only (default) | metered | hybrid | credits_only
+  stripe:
+    plan_map:               # Stripe price id -> user_type (subscription webhooks)
+      price_pro_monthly: paid_user
+    usd_per_credit: 0.01
+    # metered mode only — the Stripe Billing Meter event name usage reports to:
+    # meter_event_name: modelgov_usage
+    # user_type applied when a customer's invoice payment fails:
+    # downgrade_user_type: free_user
+```
+
+| Mode | Usage is charged by | Internal budgets |
+| --- | --- | --- |
+| `internal_only` | nothing (no billing service) | enforced |
+| `metered` | reporting actual cost to a Stripe Billing Meter (invoiced by Stripe) | enforced |
+| `hybrid` | debiting the prepaid credit wallet | enforced as well |
+| `credits_only` | debiting the prepaid credit wallet | **skipped** — the wallet is the only ledger |
+
+How the pieces work:
+
+- **Prepaid credits** (`hybrid` / `credits_only`): every chat/embeddings request
+  checks and reserves the estimated cost against the user's wallet (402
+  `insufficient_credits` when it can't cover it), then settles the actual cost.
+  Wallets are topped up by `POST /v1/admin/billing/top-up` (`billing:write`) or
+  by Stripe Checkout — the webhook credits `checkout.session.completed` events
+  (set `metadata.user_id`, optionally `metadata.tenant_id` /
+  `metadata.credits_usd`), replay-safe per Stripe event id. Reservations are
+  crash-safe: a request that dies between reserve and settle is reconciled by
+  the maintenance sweep within `RESERVATION_STALE_MS`. If actual cost exceeds
+  the remaining balance, the wallet floors at 0 (the excess is forgiven — the
+  reservation cap bounds the overshoot); wallets never go negative.
+- **Usage metering** (`metered`): requests are not gated on a wallet; every
+  settled request records a meter event which the maintenance loop reports to
+  `stripe.meter_event_name` (idempotent per request id) for Stripe to invoice.
+  Requires `provider: stripe` and `meter_event_name`.
+- **Subscriptions**: `customer.subscription.created/updated` webhooks map the
+  Stripe price id through `plan_map` to a `user_type`;
+  `invoice.payment_failed` downgrades the account to `downgrade_user_type`
+  (default `free_user` — make sure that user type exists in
+  `budgets.by_user_type`).
+
+Secrets come from the environment, not the YAML: set `STRIPE_SECRET_KEY` and
+`STRIPE_WEBHOOK_SECRET` (both support the `*_FILE` convention). The webhook
+endpoint is `POST /v1/webhooks/stripe` — point a Stripe webhook at it with the
+`checkout.session.completed`, `customer.subscription.*`, and
+`invoice.payment_failed` events.
+
+---
+
 ## Environment variables
 
 See [`.env.example`](../.env.example) and [Operations](./operations.md). Key vars:
@@ -296,6 +355,8 @@ See [`.env.example`](../.env.example) and [Operations](./operations.md). Key var
 | `RESERVATION_STALE_MS` | Orphaned budget reservation release TTL (default **900000** = 15m) |
 | `BUDGET_ALERT_WEBHOOK_URL` | POST budget alert once per month when threshold crossed |
 | `BUDGET_ALERT_WEBHOOK_SECRET` | Optional HMAC secret for `X-Modelgov-Signature` |
+| `STRIPE_SECRET_KEY` | Stripe API key for billing (see [`billing`](#billing-optional--stripe-billing)) |
+| `STRIPE_WEBHOOK_SECRET` | Verifies `POST /v1/webhooks/stripe` signatures |
 | `POLICY_STORE_ENABLED` | Load the active policy from the DB version store instead of the file (default off) |
 | `MULTI_TENANT_POLICY` | Evaluate each request against its tenant's active policy version (needs `POLICY_STORE_ENABLED`; default off) — see [multi-tenancy](./design/multi-tenancy.md) |
 | `POLICY_CACHE_TTL_MS` | Per-tenant policy cache TTL; bounds restart-free activation lag (default **30000**) |

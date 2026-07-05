@@ -1,5 +1,6 @@
 import { writeFileSync } from "node:fs";
 import { parseConfigObject } from "@modelgov/policy-engine";
+import { createBillingService } from "./modules/billing/service";
 import { buildServer } from "./server";
 import { NoopObservability } from "./services/observability";
 import { NoopGuard } from "./services/safety";
@@ -10,7 +11,9 @@ import { NoopGuard } from "./services/safety";
 //
 // Config values are irrelevant to the spec (only which routes register matters).
 // A keyResolver stub is supplied so the admin routes (keys/audit/governance/
-// policy) — which register only when a resolver is present — are included.
+// policy) — which register only when a resolver is present — are included, and
+// billing is enabled so the conditionally-registered Stripe webhook route
+// (/v1/webhooks/stripe) lands in the spec too.
 const config = parseConfigObject({
   project: { name: "openapi", environment: "production" },
   budgets: {
@@ -20,12 +23,14 @@ const config = parseConfigObject({
   features: { support_chat: { safety: "dev", model_class: "cheap", max_tokens: 100 } },
   model_classes: { cheap: { primary: "openai/gpt-4o-mini" } },
   safety: { preset: "dev" },
+  billing: { provider: "stripe", mode: "hybrid" },
 });
 
 async function main(): Promise<void> {
+  const stubPool = { query: async () => ({ rows: [], rowCount: 0 }) } as never;
   const app = buildServer({
     config,
-    pool: { query: async () => ({ rows: [], rowCount: 0 }) } as never,
+    pool: stubPool,
     litellm: { chat: async () => ({ content: "", model: "", actualCostUsd: 0, raw: {} }) },
     safety: new NoopGuard(),
     observability: new NoopObservability(),
@@ -33,6 +38,7 @@ async function main(): Promise<void> {
     // No auth needed to enumerate routes; keyResolver makes the admin routes register.
     allowUnauthenticated: true,
     keyResolver: { resolve: async () => null, clear: () => {} },
+    billing: createBillingService(stubPool, { billing: config.billing }),
   });
 
   await app.ready();

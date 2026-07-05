@@ -1,6 +1,7 @@
 #!/usr/bin/env node
 import { runDoctorProduction } from "./doctorProduction.js";
 import { runExplain, type ExplainFlags } from "./explain.js";
+import { DEFAULT_BASE_URL, flagValue } from "./flags.js";
 import { runKeysCommand } from "./keys.js";
 import { runOps, type OpsCommand } from "./ops.js";
 import { runRequestsCommand, runUsageSummaryCommand } from "./operator.js";
@@ -38,59 +39,59 @@ function main(): void {
   }
 
   const [command, ...rest] = args;
-  try {
-    switch (command) {
-      case "doctor":
-        if (rest[0] === "production") {
-          const code = runDoctorProduction({
-            envFile: flagValue(rest, "--env-file") ?? ".env.production",
-            strict: rest.includes("--strict"),
-          });
-          process.exit(code);
-        }
-        void runOpsCommand(command, rest);
-        break;
-      case "setup":
-      case "up":
-      case "down":
-      case "status":
-      case "logs":
-      case "smoke":
-      case "reset":
-        void runOpsCommand(command, rest);
-        break;
-      case "explain":
-        void runExplainCommand(rest);
-        break;
-      case "validate":
-        runValidateCommand(rest);
-        break;
-      case "test-policy":
-        runTestPolicyCommand(rest);
-        break;
-      case "requests":
-        void runRequestsCommand(rest).catch((err) => {
-          console.error(err instanceof Error ? err.message : err);
-          process.exit(1);
+  // Single top-level handler: every command (sync or async) resolves here, so
+  // errors are logged and the exit code set in exactly one place. Commands may
+  // resolve a numeric exit code to signal a non-error, non-zero outcome
+  // (e.g. `doctor production` reporting failed checks).
+  void dispatch(command, rest)
+    .then((code) => {
+      if (code) process.exit(code);
+    })
+    .catch((err) => {
+      console.error(err instanceof Error ? err.message : err);
+      process.exit(1);
+    });
+}
+
+/**
+ * Run a command. Resolves `void` for the common success/handled path, or a
+ * numeric exit code when the command wants to signal a specific non-zero exit
+ * without it being an error (thrown errors are the normal failure channel).
+ */
+async function dispatch(command: string, rest: string[]): Promise<number | void> {
+  switch (command) {
+    case "doctor":
+      if (rest[0] === "production") {
+        return runDoctorProduction({
+          envFile: flagValue(rest, "--env-file") ?? ".env.production",
+          strict: rest.includes("--strict"),
         });
-        break;
-      case "usage":
-        void runUsageCommand(rest);
-        break;
-      case "keys":
-        void runKeysCommand(rest).catch((err) => {
-          console.error(err instanceof Error ? err.message : err);
-          process.exit(1);
-        });
-        break;
-      default:
-        console.error(`Unknown command: ${command}\n`);
-        console.log(ROOT_USAGE);
-        process.exit(1);
-    }
-  } catch (err) {
-    console.error(err instanceof Error ? err.message : err);
-    process.exit(1);
+      }
+      return runOpsCommand(command, rest);
+    case "setup":
+    case "up":
+    case "down":
+    case "status":
+    case "logs":
+    case "smoke":
+    case "reset":
+      return runOpsCommand(command, rest);
+    case "explain":
+      return runExplainCommand(rest);
+    case "validate":
+      return runValidateCommand(rest);
+    case "test-policy":
+      return runTestPolicyCommand(rest);
+    case "requests":
+      return runRequestsCommand(rest);
+    case "usage":
+      return runUsageCommand(rest);
+    case "keys":
+      return runKeysCommand(rest);
+    default:
+      console.error(`Unknown command: ${command}\n`);
+      console.log(ROOT_USAGE);
+      return 1;
   }
 }
 
@@ -99,39 +100,33 @@ async function runOpsCommand(command: OpsCommand, args: string[]): Promise<void>
     console.log(OPS_USAGE);
     return;
   }
-  await runOps(command, args).catch((err) => {
-    console.error(err instanceof Error ? err.message : err);
-    process.exit(1);
-  });
+  await runOps(command, args);
 }
 
-function runExplainCommand(args: string[]): void {
+async function runExplainCommand(args: string[]): Promise<void> {
   if (args.includes("-h") || args.includes("--help")) {
     console.log(EXPLAIN_USAGE);
     return;
   }
-  void runExplain(parseExplainFlags(args)).catch((err) => {
-    console.error(err instanceof Error ? err.message : err);
-    process.exit(1);
-  });
+  await runExplain(parseExplainFlags(args));
 }
 
-function runValidateCommand(args: string[]): void {
+function runValidateCommand(args: string[]): number | void {
   const configPath = flagValue(args, "--config") ?? "./modelgov.yaml";
   const production = args.includes("--production");
   const result = validateConfig({ configPath, production });
   console.log(formatValidateResult(result));
-  if (!result.ok) process.exit(1);
+  if (!result.ok) return 1;
 }
 
-function runTestPolicyCommand(args: string[]): void {
+function runTestPolicyCommand(args: string[]): number | void {
   const file = flagValue(args, "--file") ?? "./modelgov.policy-tests.yaml";
   const config = flagValue(args, "--config");
   const { results, ok } = runPolicyTestFile(file, config);
   for (const r of results) {
     console.log(r.passed ? `✓ ${r.name}` : `✗ ${r.name}: ${r.message}`);
   }
-  if (!ok) process.exit(1);
+  if (!ok) return 1;
   console.log(`\n${results.length} passed`);
 }
 
@@ -146,12 +141,6 @@ async function runUsageCommand(args: string[]): Promise<void> {
     return;
   }
   throw new Error(`Unknown usage subcommand: ${sub}`);
-}
-
-function flagValue(args: string[], flag: string): string | undefined {
-  const idx = args.indexOf(flag);
-  if (idx === -1) return undefined;
-  return args[idx + 1];
 }
 
 const EXPLAIN_USAGE = `modelgov explain [options]
@@ -186,7 +175,7 @@ function parseExplainFlags(args: string[]): ExplainFlags {
     userId: "explain-user",
     configPath: "./modelgov.yaml",
     local: false,
-    baseUrl: process.env.MODELGOV_URL ?? "http://localhost:3090",
+    baseUrl: process.env.MODELGOV_URL ?? DEFAULT_BASE_URL,
     apiKey: process.env.MODELGOV_API_KEY,
     json: false,
   };

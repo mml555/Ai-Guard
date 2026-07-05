@@ -18,7 +18,7 @@ export function registerEmergencyRoutes(app: FastifyInstance, pool: Pool): void 
     if (!request.ctx.permissions?.includes("policy:read")) {
       return sendError(reply, 403, "forbidden", {}, "API key is not permitted to read emergency status");
     }
-    return reply.send(await getEmergencyPause(pool));
+    return reply.send(await getEmergencyPause(pool, request.ctx.tenantId));
   });
 
   app.post("/v1/admin/emergency/pause", {
@@ -40,6 +40,9 @@ export function registerEmergencyRoutes(app: FastifyInstance, pool: Pool): void 
       paused: true,
       reason: parsed.data.reason,
       pausedBy: request.ctx.apiKeyName ?? "unknown",
+      // A tenant-bound operator pauses only their own tenant; a platform key
+      // (no tenant binding) pauses everyone.
+      tenantId: request.ctx.tenantId,
     });
     return reply.send(state);
   });
@@ -53,19 +56,14 @@ export function registerEmergencyRoutes(app: FastifyInstance, pool: Pool): void 
     if (!request.ctx.permissions?.includes("policy:write")) {
       return sendError(reply, 403, "forbidden", {}, "API key is not permitted to resume AI requests");
     }
-    const state = await setEmergencyPause(pool, {
+    await setEmergencyPause(pool, {
       paused: false,
       pausedBy: request.ctx.apiKeyName ?? "unknown",
+      tenantId: request.ctx.tenantId,
     });
-    return reply.send(state);
+    // Report the EFFECTIVE state, not the write: a platform-wide pause still
+    // keeps this tenant paused after clearing its own switch, so echoing
+    // {paused:false} would misleadingly report success for a no-op.
+    return reply.send(await getEmergencyPause(pool, request.ctx.tenantId));
   });
-}
-
-export async function assertAiRequestsNotPaused(pool: Pool): Promise<{
-  paused: boolean;
-  reason?: string;
-}> {
-  const state = await getEmergencyPause(pool);
-  if (!state.paused) return { paused: false };
-  return { paused: true, reason: state.reason };
 }

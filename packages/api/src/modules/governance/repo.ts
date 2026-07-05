@@ -14,12 +14,24 @@ export interface ErasureResult {
 const ERASE_BATCH = 5000;
 
 /**
+ * Tables this module may erase from. `deleteInBatches` interpolates the table
+ * name (Postgres can't parameterize identifiers), so it is asserted against this
+ * allowlist before use — a future caller passing a non-constant table can never
+ * turn this into a SQL-injection sink.
+ */
+const ERASABLE_TABLES = new Set([
+  "request_logs",
+  "idempotency_keys",
+  "budget_reservation_leases",
+]);
+
+/**
  * Delete matching rows in bounded batches so no single DELETE statement can
  * exceed the runtime statement_timeout (30s). A heavy user's request_logs could
  * otherwise blow the timeout, roll back the whole erasure transaction (including
  * its audit row), and become impossible to erase. Uses ctid so no per-table PK
- * assumption is needed. `where` and `table` are internal literals; `params` are
- * always parameterized.
+ * assumption is needed. `where` and `table` are internal literals (the table is
+ * additionally allowlist-checked); `params` are always parameterized.
  */
 async function deleteInBatches(
   pool: Queryable,
@@ -27,6 +39,9 @@ async function deleteInBatches(
   where: string,
   params: unknown[],
 ): Promise<number> {
+  if (!ERASABLE_TABLES.has(table)) {
+    throw new Error(`refusing to erase from non-allowlisted table '${table}'`);
+  }
   let total = 0;
   for (;;) {
     const res = await pool.query(

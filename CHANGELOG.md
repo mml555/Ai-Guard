@@ -15,6 +15,81 @@ guarantees in `docs/versioning.md` apply.
 
 ## [Unreleased]
 
+### ⚠ Breaking
+- **`DATABASE_SSL=require` with a remote `DATABASE_URL` now refuses to boot in
+  production.** `require` encrypts but does NOT verify the Postgres server
+  certificate, so a managed/remote connection is MITM-able while reading as
+  "secure TLS". Deployments that explicitly set `DATABASE_SSL=require` against a
+  non-local host must switch to `DATABASE_SSL=verify-full` (set `DATABASE_SSL_CA`
+  if the CA isn't in the system trust store) — or, only for a trusted private
+  network, set `DATABASE_SSL_NO_VERIFY_ALLOWED=true` to keep the old behavior.
+  `modelgov doctor production` flags this before you deploy.
+
+### Added
+- **`metered` billing mode**: bill usage through a Stripe Billing Meter instead
+  of (not alongside) prepaid credits. Requires `billing.provider: stripe` and
+  `billing.stripe.meter_event_name`; the maintenance loop reports settled usage
+  to the meter (idempotent per request id). Prepaid credits and the meter remain
+  mutually exclusive per deployment — config validation rejects combining them,
+  and now also rejects a `meter_event_name` in `internal_only` mode (it would
+  silently never report).
+- **`/v1/embeddings` now enforces billing**: prepaid-credit check/reserve/settle
+  (402 `insufficient_credits` on an empty wallet, fallback top-ups included) and
+  meter reporting in `metered` mode. Previously embeddings bypassed billing
+  entirely — real provider spend with no wallet debit.
+- **Wallet reconciliation sweep** (migration `0024`): credit reservations are
+  now backed by per-request leases; a crash or failed settle between reserve and
+  settle no longer strands `credits_reserved_usd` forever — the maintenance
+  sweep returns stale holds to the wallet within `RESERVATION_STALE_MS`, and
+  settles are idempotent under retry (never double-charged).
+- **Tenant-scoped emergency pause**: a tenant-bound `policy:write` key now
+  pauses only its own tenant; only a platform (non-tenant-bound) key pauses
+  every tenant. Previously any tenant admin could halt all tenants.
+- **Retention sweeps** for billing/outbox plumbing tables: delivered webhooks
+  (30d), dead-lettered webhooks (90d), reported meter events (30d),
+  never-reportable meter events (90d, logged as a warning — that usage was not
+  invoiced), and Stripe webhook idempotency records (90d).
+- `billing.stripe.downgrade_user_type`: the user type applied on
+  `invoice.payment_failed` (default `free_user`).
+- Operator console: CSP + security headers on the nginx image, an https warning
+  when the login URL would send the token to a remote host over plain http,
+  surfaced revoke-key failures, and first unit tests (wired into `test:packages`
+  and lint).
+- Deploy wiring for billing: `STRIPE_SECRET_KEY` / `STRIPE_WEBHOOK_SECRET`
+  (+ `MODELGOV_DEPLOY_PROFILE`) pass through `docker-compose.production.yml`,
+  and the Helm chart gained `secret.stripeSecretKey` / `secret.stripeWebhookSecret`.
+- Docs: `billing:` reference in `docs/configuration.md`, all post-1.0 routes in
+  `docs/api.md`, a compose-stack matrix in `docs/operations.md`, and the full
+  examples list in the README.
+
+### Fixed
+- Stripe webhook signature verification now accepts any matching `v1=` entry,
+  so events signed during a webhook-secret rotation are no longer dropped.
+- SSRF host guard now catches numeric IPv4 encodings (`http://2130706433/`,
+  hex/octal, short forms), IPv4-mapped IPv6, CGNAT (100.64/10) and 0/8 ranges,
+  and bracketed IPv6 hosts (`[::1]` was previously not matched at the delivery
+  sink).
+- The committed OpenAPI spec now includes `/v1/webhooks/stripe` (the export
+  previously ran with billing disabled, dropping the conditionally-registered
+  route).
+
+### Changed
+- Release workflow now runs the full test suite (with Postgres) on the tagged
+  commit before publishing to npm/PyPI, and all third-party GitHub Actions are
+  pinned to commit SHAs. CI runs once per ref (concurrency groups; push builds
+  restricted to `main` and tags) and uploads the coverage report as an artifact.
+- k8s manifests and README now use the real GHCR image path shape
+  (`ghcr.io/mml555/modelgov/modelgov-api`).
+- The dev `docker-compose.local.yml` overlay binds the API to 127.0.0.1 (it
+  runs with the well-known local key).
+- Vitest upgraded 2.1 → 4.1. Coverage thresholds were re-baselined for the new
+  v8 provider's counting AND the newly-measured CLI package, with per-package
+  threshold gates added (api / policy-engine / sdk-typescript / cli) so the
+  global number can't hide a single package's regression. CI's "integration
+  tests actually ran" guard was updated for vitest 4's summary format (the old
+  per-file `↓` markers are gone — the previous grep would have silently never
+  fired again).
+
 ## [1.1.0] - 2026-07-03
 
 ### Added
@@ -119,6 +194,19 @@ operability are completed.
   re-resolved at build time, so the same commit yields the same dependency tree.
 
 ### ⚠ Breaking
+- **Project renamed `ai-guard` → `modelgov`** across every surface. Migration for
+  pre-1.0 users:
+  - **npm packages:** `@ai-guard/*` → `@modelgov/*` (`@modelgov/sdk`,
+    `@modelgov/api`, `@modelgov/cli`, `@modelgov/policy-engine`); scaffolder
+    `create-ai-guard` → `create-modelgov`.
+  - **PyPI:** the Python SDK is now published as `modelgov`.
+  - **CLI:** the `ai-guard` command is now `modelgov`.
+  - **Config file:** `ai-guard.yaml` → `modelgov.yaml`.
+  - **Env vars:** `AI_GUARD_*` → `MODELGOV_*` (e.g. `AI_GUARD_API_KEY(S)` →
+    `MODELGOV_API_KEY(S)`, `AI_GUARD_CONFIG` → `MODELGOV_CONFIG`,
+    `AI_GUARD_PRODUCTION` → `MODELGOV_PRODUCTION`). The old names are **not**
+    read — update your environment before upgrading.
+  - **Container image:** `ghcr.io/<org>/ai-guard-api` → `ghcr.io/<org>/modelgov-api`.
 - **Config schema:** unknown/misspelled top-level or budget keys in
   `modelgov.yaml` are now rejected (previously ignored). Validate with
   `modelgov validate --production` before upgrading.

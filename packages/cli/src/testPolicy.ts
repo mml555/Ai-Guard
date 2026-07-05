@@ -9,6 +9,7 @@ import {
   type UsageSnapshot,
 } from "@modelgov/policy-engine";
 import { resolveUserPath } from "./paths.js";
+import { zeroUsage } from "./flags.js";
 
 export interface PolicyTestCase {
   name: string;
@@ -39,16 +40,6 @@ export interface PolicyTestResult {
   message?: string;
 }
 
-const ZERO_USAGE: UsageSnapshot = {
-  userDailyUsdUsed: 0,
-  userDailyUsdReserved: 0,
-  userDailyRequestsUsed: 0,
-  featureMonthlyUsdUsed: 0,
-  featureMonthlyUsdReserved: 0,
-  globalMonthlyUsdUsed: 0,
-  globalMonthlyUsdReserved: 0,
-};
-
 export function loadPolicyTestFile(path: string): PolicyTestFile {
   const raw = parseYaml(readFileSync(resolveUserPath(path), "utf8")) as PolicyTestFile;
   if (!raw?.cases?.length) {
@@ -65,7 +56,7 @@ export function runPolicyTests(
 }
 
 function runOne(config: ModelgovConfig, testCase: PolicyTestCase): PolicyTestResult {
-  const usage: UsageSnapshot = { ...ZERO_USAGE, ...testCase.usage };
+  const usage: UsageSnapshot = { ...zeroUsage(), ...testCase.usage };
   try {
     const decision = evaluateAiRequest({
       request: {

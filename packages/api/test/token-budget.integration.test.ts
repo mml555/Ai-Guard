@@ -50,9 +50,14 @@ describe.skipIf(!DATABASE_URL)("token-based limiting (integration)", () => {
     });
   }
 
-  const body = { userId: "u1", userType: "logged_in", feature: "chat", messages: [{ role: "user", content: "hi" }] };
-  const post = (server: FastifyInstance) =>
-    server.inject({ method: "POST", url: "/v1/chat", headers: { authorization: "Bearer secret" }, payload: body });
+  const body = (userId: string) => ({
+    userId,
+    userType: "logged_in",
+    feature: "chat",
+    messages: [{ role: "user", content: "hi" }],
+  });
+  const post = (server: FastifyInstance, userId = "token-user") =>
+    server.inject({ method: "POST", url: "/v1/chat", headers: { authorization: "Bearer secret" }, payload: body(userId) });
 
   it("blocks when the token estimate exceeds a user daily token cap", async () => {
     const cfg = config({
@@ -61,7 +66,7 @@ describe.skipIf(!DATABASE_URL)("token-based limiting (integration)", () => {
         by_user_type: { logged_in: { daily_usd: 1000, daily_requests: 1000, models: ["cheap"], daily_tokens: 400 } },
       },
     });
-    const res = await post(app(cfg));
+    const res = await post(app(cfg), "token-cap-block");
     expect(res.statusCode).toBe(403);
     expect(res.json().error.details.reasonCode).toBe("daily_token_limit_reached");
   });
@@ -73,9 +78,13 @@ describe.skipIf(!DATABASE_URL)("token-based limiting (integration)", () => {
         by_user_type: { logged_in: { daily_usd: 1000, daily_requests: 1000, models: ["cheap"], daily_tokens: 5000 } },
       },
     });
-    const res = await post(app(cfg));
+    const userId = "token-cap-allow";
+    const res = await post(app(cfg), userId);
     expect(res.statusCode).toBe(200);
-    const { rows } = await pool.query("SELECT used_tokens, reserved_tokens FROM budget_counters WHERE scope='user_daily'");
+    const { rows } = await pool.query(
+      "SELECT used_tokens, reserved_tokens FROM budget_counters WHERE scope='user_daily' AND key=$1",
+      [userId],
+    );
     expect(Number(rows[0].used_tokens)).toBe(430); // actual input+output
     expect(Number(rows[0].reserved_tokens)).toBe(0); // reservation settled
   });
@@ -90,9 +99,10 @@ describe.skipIf(!DATABASE_URL)("token-based limiting (integration)", () => {
       },
     });
     const server = app(cfg);
-    expect((await post(server)).statusCode).toBe(200);
-    expect((await post(server)).statusCode).toBe(200);
-    const third = await post(server);
+    const userId = "token-cap-series";
+    expect((await post(server, userId)).statusCode).toBe(200);
+    expect((await post(server, userId)).statusCode).toBe(200);
+    const third = await post(server, userId);
     expect(third.statusCode).toBe(403);
     expect(third.json().error.details.reasonCode).toBe("daily_token_limit_reached");
   });
@@ -104,7 +114,7 @@ describe.skipIf(!DATABASE_URL)("token-based limiting (integration)", () => {
         by_user_type: { logged_in: { daily_usd: 1000, daily_requests: 1000, models: ["cheap"] } },
       },
     });
-    const res = await post(app(cfg));
+    const res = await post(app(cfg), "token-global-block");
     expect(res.statusCode).toBe(403);
     expect(res.json().error.details.reasonCode).toBe("global_monthly_token_limit_reached");
   });

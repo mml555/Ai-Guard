@@ -59,7 +59,10 @@ existing ConfigMap) and `helm upgrade`.
 - **Secret** — provide `secret.existingSecret` (recommended: sync from Vault /
   CSI / Sealed Secrets), or let the chart create one from `secret.*`. Carries
   `MODELGOV_API_KEY`, `DATABASE_URL`, `LITELLM_MASTER_KEY`, optional
-  `METRICS_AUTH_TOKEN`, and provider keys (`secret.providerKeys`).
+  `METRICS_AUTH_TOKEN`, optional Stripe billing keys (`secret.stripeSecretKey`
+  → `STRIPE_SECRET_KEY`, `secret.stripeWebhookSecret` → `STRIPE_WEBHOOK_SECRET`;
+  pair with a `billing:` section in the policy config), and provider keys
+  (`secret.providerKeys`).
 - **Policy** — inline `config.aiGuardYaml` or `config.existingConfigMap`. The API
   pods roll automatically when the config checksum changes.
 

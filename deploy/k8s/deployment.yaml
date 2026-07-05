@@ -1,3 +1,8 @@
+# NOTE: These raw manifests are a minimal starting point. The Helm chart at
+# deploy/helm/modelgov is the recommended, hardened deploy path — it adds a
+# render-time image-pinning guard, PodDisruptionBudget, NetworkPolicy,
+# topology spread, migration hook, and keeps this securityContext in sync.
+# Prefer Helm for production; treat this file as illustrative.
 apiVersion: apps/v1
 kind: Deployment
 metadata:
@@ -13,9 +18,25 @@ spec:
       labels:
         app: modelgov-api
     spec:
+      # Pod-level hardening (mirrors the Helm chart's api.podSecurityContext).
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 1000
+        runAsGroup: 1000
+        fsGroup: 1000
+        seccompProfile:
+          type: RuntimeDefault
       containers:
         - name: api
-          image: ghcr.io/your-org/modelgov-api:REPLACE_TAG
+          # Fix the org placeholder to the repo convention. Pin the tag to a
+          # released version (or a @sha256 digest) before deploying.
+          image: ghcr.io/mml555/modelgov/modelgov-api:REPLACE_TAG
+          # Container-level hardening (mirrors api.containerSecurityContext).
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: ["ALL"]
           ports:
             - containerPort: 3000
           envFrom:
@@ -38,6 +59,9 @@ spec:
             - name: config
               mountPath: /config
               readOnly: true
+            # readOnlyRootFilesystem needs a writable scratch dir.
+            - name: tmp
+              mountPath: /tmp
           livenessProbe:
             httpGet:
               path: /health
@@ -58,3 +82,5 @@ spec:
         - name: config
           configMap:
             name: modelgov-config
+        - name: tmp
+          emptyDir: {}

@@ -7,8 +7,8 @@ import type {
   SafetyFinding,
   SafetyGuard,
   SafetyResult,
-} from "./index";
-import { SafetyServiceError as SafetyBackendError } from "./index";
+} from "./contracts";
+import { SafetyServiceError as SafetyBackendError } from "./contracts";
 
 /**
  * Runs PII handling then injection detection, gated by the resolved safetyPlan.

@@ -15,4 +15,6 @@ export interface BillingServiceConfig {
   /** Env-resolved Stripe secret (overrides yaml secret_key). */
   stripeSecretKey?: string;
   stripeWebhookSecret?: string;
+  /** Test seam for Stripe API calls (meter-event reporting). */
+  fetchImpl?: typeof fetch;
 }

@@ -1,4 +1,5 @@
 import { clientFromEnv } from "./api.js";
+import { flagValue } from "./flags.js";
 
 interface KeyRecord {
   id: string;
@@ -90,12 +91,6 @@ export async function runKeysCommand(args: string[]): Promise<void> {
     default:
       throw new Error(`Unknown keys subcommand: ${sub}`);
   }
-}
-
-function flagValue(args: string[], flag: string): string | undefined {
-  const idx = args.indexOf(flag);
-  if (idx === -1) return undefined;
-  return args[idx + 1];
 }
 
 function requireId(id: string | undefined): string {
