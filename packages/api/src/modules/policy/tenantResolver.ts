@@ -39,10 +39,30 @@ export function createTenantPolicyResolver(opts: {
   ttlMs: number;
   /** Injectable clock for tests. */
   now?: () => number;
+  /**
+   * When false (single-tenant hot reload), every request resolves the DEFAULT
+   * tenant's active version regardless of the caller's tenantId — the store is
+   * used only to hot-reload one policy, not to segment by tenant. Default true
+   * preserves per-tenant resolution.
+   */
+  perTenant?: boolean;
+  /**
+   * Applied to each config loaded from the store, mirroring the file path's
+   * `resolveEnvRefs` so a stored version can reference secrets via `env/VAR`.
+   * Identity by default (no resolution). The fallback config is assumed already
+   * resolved (it comes from `resolvePolicy`).
+   */
+  resolveConfig?: (config: ModelgovConfig) => ModelgovConfig;
 }): TenantPolicyResolver {
   const { pool, fallback } = opts;
   const ttl = opts.ttlMs;
   const now = opts.now ?? Date.now;
+  const perTenant = opts.perTenant ?? true;
+  const resolveConfig = opts.resolveConfig ?? ((c) => c);
+  // In single-tenant mode collapse every caller onto the default tenant so
+  // resolve/invalidate operate on the one active version.
+  const keyFor = (tenantId: string | undefined): string =>
+    perTenant ? (tenantId ?? DEFAULT_TENANT) : DEFAULT_TENANT;
   // Cache the in-flight promise so concurrent requests for the same tenant share
   // one DB read (and a burst can't stampede the store).
   const cache = new Map<string, { value: Promise<ResolvedTenantPolicy>; expiresAt: number }>();
@@ -51,14 +71,14 @@ export function createTenantPolicyResolver(opts: {
     const active = await getActiveConfigVersion(pool, tenantId);
     if (!active) return fallback;
     return {
-      config: active.config,
+      config: resolveConfig(active.config),
       policyMeta: { configHash: active.record.checksum, policyVersion: active.record.id },
     };
   }
 
   return {
     async resolve(tenantId): Promise<ResolvedTenantPolicy> {
-      const key = tenantId ?? DEFAULT_TENANT;
+      const key = keyFor(tenantId);
       const cached = cache.get(key);
       if (cached && cached.expiresAt > now()) return cached.value;
 
@@ -76,7 +96,7 @@ export function createTenantPolicyResolver(opts: {
       return entry.value;
     },
     invalidate(tenantId): void {
-      cache.delete(tenantId ?? DEFAULT_TENANT);
+      cache.delete(keyFor(tenantId));
     },
     clear(): void {
       cache.clear();

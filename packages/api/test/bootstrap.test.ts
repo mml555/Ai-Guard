@@ -14,6 +14,7 @@ import {
   resolveBudgetAlert,
   resolvePolicy,
   startBackgroundJobs,
+  startPolicyListener,
   warnMissingSafetyBackends,
 } from "../src/bootstrap";
 import { assertProductionEnv } from "../src/config/productionGuards";
@@ -270,6 +271,69 @@ describe("createPolicyResolver", () => {
       {},
       expect.stringContaining("POLICY_STORE_ENABLED=true"),
     );
+  });
+
+  const storeEnv = (extra: Record<string, string>) =>
+    loadEnv({
+      DATABASE_URL: "postgres://u:p@localhost/db",
+      MODELGOV_CONFIG: "./modelgov.yaml",
+      LITELLM_BASE_URL: "http://localhost:4000",
+      MODELGOV_API_KEY: "sk-test-key-1234567890",
+      POLICY_STORE_ENABLED: "true",
+      ...extra,
+    });
+
+  it("returns a resolver for single-tenant hot reload when the store is on (default)", () => {
+    expect(
+      createPolicyResolver(storeEnv({}), mockPool() as never, { config, policyMeta: {} }),
+    ).toBeDefined();
+  });
+
+  it("warns that single-tenant hot reload resolves the default tenant only", () => {
+    const warn = vi.fn();
+    createPolicyResolver(storeEnv({}), mockPool() as never, { config, policyMeta: {} }, { warn });
+    expect(warn).toHaveBeenCalledWith({}, expect.stringContaining("default tenant"));
+  });
+
+  it("returns undefined for single-tenant when hot reload is explicitly off", () => {
+    expect(
+      createPolicyResolver(storeEnv({ POLICY_HOT_RELOAD: "false" }), mockPool() as never, {
+        config,
+        policyMeta: {},
+      }),
+    ).toBeUndefined();
+  });
+
+  it("returns a resolver for multi-tenant policy when the store is on", () => {
+    expect(
+      createPolicyResolver(storeEnv({ MULTI_TENANT_POLICY: "true", POLICY_HOT_RELOAD: "false" }), mockPool() as never, {
+        config,
+        policyMeta: {},
+      }),
+    ).toBeDefined();
+  });
+});
+
+describe("startPolicyListener", () => {
+  const env = () =>
+    loadEnv({
+      DATABASE_URL: "postgres://u:p@localhost/db",
+      MODELGOV_CONFIG: "./modelgov.yaml",
+      LITELLM_BASE_URL: "http://localhost:4000",
+      MODELGOV_API_KEY: "sk-test-key-1234567890",
+    });
+  const log = { info: vi.fn(), warn: vi.fn() };
+
+  it("returns undefined when there is no resolver to invalidate (boot-config path)", () => {
+    expect(startPolicyListener(env(), undefined, log)).toBeUndefined();
+  });
+
+  it("starts a listener when a resolver is present, and stop() is clean", async () => {
+    const resolver = { resolve: vi.fn(), invalidate: vi.fn(), clear: vi.fn() };
+    const listener = startPolicyListener(env(), resolver as never, log);
+    expect(listener).toBeDefined();
+    // No real DB here — the background connect fails and is torn down cleanly.
+    await listener?.stop();
   });
 });
 

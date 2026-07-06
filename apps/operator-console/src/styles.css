@@ -92,3 +92,35 @@ input, textarea {
 .error { color: #f87171; font-size: 0.85rem; }
 
 .mono { font-family: ui-monospace, monospace; font-size: 0.85rem; }
+
+/* Live dashboard: metrics, bars, toolbar */
+.metrics-row { display: flex; gap: 1rem; flex-wrap: wrap; }
+.metric { flex: 1; min-width: 130px; }
+.metric-label { font-size: 0.72rem; color: #9ca3af; text-transform: uppercase; letter-spacing: 0.03em; }
+.metric-value { font-size: 1.55rem; font-weight: 700; }
+
+.bar-track { display: block; background: #0f1117; border: 1px solid #2a2f3a; border-radius: 6px; height: 14px; overflow: hidden; }
+.bar-fill { display: block; height: 100%; background: #3b82f6; transition: width 0.4s ease; }
+.bar-fill.status-ok { background: #34d399; }
+.bar-fill.status-warn { background: #fbbf24; }
+.bar-fill.status-fail { background: #f87171; }
+
+.bar-row { display: grid; grid-template-columns: 170px 1fr 110px; gap: 0.6rem; align-items: center; margin-bottom: 0.5rem; font-size: 0.85rem; }
+.bar-row .num { text-align: right; color: #aab0bc; font-variant-numeric: tabular-nums; }
+
+.toolbar { display: flex; gap: 0.5rem; align-items: center; margin-bottom: 1rem; flex-wrap: wrap; }
+.toolbar .spacer { flex: 1; }
+.chip { background: #252b38; border: 1px solid #2a2f3a; color: #aab0bc; border-radius: 999px; padding: 0.3rem 0.75rem; cursor: pointer; font-size: 0.8rem; }
+.chip.active { background: #3b82f6; color: #fff; border-color: #3b82f6; }
+.muted { color: #6b7280; font-size: 0.8rem; }
+
+.tenant-switcher { display: block; margin-bottom: 1.25rem; }
+.tenant-switcher select {
+  width: 100%;
+  background: #0f1117;
+  border: 1px solid #374151;
+  color: #e8eaed;
+  border-radius: 6px;
+  padding: 0.4rem 0.5rem;
+  margin-top: 0.25rem;
+}

@@ -3,9 +3,10 @@
 A web UI over the control-plane APIs so FinOps, security, and platform teams can
 operate Modelgov without editing YAML or using the CLI.
 
-> **Status:** design. The **backend the console needs is already built and
-> tested** (see below) — this is a frontend that consumes existing endpoints. No
-> new server capability is required for a read-heavy v1.
+> **Status:** v1 shipped (`apps/operator-console`). A static React/Vite SPA over
+> the documented HTTP API — Overview, Requests, Usage, Keys, Policy, Audit, and
+> Privacy. The nav and per-row actions are permission-aware (driven by
+> `GET /v1/admin/whoami`); server-side RBAC remains the enforcement boundary.
 
 ## The APIs already exist
 
@@ -41,8 +42,9 @@ do) — enforcement stays server-side.
 
 ## Surfaces (v1)
 
-1. **Overview** — global spend vs cap, degrade/fallback rates, block reasons
-   (from `usage/summary` + Prometheus `/metrics`).
+1. **Overview** — live-polling dashboard: global spend-vs-cap gauge and a
+   request-outcome bar chart (completed / blocked / degraded / fallback rates)
+   from `GET /v1/usage` (`globalMonthly.capUsd`) + `GET /v1/usage/summary`.
 2. **Keys** — table with prefix/name/permissions/last-used; create (one-time
    secret modal), rotate, revoke. Reads never expose hashes.
 3. **Policy** — YAML editor with client-side validate → save version → diff →
@@ -54,15 +56,33 @@ do) — enforcement stays server-side.
 
 ## Build notes / roadmap
 
-- v1 is read-mostly + the mutations above; **live spend charts** can poll
-  `usage/summary` or scrape Prometheus.
-- **Zero-restart policy apply** depends on the hot-reload item in
-  [dynamic-policy](./dynamic-policy.md); until then the console shows "activated
-  — applies on next rolling restart".
-- **Multi-tenant views** land with [multi-tenancy](./multi-tenancy.md) (tenant
-  switcher, per-tenant budgets).
-- A static, self-contained **mockup** can be produced as a first deliverable to
-  align on layout before wiring the live API.
+- The Policy surface is a full editor: paste YAML → validate + diff against the
+  active version (`…/preview`) → save → (when the two-person rule is on)
+  approve/reject → activate/rollback, with a version-history table showing each
+  version's `status`, proposer, and reviewer. Approve/reject buttons appear only
+  for operators holding `policy:approve`; activate only for `policy:write`.
+- **Zero-restart policy apply** is live (see [dynamic-policy](./dynamic-policy.md)):
+  the activate response reports "applied immediately across replicas (hot
+  reload)" when the store's hot reload is on, or the rolling-restart note when
+  it isn't.
+- **Live Overview dashboard** is wired: it polls `GET /v1/usage/summary` and
+  `GET /v1/usage` every 15s (with a live/pause toggle and a 24h/7d/30d window
+  selector) and renders a **global spend-vs-cap gauge** (used + reserved against
+  the configured monthly cap, now surfaced on `/v1/usage` as `capUsd`) plus a
+  **request-outcome bar chart** (completed / blocked / safety-blocked / degraded
+  / fallback rates). Charts are dependency-free CSS bars — no external chart
+  library, so the strict-CSP nginx image serves them unchanged.
+- **Metrics page** scrapes Prometheus `/metrics` (with the deployment's
+  `METRICS_AUTH_TOKEN` if set) and shows the deployment-wide `modelgov_*` domain
+  counters — the alternative Prometheus data source the Overview design mentioned,
+  as its own page (deployment-wide, vs the tenant-scoped Overview).
+- **Multi-tenant views** are wired (see [multi-tenancy](./multi-tenancy.md)): a
+  platform (non-tenant-bound) operator gets a **tenant switcher** (from
+  `GET /v1/admin/tenants`) that sends `X-Modelgov-Tenant` on every request,
+  re-scoping the whole console to one tenant or the untenanted default. A
+  tenant-bound operator has no switcher — the server ignores the header for bound
+  keys. Per-tenant budgets surface through the Overview gauge, whose cap follows
+  the selected tenant's active policy.
 
 Because the API contract is fixed and typed, the console is decoupled
 frontend work — it can be built and shipped independently of the gateway.

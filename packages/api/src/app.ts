@@ -17,6 +17,7 @@ import { registerBillingRoutes } from "./modules/billing/routes";
 import { registerEmergencyRoutes } from "./modules/emergency/routes";
 import { registerGovernanceRoutes } from "./modules/governance/routes";
 import { registerPolicyRoutes } from "./modules/policy/routes";
+import { registerWhoamiRoute, registerTenantsRoute } from "./modules/identity/routes";
 import { registerMetrics } from "./plugins/metrics";
 import { createDomainMetrics, MetricsObservability } from "./plugins/domainMetrics";
 import { registerOpenApi } from "./plugins/openApi";
@@ -78,6 +79,12 @@ export interface BuildServerOptions extends ChatRouteDeps {
   trustProxy?: boolean | number | string | string[];
   rateLimit?: RateLimitOptions;
   health?: Omit<HealthDeps, "pool">;
+  /**
+   * Two-person rule for the policy store: when true, a saved version is
+   * `proposed` and must be approved by a different operator (holding
+   * `policy:approve`) before it can be activated. Default: off.
+   */
+  policyApprovalRequired?: boolean;
 }
 
 /**
@@ -231,7 +238,15 @@ export function buildServer(opts: BuildServerOptions): FastifyInstance {
       presidioAnonymizerUrl: opts.health?.presidioAnonymizerUrl,
       fetchImpl: opts.health?.fetchImpl,
     });
-    registerUsageRoute(scope, opts.pool, { defaultProjectId: opts.config.project.name });
+    registerWhoamiRoute(scope);
+    registerTenantsRoute(scope, opts.pool);
+    registerUsageRoute(scope, opts.pool, {
+      defaultProjectId: opts.config.project.name,
+      globalMonthlyCapUsd: opts.config.budgets.global?.monthlyUsd,
+      // Per-tenant / hot-reloaded cap: resolve the effective tenant's active
+      // policy cap instead of the static boot cap when a resolver is present.
+      tenantPolicy: opts.tenantPolicy,
+    });
     registerRequestsRoute(scope, opts.pool, { defaultProjectId: opts.config.project.name });
     registerBillingRoutes(scope, opts.pool, opts.billing);
     registerEmergencyRoutes(scope, opts.pool);
@@ -244,9 +259,14 @@ export function buildServer(opts: BuildServerOptions): FastifyInstance {
       registerAuditRoutes(scope, opts.pool);
       registerGovernanceRoutes(scope, opts.pool);
       registerPolicyRoutes(scope, opts.pool, {
-        // Activating a version evicts that tenant's cached policy so the change
-        // applies immediately on this replica (others converge within the TTL).
-        onActivated: (tenantId) => opts.tenantPolicy?.invalidate(tenantId),
+        // Activating a version evicts this replica's cached policy immediately;
+        // other replicas are invalidated via LISTEN/NOTIFY (TTL is the backstop).
+        // Only defined when a resolver exists (hot reload on) so the response note
+        // is accurate on the boot-config path.
+        onActivated: opts.tenantPolicy
+          ? (tenantId) => opts.tenantPolicy?.invalidate(tenantId)
+          : undefined,
+        approvalRequired: opts.policyApprovalRequired,
       });
     }
     registerExplainRoute(scope, {

@@ -96,6 +96,9 @@ describe.skipIf(!DATABASE_URL)("GET /v1/usage (integration)", () => {
     expect(res.statusCode).toBe(200);
     const json = res.json();
     expect(json.globalMonthly.reservedUsd).toBeCloseTo(0.05, 6);
+    // The configured global monthly cap is surfaced so the console can render
+    // spend-vs-cap without fetching policy.
+    expect(json.globalMonthly.capUsd).toBe(100);
     expect(json.userDaily.usedUsd).toBe(0);
     expect(json.userDaily.reservedUsd).toBeCloseTo(0.05, 6);
     expect(json.featureMonthly.feature).toBe("support_chat");

@@ -14,6 +14,13 @@ export interface RequestContext {
   readonly userId?: string;
   readonly orgId?: string;
   readonly tenantId?: string;
+  /**
+   * Whether the API key/operator is bound to a specific tenant. Bound principals
+   * are locked to their tenant; unbound (platform) principals may target a tenant
+   * via the `X-Modelgov-Tenant` header (which sets `tenantId`). Lets endpoints and
+   * the console tell "locked to my tenant" from "platform, may switch".
+   */
+  readonly tenantBound?: boolean;
   /** Leaf budget node bound to the API key (hierarchical budgets). */
   readonly budgetNodeId?: string;
 }

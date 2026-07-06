@@ -36,6 +36,18 @@ const baseEnvSchema = z.object({
   // How long a resolved per-tenant policy is cached before re-reading the store.
   // Bounds how long an activation takes to apply across replicas (like key cache).
   POLICY_CACHE_TTL_MS: z.coerce.number().int().positive().default(30_000),
+  // Zero-restart hot reload: when true (and POLICY_STORE_ENABLED), activating a
+  // version applies without a restart — each request resolves the active version
+  // through the same TTL cache used for multi-tenant policy, and activation
+  // propagates to every replica instantly via Postgres LISTEN/NOTIFY (the TTL is
+  // the backstop). Set false to keep the boot-config path (activation applies on
+  // the next rolling restart). No effect when the store is off.
+  POLICY_HOT_RELOAD: z.enum(["true", "false"]).default("true"),
+  // Two-person rule for policy changes: when true (and POLICY_STORE_ENABLED), a
+  // saved version is `proposed` and cannot be activated until a DIFFERENT
+  // operator holding `policy:approve` approves it. Default false keeps the
+  // single-admin save→activate flow.
+  POLICY_APPROVAL_REQUIRED: z.enum(["true", "false"]).default("false"),
   // Hierarchical (node-tree) budgets: when true, requests carrying a budgetNodeId
   // (from the body or the API key) enforce budgets against the budget_nodes tree
   // instead of the flat dimensions. Default false keeps the flat path.

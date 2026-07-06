@@ -7,6 +7,12 @@ OpenAPI spec: **`GET /openapi.json`** (when server is running).
 Authentication: **`Authorization: Bearer <API_KEY>`** on all routes except
 `/health` and `/ready`.
 
+**Tenant selection (platform operators):** a non-tenant-bound key may add
+**`X-Modelgov-Tenant: <tenantId>`** to scope a request to one tenant — it sets
+the effective tenant for every tenant-partitioned read and write. A
+tenant-**bound** key ignores this header (it is locked to its own tenant), so it
+can never be used to reach another tenant's data.
+
 ## Endpoints
 
 | Method | Path | Permission | Description |
@@ -17,7 +23,7 @@ Authentication: **`Authorization: Bearer <API_KEY>`** on all routes except
 | `POST` | `/v1/chat` | `chat:create` | Guarded chat completion |
 | `POST` | `/v1/embeddings` | `chat:create` | Guarded embeddings (same policy/budget/billing spine as chat) |
 | `POST` | `/v1/explain` | `chat:create` or `policy:explain` | Dry-run policy (no model call) |
-| `GET` | `/v1/usage` | `usage:read` | Budget snapshots and recent stats |
+| `GET` | `/v1/usage` | `usage:read` | Budget snapshots and recent stats (`globalMonthly` includes `capUsd`, the configured global monthly cap) |
 | `GET` | `/v1/usage/summary` | `usage:read` | Aggregated cost/request summary |
 | `GET` | `/v1/requests` | `requests:read` | List audit records (metadata only) |
 | `GET` | `/v1/requests/:id` | `requests:read` | Single audit record |
@@ -26,6 +32,8 @@ Authentication: **`Authorization: Bearer <API_KEY>`** on all routes except
 | `GET` | `/v1/admin/keys/:id` | `keys:admin` | Single key record |
 | `POST` | `/v1/admin/keys/:id/rotate` | `keys:admin` | New secret; old one invalid immediately |
 | `POST` | `/v1/admin/keys/:id/revoke` | `keys:admin` | Revoke (idempotent) |
+| `GET` | `/v1/admin/whoami` | — (any authenticated) | The caller's own name, permissions, `tenantId`, and `tenantBound` (used by the console) |
+| `GET` | `/v1/admin/tenants` | any read perm | Selectable tenant ids — platform operators see all; a tenant-bound key sees only its own |
 | `GET` | `/v1/admin/audit` | `audit:read` | Tamper-evident admin audit log |
 | `GET` | `/v1/admin/audit/verify` | `audit:read` | Re-walk the hash chain; report integrity |
 | `POST` | `/v1/admin/erasure` | `data:erase` | Erase a user's request-linked data (GDPR/CCPA) |
@@ -34,7 +42,9 @@ Authentication: **`Authorization: Bearer <API_KEY>`** on all routes except
 | `POST` | `/v1/admin/policy/preview` | `policy:read` | Validate + diff a proposed policy without saving |
 | `GET` | `/v1/admin/policy/active` | `policy:read` | Active policy version metadata |
 | `GET` | `/v1/admin/policy/versions/:id/diff` | `policy:read` | Diff a stored version against another (`?against=<id>`) or the active one |
-| `POST` | `/v1/admin/policy/versions/:id/activate` | `policy:write` | Activate/rollback to a version |
+| `POST` | `/v1/admin/policy/versions/:id/activate` | `policy:write` | Activate/rollback to a version (`409 not_approved` if approval is required and the version isn't approved) |
+| `POST` | `/v1/admin/policy/versions/:id/approve` | `policy:approve` | Approve a proposed version (two-person rule; `403 self_approval` if the approver proposed it) |
+| `POST` | `/v1/admin/policy/versions/:id/reject` | `policy:approve` | Reject a proposed version |
 | `GET` | `/v1/users/:userId/balance` | `usage:read` | Prepaid-credit wallet balance (billing enabled only) |
 | `POST` | `/v1/admin/billing/top-up` | `billing:write` | Add credits to a user wallet |
 | `POST` | `/v1/webhooks/stripe` | — (Stripe-signed) | Stripe webhook receiver: credit top-ups, plan changes, payment failures |

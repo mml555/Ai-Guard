@@ -37,6 +37,9 @@ export interface UsageSummary {
     windowStart: string;
     usedUsd: number;
     reservedUsd: number;
+    /** Configured global monthly USD cap, when known — lets the console render
+     *  spend-vs-cap without fetching policy. Omitted if no global cap is set. */
+    capUsd?: number;
   };
   recentRequests: {
     last24h: number;
@@ -47,8 +50,9 @@ export interface UsageSummary {
 export async function getUsageSummary(
   pool: Pool,
   query: AuthorizedUsageQuery,
-  now = new Date(),
+  opts: { now?: Date; globalMonthlyCapUsd?: number } = {},
 ): Promise<UsageSummary> {
+  const now = opts.now ?? new Date();
   const month = monthWindowStart(now);
   // Trust the authorized values. authorizeUsageQuery already resolved the
   // project partition (ctx.projectId ?? query.projectId ?? defaultProjectId) —
@@ -83,6 +87,7 @@ export async function getUsageSummary(
       windowStart: month,
       usedUsd: globalSnap.globalMonthlyUsdUsed,
       reservedUsd: globalSnap.globalMonthlyUsdReserved,
+      ...(opts.globalMonthlyCapUsd != null ? { capUsd: opts.globalMonthlyCapUsd } : {}),
     };
   }
 

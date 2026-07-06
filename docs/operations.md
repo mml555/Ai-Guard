@@ -167,8 +167,14 @@ Built-in operator roles (least privilege):
 | `viewer` | `usage:read`, `requests:read` |
 | `finops` | `viewer` + `audit:read` |
 | `key-admin` | `keys:admin` + reads |
-| `policy-admin` | `policy:read`, `policy:write` + reads |
+| `policy-admin` | `policy:read`, `policy:write` + reads (authors versions; intentionally **cannot** approve) |
+| `policy-approver` | `policy:read`, `policy:approve` + reads (approves/rejects proposed versions) |
 | `owner` | everything |
+
+When `POLICY_APPROVAL_REQUIRED=true`, a saved policy version is `proposed` and
+can only be activated after a **different** operator holding `policy:approve`
+approves it (self-approval is rejected). Keep `policy:write` and `policy:approve`
+on separate roles/people so the two-person rule has teeth.
 
 Example: map an Okta/Entra group to `owner`:
 

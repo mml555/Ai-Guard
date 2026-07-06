@@ -3,6 +3,17 @@
 const DEFAULT_BASE = import.meta.env.VITE_MODELGOV_URL ?? "http://127.0.0.1:3000";
 const TOKEN_KEY = "modelgov-console-token";
 const BASE_KEY = "modelgov-console-url";
+const TENANT_KEY = "modelgov-console-tenant";
+
+/** The tenant a platform operator has selected in the switcher ("" = all). */
+export function getTenant(): string {
+  return sessionStorage.getItem(TENANT_KEY) ?? "";
+}
+
+export function setTenant(tenant: string): void {
+  if (tenant) sessionStorage.setItem(TENANT_KEY, tenant);
+  else sessionStorage.removeItem(TENANT_KEY);
+}
 
 export function getToken(): string | null {
   return sessionStorage.getItem(TOKEN_KEY);
@@ -29,6 +40,10 @@ export async function apiFetch<T>(path: string, init: RequestInit = {}): Promise
   const token = getToken();
   const headers = new Headers(init.headers);
   if (token) headers.set("authorization", `Bearer ${token}`);
+  // Platform operators scope every call to the selected tenant; the gateway
+  // ignores this header for tenant-bound keys, so it's safe to always send.
+  const tenant = getTenant();
+  if (tenant) headers.set("x-modelgov-tenant", tenant);
   if (!headers.has("content-type") && init.body) {
     headers.set("content-type", "application/json");
   }

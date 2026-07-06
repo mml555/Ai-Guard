@@ -12,6 +12,9 @@ export const KNOWN_PERMISSIONS = [
   "keys:admin",
   "policy:read",
   "policy:write",
+  // Approve/reject a proposed policy version (two-person rule). Kept distinct
+  // from policy:write so the proposer and approver can be different operators.
+  "policy:approve",
   "audit:read",
   "data:erase",
   "billing:write",
@@ -27,8 +30,12 @@ export const ROLE_PERMISSIONS: Record<string, Permission[]> = {
   finops: ["usage:read", "requests:read", "audit:read", "billing:write"],
   // Manage API keys, with the reads needed to see their effect.
   "key-admin": ["keys:admin", "usage:read", "requests:read", "audit:read"],
-  // Author policy without touching keys.
+  // Author policy without touching keys. Intentionally lacks policy:approve so
+  // that enabling the two-person rule forces a distinct approver (separation of
+  // duties) — a policy-admin proposes, a policy-approver signs off.
   "policy-admin": ["policy:read", "policy:write", "usage:read", "requests:read", "audit:read"],
+  // Review (approve/reject) proposed policy versions without authoring them.
+  "policy-approver": ["policy:read", "policy:approve", "usage:read", "requests:read", "audit:read"],
   // Full control plane.
   owner: [...KNOWN_PERMISSIONS],
 };

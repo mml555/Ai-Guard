@@ -5,6 +5,7 @@ import { applySchema } from "../src/db/init";
 import { createPool, type Pool } from "../src/db/pool";
 import { activateConfigVersion, saveConfigVersion } from "../src/modules/policy/repo";
 import { createTenantPolicyResolver } from "../src/modules/policy/tenantResolver";
+import { resolveEnvRefs } from "../src/config/loadConfig";
 import { createDbKeyResolver } from "../src/modules/keys/resolver";
 import { NoopObservability } from "../src/services/observability";
 import { NoopGuard } from "../src/services/safety";
@@ -103,6 +104,50 @@ describe.skipIf(!DATABASE_URL)("per-tenant policy resolution (integration)", () 
       expect((await resolver.resolve("tenant-a")).config.budgets.global.monthlyUsd).toBe(250);
     });
 
+    it("single-tenant hot reload resolves the default tenant regardless of caller tenantId", async () => {
+      await seedActive(pool, "default", YAML_A); // default tenant: cap 250
+      await seedActive(pool, "tenant-b", YAML_B); // another tenant: cap 100 (must be ignored)
+      const resolver = createTenantPolicyResolver({ pool, fallback, ttlMs: 60_000, perTenant: false });
+
+      // Every caller — even one carrying a tenantId — collapses onto the default.
+      expect((await resolver.resolve(undefined)).config.budgets.global.monthlyUsd).toBe(250);
+      expect((await resolver.resolve("tenant-b")).config.budgets.global.monthlyUsd).toBe(250);
+
+      // Activate a new default version; invalidating via any tenant arg evicts the
+      // single default entry, so the next resolve hot-reloads it.
+      await seedActive(pool, "default", YAML_B); // now cap 100
+      resolver.invalidate("tenant-b");
+      expect((await resolver.resolve(undefined)).config.budgets.global.monthlyUsd).toBe(100);
+    });
+
+    it("resolves env/VAR provider keys on store-loaded versions (env interpolation)", async () => {
+      const yamlWithEnvKey = `
+project: { name: t, environment: test }
+budgets:
+  global: { monthly_usd: 100, hard_stop_at_percent: 100 }
+  by_user_type:
+    logged_in: { daily_usd: 1, daily_requests: 10, models: [cheap] }
+features:
+  support_chat: { model_class: cheap, max_tokens: 100, safety: dev }
+model_classes:
+  cheap: { primary: openai/gpt-4o-mini }
+providers:
+  openai: { api_key: env/MY_OPENAI_KEY }
+safety: { preset: dev }
+`;
+      await seedActive(pool, "default", yamlWithEnvKey);
+      const resolver = createTenantPolicyResolver({
+        pool,
+        fallback,
+        ttlMs: 60_000,
+        perTenant: false,
+        resolveConfig: (c) => resolveEnvRefs(c, { MY_OPENAI_KEY: "sk-resolved-123" }),
+      });
+      const resolved = await resolver.resolve(undefined);
+      // The stored `env/MY_OPENAI_KEY` reference is resolved, like the file path.
+      expect(resolved.config.providers.openai?.apiKey).toBe("sk-resolved-123");
+    });
+
     it("de-duplicates concurrent resolves and does not cache failures", async () => {
       const resolver = createTenantPolicyResolver({ pool, fallback, ttlMs: 60_000 });
       // Concurrent resolves for the same tenant share one in-flight load.
@@ -121,7 +166,7 @@ describe.skipIf(!DATABASE_URL)("per-tenant policy resolution (integration)", () 
         observability: new NoopObservability(),
         logger: false,
         apiKeys: [
-          { name: "A", key: "a-key", permissions: ["chat:create", "policy:read", "policy:write"], tenantId: "tenant-a" },
+          { name: "A", key: "a-key", permissions: ["chat:create", "policy:read", "policy:write", "usage:read"], tenantId: "tenant-a" },
           { name: "B", key: "b-key", permissions: ["chat:create"], tenantId: "tenant-b" },
         ],
         keyResolver: createDbKeyResolver(pool, { cacheTtlMs: 1000 }),
@@ -143,6 +188,20 @@ describe.skipIf(!DATABASE_URL)("per-tenant policy resolution (integration)", () 
       expect(b.statusCode).toBe(200);
       expect(a.json().decision).not.toBe("block"); // tenant A permits premium
       expect(b.json().decision).toBe("block"); // tenant B does not
+      await server.close();
+    });
+
+    it("/v1/usage cap follows the caller tenant's active policy version", async () => {
+      await seedActive(pool, "tenant-a", YAML_A); // global monthly cap 250
+      const server = app();
+      const res = await server.inject({
+        method: "GET",
+        url: "/v1/usage",
+        headers: { authorization: "Bearer a-key" },
+      });
+      expect(res.statusCode).toBe(200);
+      // capUsd comes from the resolver (tenant-a's active version), not the boot config.
+      expect(res.json().globalMonthly?.capUsd).toBe(250);
       await server.close();
     });
 

@@ -5,7 +5,7 @@ import type { Pool } from "pg";
 import type Redis from "ioredis";
 import { type ModelgovConfig, resolveSafetyPlan } from "@modelgov/policy-engine";
 import type { loadEnv } from "./config/env";
-import { loadConfigFromFile } from "./config/loadConfig";
+import { loadConfigFromFile, resolveEnvRefs } from "./config/loadConfig";
 import { assertPoolReachable, createPool, resolveSsl } from "./db/pool";
 import { createLiteLLMClient, type LiteLLMClient } from "./services/litellm";
 import { createObservability, type Observability } from "./services/observability";
@@ -30,6 +30,10 @@ import {
   createTenantPolicyResolver,
   type TenantPolicyResolver,
 } from "./modules/policy/tenantResolver";
+import {
+  startPolicyActivationListener,
+  type PolicyActivationListener,
+} from "./modules/policy/listener";
 
 /**
  * Startup assembly. Each function builds ONE dependency (or family of related
@@ -127,7 +131,9 @@ export async function resolvePolicy(
   if (active) {
     console.log(`loaded active policy version ${active.record.id} from the config store`);
     return {
-      config: active.config,
+      // Resolve env/VAR provider-key references, same as the file path — a stored
+      // version can reference secrets without baking them into the DB.
+      config: resolveEnvRefs(active.config, env.envRefs),
       policyMeta: { configHash: active.record.checksum, policyVersion: active.record.id },
     };
   }
@@ -145,10 +151,15 @@ export async function resolvePolicy(
 }
 
 /**
- * Build the per-tenant policy resolver when `MULTI_TENANT_POLICY` is on. Returns
- * undefined (single boot-config path) when off, or when the policy store is
- * disabled — per-tenant resolution needs stored versions to resolve, so we warn
- * and fall back rather than silently resolving everyone to the boot config.
+ * Build the request-time policy resolver. Per-request resolution powers two
+ * features that share one mechanism (a TTL-cached read of the active
+ * `config_versions` row): multi-tenant policy (each tenant on its own version)
+ * and single-tenant zero-restart hot reload (activation applies without a
+ * restart). Both need the versioned store to resolve against.
+ *
+ * Returns undefined (the boot-config path, activation applies on restart) when
+ * the store is off, or when neither feature is requested. `MULTI_TENANT_POLICY`
+ * without the store is a misconfiguration, so we warn.
  */
 export function createPolicyResolver(
   env: Env,
@@ -156,15 +167,61 @@ export function createPolicyResolver(
   fallback: { config: ModelgovConfig; policyMeta: PolicyMeta },
   log?: { warn(obj: unknown, msg: string): void },
 ): TenantPolicyResolver | undefined {
-  if (env.MULTI_TENANT_POLICY !== "true") return undefined;
+  const multiTenant = env.MULTI_TENANT_POLICY === "true";
+  const hotReload = env.POLICY_HOT_RELOAD === "true";
   if (env.POLICY_STORE_ENABLED !== "true") {
-    log?.warn(
-      {},
-      "MULTI_TENANT_POLICY=true requires POLICY_STORE_ENABLED=true — per-tenant policy resolution is disabled",
-    );
+    if (multiTenant) {
+      log?.warn(
+        {},
+        "MULTI_TENANT_POLICY=true requires POLICY_STORE_ENABLED=true — per-tenant policy resolution is disabled",
+      );
+    }
     return undefined;
   }
-  return createTenantPolicyResolver({ pool, fallback, ttlMs: env.POLICY_CACHE_TTL_MS });
+  // Store is on: resolve per request only if a feature that needs it is enabled.
+  // Single-tenant with hot reload off keeps the boot-config path.
+  if (!multiTenant && !hotReload) return undefined;
+  // Single-tenant hot reload resolves the DEFAULT tenant only (perTenant=false).
+  // A version saved by a tenant-bound operator key lands under that key's
+  // tenant_id, so it would never be resolved here and hot reload would silently
+  // no-op. Warn so the misconfiguration is visible — save/activate under the
+  // default tenant, or turn on MULTI_TENANT_POLICY for per-tenant resolution.
+  if (!multiTenant && hotReload) {
+    log?.warn(
+      {},
+      "POLICY_HOT_RELOAD (single-tenant) resolves the default tenant only — policy versions saved by a tenant-bound operator key will not hot-reload; save/activate under the default tenant or enable MULTI_TENANT_POLICY",
+    );
+  }
+  return createTenantPolicyResolver({
+    pool,
+    fallback,
+    ttlMs: env.POLICY_CACHE_TTL_MS,
+    perTenant: multiTenant,
+    // Resolve env/VAR provider keys on store-loaded versions, like the file path.
+    resolveConfig: (config) => resolveEnvRefs(config, env.envRefs),
+  });
+}
+
+/**
+ * Start the policy-activation LISTEN connection so an activation on any replica
+ * invalidates this replica's cached policy immediately (the TTL is the backstop).
+ * Returns undefined when there is no resolver to invalidate — the boot-config
+ * path has nothing to hot-reload.
+ */
+export function startPolicyListener(
+  env: Env,
+  tenantPolicy: TenantPolicyResolver | undefined,
+  log: { info(msg: string): void; warn(obj: unknown, msg: string): void },
+): PolicyActivationListener | undefined {
+  if (!tenantPolicy) return undefined;
+  return startPolicyActivationListener({
+    clientConfig: {
+      connectionString: env.DATABASE_URL,
+      ssl: resolveSsl(env.DATABASE_SSL, env.DATABASE_SSL_CA),
+    },
+    onActivated: (tenantId) => tenantPolicy.invalidate(tenantId),
+    log: { info: (m) => log.info(m), warn: (o, m) => log.warn(o, m) },
+  });
 }
 
 export interface RuntimeServices {
@@ -400,6 +457,8 @@ export interface LifecycleDeps {
   pool: Pool;
   redis?: Redis;
   maintenanceTimer?: NodeJS.Timeout;
+  /** Dedicated LISTEN connection for policy hot reload; closed before the pool. */
+  policyListener?: { stop(): Promise<void> };
 }
 
 /**
@@ -408,7 +467,7 @@ export interface LifecycleDeps {
  * LLM call), a timer forces exit rather than hanging until SIGKILL.
  */
 export function installLifecycle(deps: LifecycleDeps): void {
-  const { app, pool, redis, maintenanceTimer } = deps;
+  const { app, pool, redis, maintenanceTimer, policyListener } = deps;
   let closing = false;
   const close = async (signal: string, exitCode = 0): Promise<void> => {
     if (closing) return; // idempotent: a second signal must not double-close
@@ -422,6 +481,7 @@ export function installLifecycle(deps: LifecycleDeps): void {
     try {
       if (maintenanceTimer) clearInterval(maintenanceTimer);
       await app.close();
+      if (policyListener) await policyListener.stop().catch(() => {});
       if (redis) await redis.quit().catch(() => {});
       await pool.end().catch(() => {});
     } finally {

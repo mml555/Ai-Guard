@@ -358,8 +358,10 @@ See [`.env.example`](../.env.example) and [Operations](./operations.md). Key var
 | `STRIPE_SECRET_KEY` | Stripe API key for billing (see [`billing`](#billing-optional--stripe-billing)) |
 | `STRIPE_WEBHOOK_SECRET` | Verifies `POST /v1/webhooks/stripe` signatures |
 | `POLICY_STORE_ENABLED` | Load the active policy from the DB version store instead of the file (default off) |
+| `POLICY_HOT_RELOAD` | Apply an activated version without a restart — per-request resolution (TTL-cached) plus `LISTEN/NOTIFY` for instant cross-replica convergence (needs `POLICY_STORE_ENABLED`; default **on**). Set `false` to keep the boot-config path (activation applies on the next rolling restart) |
+| `POLICY_APPROVAL_REQUIRED` | Two-person rule: a saved version is `proposed` and needs a different operator holding `policy:approve` to approve it before it can be activated (needs `POLICY_STORE_ENABLED`; default off) |
 | `MULTI_TENANT_POLICY` | Evaluate each request against its tenant's active policy version (needs `POLICY_STORE_ENABLED`; default off) — see [multi-tenancy](./design/multi-tenancy.md) |
-| `POLICY_CACHE_TTL_MS` | Per-tenant policy cache TTL; bounds restart-free activation lag (default **30000**) |
+| `POLICY_CACHE_TTL_MS` | Policy cache TTL; the backstop bound on hot-reload convergence if a `NOTIFY` is missed (default **30000**) |
 | `DB_RLS_ENABLED` | Opt-in Postgres RLS tenant isolation on `config_versions` (requires a non-owner DB role; default off) |
 
 ### Scoped API keys (multi-tenant operators)

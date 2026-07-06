@@ -1,32 +1,52 @@
-import { Navigate, Route, Routes, Link, useLocation } from "react-router-dom";
-import { getToken } from "./api/client";
+import { useEffect, useState } from "react";
+import { Navigate, Outlet, Route, Routes, Link, useLocation } from "react-router-dom";
+import { getToken, getTenant, setTenant as persistTenant } from "./api/client";
+import { fetchTenants, fetchWhoami, type Whoami } from "./api/whoami";
+import { WhoamiContext, usePermissions } from "./whoami-context";
+import { visibleNav } from "./permissions";
 import { LoginPage } from "./pages/LoginPage";
 import { OverviewPage } from "./pages/OverviewPage";
 import { RequestsPage } from "./pages/RequestsPage";
 import { UsagePage } from "./pages/UsagePage";
 import { KeysPage } from "./pages/KeysPage";
 import { PolicyPage } from "./pages/PolicyPage";
+import { AuditPage } from "./pages/AuditPage";
+import { PrivacyPage } from "./pages/PrivacyPage";
+import { MetricsPage } from "./pages/MetricsPage";
 import { HealthPage } from "./pages/HealthPage";
 
-function Shell({ children }: { children: React.ReactNode }) {
+interface TenantSwitcher {
+  tenants: string[];
+  selected: string;
+  onChange: (t: string) => void;
+}
+
+function Shell({ children, tenantSwitcher }: { children: React.ReactNode; tenantSwitcher?: TenantSwitcher }) {
   const loc = useLocation();
-  const nav = [
-    ["/overview", "Overview"],
-    ["/requests", "Requests"],
-    ["/usage", "Usage"],
-    ["/keys", "Keys"],
-    ["/policy", "Policy"],
-    ["/health", "Health"],
-  ] as const;
+  const perms = usePermissions();
+  const nav = visibleNav(perms);
 
   return (
     <div className="layout">
       <aside className="sidebar">
         <div className="brand">Modelgov Console</div>
+        {tenantSwitcher && (
+          <label className="tenant-switcher">
+            <span className="metric-label">Tenant</span>
+            <select value={tenantSwitcher.selected} onChange={(e) => tenantSwitcher.onChange(e.target.value)}>
+              {/* No selection = the untenanted/default partition, NOT a
+                  cross-tenant aggregate — reads are always tenant-partitioned. */}
+              <option value="">Default (untenanted)</option>
+              {tenantSwitcher.tenants.map((t) => (
+                <option key={t} value={t}>{t}</option>
+              ))}
+            </select>
+          </label>
+        )}
         <nav>
-          {nav.map(([path, label]) => (
-            <Link key={path} to={path} className={loc.pathname === path ? "active" : ""}>
-              {label}
+          {nav.map((item) => (
+            <Link key={item.path} to={item.path} className={loc.pathname === item.path ? "active" : ""}>
+              {item.label}
             </Link>
           ))}
         </nav>
@@ -37,22 +57,64 @@ function Shell({ children }: { children: React.ReactNode }) {
   );
 }
 
-function RequireAuth({ children }: { children: React.ReactNode }) {
+/**
+ * Auth gate + one-time whoami fetch for the whole session. A platform (unbound)
+ * operator also gets a tenant switcher; changing it re-keys the page subtree so
+ * every page refetches under the newly-selected tenant (the header goes out on
+ * each request via the api client).
+ */
+function ProtectedLayout() {
+  const [whoami, setWhoami] = useState<Whoami | null>(null);
+  const [tenants, setTenants] = useState<string[]>([]);
+  const [tenant, setTenant] = useState(() => getTenant());
+
+  useEffect(() => {
+    if (!getToken()) return;
+    fetchWhoami()
+      .then((w) => {
+        setWhoami(w);
+        if (!w.tenantBound) fetchTenants().then(setTenants).catch(() => setTenants([]));
+      })
+      .catch(() => setWhoami(null));
+  }, []);
+
   if (!getToken()) return <Navigate to="/login" replace />;
-  return <Shell>{children}</Shell>;
+
+  const onTenantChange = (t: string) => {
+    persistTenant(t);
+    setTenant(t);
+  };
+  const switcher: TenantSwitcher | undefined =
+    whoami && !whoami.tenantBound ? { tenants, selected: tenant, onChange: onTenantChange } : undefined;
+
+  return (
+    <WhoamiContext.Provider value={whoami}>
+      <Shell tenantSwitcher={switcher}>
+        {/* Re-key on tenant so all pages remount and refetch under the new scope. */}
+        <div key={tenant || "__all__"}>
+          <Outlet />
+        </div>
+      </Shell>
+    </WhoamiContext.Provider>
+  );
 }
 
 export function App() {
   return (
     <Routes>
       <Route path="/login" element={<LoginPage />} />
-      <Route path="/" element={<Navigate to="/overview" replace />} />
-      <Route path="/overview" element={<RequireAuth><OverviewPage /></RequireAuth>} />
-      <Route path="/requests" element={<RequireAuth><RequestsPage /></RequireAuth>} />
-      <Route path="/usage" element={<RequireAuth><UsagePage /></RequireAuth>} />
-      <Route path="/keys" element={<RequireAuth><KeysPage /></RequireAuth>} />
-      <Route path="/policy" element={<RequireAuth><PolicyPage /></RequireAuth>} />
-      <Route path="/health" element={<RequireAuth><HealthPage /></RequireAuth>} />
+      <Route element={<ProtectedLayout />}>
+        <Route path="/" element={<Navigate to="/overview" replace />} />
+        <Route path="/overview" element={<OverviewPage />} />
+        <Route path="/requests" element={<RequestsPage />} />
+        <Route path="/usage" element={<UsagePage />} />
+        <Route path="/keys" element={<KeysPage />} />
+        <Route path="/policy" element={<PolicyPage />} />
+        <Route path="/audit" element={<AuditPage />} />
+        <Route path="/privacy" element={<PrivacyPage />} />
+        <Route path="/metrics" element={<MetricsPage />} />
+        <Route path="/health" element={<HealthPage />} />
+      </Route>
     </Routes>
   );
 }

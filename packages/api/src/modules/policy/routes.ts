@@ -1,5 +1,5 @@
 import { PolicyConfigError } from "@modelgov/policy-engine";
-import type { FastifyInstance } from "fastify";
+import type { FastifyInstance, FastifyReply, FastifyRequest } from "fastify";
 import type { Pool } from "pg";
 import { z } from "zod";
 import { sendError } from "../../errors";
@@ -10,6 +10,7 @@ import {
   getActiveConfigVersion,
   getConfigVersionYaml,
   listConfigVersions,
+  reviewConfigVersion,
   saveConfigVersion,
 } from "./repo";
 import { diffConfigYaml } from "./diff";
@@ -23,6 +24,11 @@ export interface PolicyRouteDeps {
    * changed, so a per-tenant policy cache can evict it (restart-free activation).
    */
   onActivated?: (tenantId: string) => void;
+  /**
+   * Two-person rule: when true, saved versions are `proposed` and must be
+   * approved by a different operator before they can be activated.
+   */
+  approvalRequired?: boolean;
 }
 
 function requirePerm(ctx: RequestContext, perm: string) {
@@ -86,12 +92,13 @@ export function registerPolicyRoutes(
         note: parsed.data.note,
         author: request.ctx.apiKeyName,
         tenantId: request.ctx.tenantId,
+        approvalRequired: deps.approvalRequired,
       }, (saved) => ({
         actor: request.ctx.apiKeyName ?? "unknown",
         action: "policy.save",
         target: saved.id,
         tenantId: request.ctx.tenantId,
-        metadata: { checksum: saved.checksum, note: saved.note },
+        metadata: { checksum: saved.checksum, note: saved.note, status: saved.status },
       }));
     } catch (err) {
       if (err instanceof PolicyConfigError) {
@@ -167,9 +174,9 @@ export function registerPolicyRoutes(
   app.post("/v1/admin/policy/versions/:id/activate", {
     schema: {
       tags: ["admin"],
-      description: "Activate a stored policy version (rollback = activate a prior id). Requires policy:write.",
+      description: "Activate a stored policy version (rollback = activate a prior id). Requires policy:write. When approval is required, only an approved version can be activated (409 otherwise).",
       params: { type: "object", required: ["id"], properties: { id: { type: "string" } } },
-      response: { 200: { type: "object", additionalProperties: true }, 401: errorJsonSchema, 403: errorJsonSchema, 404: errorJsonSchema },
+      response: { 200: { type: "object", additionalProperties: true }, 401: errorJsonSchema, 403: errorJsonSchema, 404: errorJsonSchema, 409: errorJsonSchema },
     },
   }, async (request, reply) => {
     const auth = requirePerm(request.ctx, "policy:write");
@@ -177,9 +184,9 @@ export function registerPolicyRoutes(
 
     const id = (request.params as { id: string }).id;
     if (!UUID_OR_INT.test(id)) return sendError(reply, 404, "not_found", {}, "Version not found");
-    let record;
+    let result;
     try {
-      record = await activateConfigVersion(pool, id, request.ctx.tenantId ?? "default", (activated) => ({
+      result = await activateConfigVersion(pool, id, request.ctx.tenantId ?? "default", (activated) => ({
         actor: request.ctx.apiKeyName ?? "unknown",
         action: "policy.activate",
         target: activated.id,
@@ -192,14 +199,71 @@ export function registerPolicyRoutes(
       }
       throw err;
     }
-    if (!record) return sendError(reply, 404, "not_found", {}, "Version not found");
+    if (!result.ok) {
+      if (result.reason === "not_approved") {
+        return sendError(reply, 409, "not_approved", {}, "Version must be approved before it can be activated");
+      }
+      return sendError(reply, 404, "not_found", {}, "Version not found");
+    }
+    const record = result.record;
     const tenantId = request.ctx.tenantId ?? "default";
-    // Evict this tenant's cached policy so the change applies without a restart
-    // when per-tenant resolution is on (no-op otherwise).
+    // Evict this replica's cached policy so the change applies without a restart.
+    // Other replicas are invalidated via LISTEN/NOTIFY (fired transactionally by
+    // activateConfigVersion); this local call just avoids the notify round-trip.
     deps.onActivated?.(tenantId);
     const note = deps.onActivated
-      ? "activated — applied within the policy cache TTL across replicas"
+      ? "activated — applied immediately across replicas (hot reload)"
       : "activated — rolling restart applies it across replicas";
     return reply.send({ ...record, note });
   });
+
+  // Two-person rule: approve/reject a proposed version. Distinct from
+  // policy:write (author) so no single operator can both propose and approve.
+  const reviewRoute = (decision: "approved" | "rejected") =>
+    async (request: FastifyRequest, reply: FastifyReply) => {
+      const auth = requirePerm(request.ctx, "policy:approve");
+      if (!auth.ok) return sendError(reply, auth.status, auth.code, {}, auth.message);
+
+      const id = (request.params as { id: string }).id;
+      if (!UUID_OR_INT.test(id)) return sendError(reply, 404, "not_found", {}, "Version not found");
+      const result = await reviewConfigVersion(
+        pool,
+        { id, decision, reviewer: request.ctx.apiKeyName ?? "unknown", tenantId: request.ctx.tenantId },
+        (reviewed) => ({
+          actor: request.ctx.apiKeyName ?? "unknown",
+          action: decision === "approved" ? "policy.approve" : "policy.reject",
+          target: reviewed.id,
+          tenantId: request.ctx.tenantId,
+          metadata: { checksum: reviewed.checksum, proposedBy: reviewed.proposedBy },
+        }),
+      );
+      if (!result.ok) {
+        if (result.reason === "self_approval") {
+          return sendError(reply, 403, "self_approval", {}, "A version must be approved by a different operator than the one who proposed it");
+        }
+        if (result.reason === "not_proposed") {
+          return sendError(reply, 409, "not_proposed", {}, "Only a proposed version can be reviewed");
+        }
+        return sendError(reply, 404, "not_found", {}, "Version not found");
+      }
+      return reply.send(result.record);
+    };
+
+  app.post("/v1/admin/policy/versions/:id/approve", {
+    schema: {
+      tags: ["admin"],
+      description: "Approve a proposed policy version so it can be activated. Requires policy:approve, and the approver must differ from the proposer (403 self_approval).",
+      params: { type: "object", required: ["id"], properties: { id: { type: "string" } } },
+      response: { 200: { type: "object", additionalProperties: true }, 401: errorJsonSchema, 403: errorJsonSchema, 404: errorJsonSchema, 409: errorJsonSchema },
+    },
+  }, reviewRoute("approved"));
+
+  app.post("/v1/admin/policy/versions/:id/reject", {
+    schema: {
+      tags: ["admin"],
+      description: "Reject a proposed policy version. Requires policy:approve.",
+      params: { type: "object", required: ["id"], properties: { id: { type: "string" } } },
+      response: { 200: { type: "object", additionalProperties: true }, 401: errorJsonSchema, 403: errorJsonSchema, 404: errorJsonSchema, 409: errorJsonSchema },
+    },
+  }, reviewRoute("rejected"));
 }

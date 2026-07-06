@@ -15,6 +15,7 @@ export { KNOWN_DEV_API_KEYS, MIN_PRODUCTION_SECRET_LENGTH, isRemoteDatabaseUrl }
 const ADMIN_PERMISSIONS = new Set([
   "keys:admin",
   "policy:write",
+  "policy:approve",
   "data:erase",
 ]);
 

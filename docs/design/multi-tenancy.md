@@ -207,3 +207,13 @@ Flat budgets remain the default; set **`HIERARCHICAL_BUDGETS=true`** only after 
   (0.0.0+): `request_logs.tenant_id` is stamped from the API key on every chat
   audit row; `/v1/usage` and `/v1/requests` filter by `tenant_id` when the key is
   tenant-bound (`tenant-read-scope.integration.test.ts`).
+- ~~Platform tenant selection for the console~~ **Done**: a non-tenant-bound
+  (platform) operator may scope any request to one tenant via the
+  `X-Modelgov-Tenant` header, which sets the effective `ctx.tenantId` (auth hook,
+  `resolveEffectiveTenant`). A tenant-**bound** key ignores the header — no
+  cross-tenant escape. `GET /v1/admin/tenants` enumerates selectable tenants
+  (platform → all, from `api_keys ∪ request_logs`; bound → own) and
+  `GET /v1/admin/whoami` reports `tenantBound` so the console shows the switcher
+  only to platform operators (`tenant-switch.integration.test.ts`,
+  `tenant-override.test.ts`). Reads remain tenant-partitioned — the "untenanted
+  default" is the `tenant_id IS NULL` partition, not a cross-tenant aggregate.

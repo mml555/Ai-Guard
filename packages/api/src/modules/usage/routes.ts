@@ -5,6 +5,7 @@ import { sendError } from "../../errors";
 import { authorizeUsageQuery, authorizeUsageSummary } from "./authorizeUsage";
 import { getUsageSummary } from "./service";
 import { getUsageSummaryReport } from "./summaryReport";
+import type { TenantPolicyResolver } from "../policy/tenantResolver";
 
 const querySchema = z.object({
   userId: z.string().min(1).optional(),
@@ -22,7 +23,14 @@ const summaryQuerySchema = z.object({
 export function registerUsageRoute(
   app: FastifyInstance,
   pool: Pool,
-  opts: { defaultProjectId: string },
+  opts: {
+    defaultProjectId: string;
+    /** Static global monthly cap (boot config) — used when no resolver is set. */
+    globalMonthlyCapUsd?: number;
+    /** When present, the cap follows the effective tenant's active policy
+     *  version (hot reload / per-tenant), not the static boot cap. */
+    tenantPolicy?: TenantPolicyResolver;
+  },
 ): void {
   app.get("/v1/usage", {
     schema: {
@@ -60,7 +68,20 @@ export function registerUsageRoute(
       return sendError(reply, auth.status, auth.code, {}, auth.message);
     }
 
-    const summary = await getUsageSummary(pool, auth.value);
+    // Prefer the effective tenant's active-policy cap (hot reload / per-tenant);
+    // fall back to the static boot cap when no resolver is wired. Resolving the
+    // cap reads the policy store — a fault there must not fail this endpoint (it
+    // is otherwise independent of the store), so degrade to the boot cap.
+    let capUsd = opts.globalMonthlyCapUsd;
+    if (opts.tenantPolicy) {
+      try {
+        const resolved = await opts.tenantPolicy.resolve(request.ctx.tenantId);
+        capUsd = resolved.config.budgets.global?.monthlyUsd;
+      } catch (err) {
+        request.log.warn({ err }, "usage: failed to resolve tenant policy cap; using boot cap");
+      }
+    }
+    const summary = await getUsageSummary(pool, auth.value, { globalMonthlyCapUsd: capUsd });
     return reply.send(summary);
   });
 

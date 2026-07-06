@@ -16,6 +16,7 @@ import {
   resolveBudgetAlert,
   resolvePolicy,
   startBackgroundJobs,
+  startPolicyListener,
   warnGroundingPiiExposure,
   warnMissingSafetyBackends,
 } from "./bootstrap";
@@ -61,6 +62,7 @@ async function main(): Promise<void> {
     hierarchicalBudgets: env.HIERARCHICAL_BUDGETS === "true",
     policyMeta,
     tenantPolicy,
+    policyApprovalRequired: env.POLICY_APPROVAL_REQUIRED === "true",
     idempotencyCaptureContent: env.IDEMPOTENCY_CAPTURE_CONTENT === "true",
     metrics: env.METRICS_ENABLED === "true",
     metricsAuthToken: env.METRICS_AUTH_TOKEN,
@@ -92,7 +94,10 @@ async function main(): Promise<void> {
   warnGroundingPiiExposure(config, app.log);
 
   const maintenanceTimer = startBackgroundJobs(env, config, pool, app.log, billing);
-  installLifecycle({ app, pool, redis, maintenanceTimer });
+  // Hot reload: invalidate this replica's policy cache the instant any replica
+  // activates a version (TTL cache is the backstop). No-op on the boot-config path.
+  const policyListener = startPolicyListener(env, tenantPolicy, app.log);
+  installLifecycle({ app, pool, redis, maintenanceTimer, policyListener });
 
   await app.listen({ port: env.PORT, host: env.HOST });
   app.log.info(`modelgov listening on ${env.HOST}:${env.PORT}`);

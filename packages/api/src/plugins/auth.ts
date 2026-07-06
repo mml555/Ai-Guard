@@ -5,6 +5,38 @@ import { setRequestContext } from "./requestContext";
 
 const BEARER_PREFIX = "Bearer ";
 
+/** Header a platform (unbound) operator sets to scope a request to one tenant. */
+const TENANT_HEADER = "x-modelgov-tenant";
+const MAX_TENANT_ID_LENGTH = 200;
+
+/**
+ * The effective tenant for a request. A tenant-bound principal is LOCKED to its
+ * own tenant — any override header is ignored (no cross-tenant escape). An
+ * unbound (platform) principal MAY target a tenant via the header; this only
+ * ever narrows or re-points the access a platform key already has, so it needs
+ * no extra permission. Returns undefined for a platform key with no header
+ * (deployment-wide / root view).
+ */
+export function resolveEffectiveTenant(
+  boundTenant: string | undefined,
+  header: unknown,
+): string | undefined {
+  // An empty/whitespace binding is not a real tenant — treat it as unbound so
+  // such a principal behaves like a platform key rather than being silently
+  // locked to the empty partition (and ignoring the override header).
+  if (isBoundTenant(boundTenant)) return boundTenant;
+  if (typeof header !== "string") return undefined;
+  const trimmed = header.trim();
+  if (!trimmed || trimmed.length > MAX_TENANT_ID_LENGTH) return undefined;
+  return trimmed;
+}
+
+/** True only for a non-empty tenant binding — `undefined`/`""`/whitespace are
+ *  treated as unbound (platform) so they can target a tenant via the header. */
+export function isBoundTenant(tenantId: string | undefined): tenantId is string {
+  return typeof tenantId === "string" && tenantId.trim() !== "";
+}
+
 export interface ApiKeyPrincipal {
   name: string;
   /** Plaintext key (dev / simple mode). Prefer `keyHash` in production. */
@@ -117,6 +149,7 @@ export function registerAuth(
       );
     }
 
+    const tenantBound = isBoundTenant(principal.tenantId);
     setRequestContext(request, {
       apiKeyName: principal.name,
       projectId: principal.projectId,
@@ -124,7 +157,8 @@ export function registerAuth(
       allowedUserTypes: principal.allowedUserTypes,
       allowedUserIds: principal.allowedUserIds,
       permissions: principal.permissions ?? ["chat:create"],
-      tenantId: principal.tenantId,
+      tenantId: resolveEffectiveTenant(principal.tenantId, request.headers[TENANT_HEADER]),
+      tenantBound,
       budgetNodeId: principal.budgetNodeId,
     });
   });

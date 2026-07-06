@@ -7,6 +7,7 @@ import {
   activateConfigVersion,
   getActiveConfigVersion,
   listConfigVersions,
+  reviewConfigVersion,
   saveConfigVersion,
 } from "../src/modules/policy/repo";
 import { createDbKeyResolver } from "../src/modules/keys/resolver";
@@ -87,8 +88,67 @@ describe.skipIf(!DATABASE_URL)("dynamic policy store (integration)", () => {
       expect(await listConfigVersions(pool)).toHaveLength(0);
     });
 
-    it("returns null activating an unknown id", async () => {
-      expect(await activateConfigVersion(pool, "999999")).toBeNull();
+    it("returns not_found activating an unknown id", async () => {
+      expect(await activateConfigVersion(pool, "999999")).toEqual({ ok: false, reason: "not_found" });
+    });
+
+    it("saves as approved (activatable) when approval is not required", async () => {
+      const v1 = await saveConfigVersion(pool, { yaml: VALID_YAML });
+      expect(v1.status).toBe("approved");
+      const res = await activateConfigVersion(pool, v1.id);
+      expect(res.ok).toBe(true);
+    });
+
+    it("saves as proposed and refuses to activate until approved (two-person rule)", async () => {
+      const v1 = await saveConfigVersion(pool, {
+        yaml: VALID_YAML,
+        author: "proposer",
+        approvalRequired: true,
+      });
+      expect(v1.status).toBe("proposed");
+      expect(v1.proposedBy).toBe("proposer");
+
+      // Cannot go live while merely proposed.
+      expect(await activateConfigVersion(pool, v1.id)).toEqual({ ok: false, reason: "not_approved" });
+
+      // The proposer may not approve their own version.
+      expect(
+        await reviewConfigVersion(pool, { id: v1.id, decision: "approved", reviewer: "proposer" }),
+      ).toEqual({ ok: false, reason: "self_approval" });
+
+      // A different operator approves; now it can be activated.
+      const approved = await reviewConfigVersion(pool, {
+        id: v1.id,
+        decision: "approved",
+        reviewer: "approver",
+      });
+      expect(approved.ok).toBe(true);
+      if (approved.ok) {
+        expect(approved.record.status).toBe("approved");
+        expect(approved.record.reviewedBy).toBe("approver");
+      }
+      expect((await activateConfigVersion(pool, v1.id)).ok).toBe(true);
+    });
+
+    it("cannot re-review a version that is no longer proposed", async () => {
+      const v1 = await saveConfigVersion(pool, { yaml: VALID_YAML, author: "p", approvalRequired: true });
+      await reviewConfigVersion(pool, { id: v1.id, decision: "approved", reviewer: "q" });
+      expect(
+        await reviewConfigVersion(pool, { id: v1.id, decision: "rejected", reviewer: "q" }),
+      ).toEqual({ ok: false, reason: "not_proposed" });
+    });
+
+    it("lets an author withdraw (reject) their own proposal", async () => {
+      const v1 = await saveConfigVersion(pool, { yaml: VALID_YAML, author: "p", approvalRequired: true });
+      const rejected = await reviewConfigVersion(pool, { id: v1.id, decision: "rejected", reviewer: "p" });
+      expect(rejected.ok).toBe(true);
+      expect(await activateConfigVersion(pool, v1.id)).toEqual({ ok: false, reason: "not_approved" });
+    });
+
+    it("returns not_found reviewing an unknown id", async () => {
+      expect(
+        await reviewConfigVersion(pool, { id: "999999", decision: "approved", reviewer: "x" }),
+      ).toEqual({ ok: false, reason: "not_found" });
     });
   });
 
@@ -135,6 +195,13 @@ describe.skipIf(!DATABASE_URL)("dynamic policy store (integration)", () => {
       const actions = audit.json().items.map((i: { action: string }) => i.action);
       expect(actions).toContain("policy.activate");
       expect((await verifyAuditChain(pool)).ok).toBe(true);
+    });
+
+    it("whoami returns the caller's own permissions (used by the console)", async () => {
+      const res = await app().inject({ method: "GET", url: "/v1/admin/whoami", headers: writer });
+      expect(res.statusCode).toBe(200);
+      expect(res.json().name).toBe("pa");
+      expect(res.json().permissions).toEqual(expect.arrayContaining(["policy:read", "policy:write"]));
     });
 
     it("rejects an invalid config with 400", async () => {
@@ -189,6 +256,90 @@ describe.skipIf(!DATABASE_URL)("dynamic policy store (integration)", () => {
       const diff = await server.inject({ method: "GET", url: `/v1/admin/policy/versions/${v2}/diff?against=${v1}`, headers: writer });
       expect(diff.statusCode).toBe(200);
       expect(diff.json().diff.map((d: { path: string }) => d.path)).toContain("budgets.global.monthly_usd");
+    });
+  });
+
+  describe("approval workflow (admin API)", () => {
+    function approvalApp(): FastifyInstance {
+      return buildServer({
+        config,
+        pool,
+        litellm: { chat: async () => ({ content: "ok", model: "m", actualCostUsd: 0, raw: {} }) },
+        safety: new NoopGuard(),
+        observability: new NoopObservability(),
+        logger: false,
+        policyApprovalRequired: true,
+        apiKeys: [
+          { name: "proposer", key: "prop-secret", permissions: ["policy:read", "policy:write"] },
+          { name: "approver", key: "appr-secret", permissions: ["policy:read", "policy:approve", "audit:read"] },
+          // A single operator holding both perms — used to prove the self-approval
+          // guard blocks even when permissions alone would allow it.
+          { name: "both", key: "both-secret", permissions: ["policy:read", "policy:write", "policy:approve"] },
+        ],
+        keyResolver: createDbKeyResolver(pool, { cacheTtlMs: 1000 }),
+      });
+    }
+    const proposer = { authorization: "Bearer prop-secret" };
+    const approver = { authorization: "Bearer appr-secret" };
+    const both = { authorization: "Bearer both-secret" };
+
+    it("enforces propose → approve(by another) → activate", async () => {
+      const server = approvalApp();
+      const created = await server.inject({
+        method: "POST", url: "/v1/admin/policy/versions", headers: proposer, payload: { yaml: VALID_YAML },
+      });
+      expect(created.statusCode).toBe(201);
+      expect(created.json().status).toBe("proposed");
+      const id = created.json().id as string;
+
+      // A proposed version cannot be activated yet.
+      const blocked = await server.inject({ method: "POST", url: `/v1/admin/policy/versions/${id}/activate`, headers: proposer });
+      expect(blocked.statusCode).toBe(409);
+      expect(blocked.json().error.code).toBe("not_approved");
+
+      // A different operator with policy:approve signs off.
+      const approve = await server.inject({ method: "POST", url: `/v1/admin/policy/versions/${id}/approve`, headers: approver });
+      expect(approve.statusCode).toBe(200);
+      expect(approve.json().status).toBe("approved");
+
+      // Now it activates.
+      const activated = await server.inject({ method: "POST", url: `/v1/admin/policy/versions/${id}/activate`, headers: proposer });
+      expect(activated.statusCode).toBe(200);
+
+      // Audit records the approve action and the chain stays intact.
+      const audit = await server.inject({ method: "GET", url: "/v1/admin/audit", headers: approver });
+      const actions = audit.json().items.map((i: { action: string }) => i.action);
+      expect(actions).toContain("policy.approve");
+      expect((await verifyAuditChain(pool)).ok).toBe(true);
+    });
+
+    it("blocks self-approval even when one key holds both policy:write and policy:approve", async () => {
+      const server = approvalApp();
+      const id = (await server.inject({ method: "POST", url: "/v1/admin/policy/versions", headers: both, payload: { yaml: VALID_YAML } })).json().id;
+      const selfApprove = await server.inject({ method: "POST", url: `/v1/admin/policy/versions/${id}/approve`, headers: both });
+      expect(selfApprove.statusCode).toBe(403);
+      expect(selfApprove.json().error.code).toBe("self_approval");
+      // Another holder of policy:approve can still approve it.
+      const approve = await server.inject({ method: "POST", url: `/v1/admin/policy/versions/${id}/approve`, headers: approver });
+      expect(approve.statusCode).toBe(200);
+    });
+
+    it("a policy:write key cannot approve (needs policy:approve)", async () => {
+      const server = approvalApp();
+      const id = (await server.inject({ method: "POST", url: "/v1/admin/policy/versions", headers: proposer, payload: { yaml: VALID_YAML } })).json().id;
+      const res = await server.inject({ method: "POST", url: `/v1/admin/policy/versions/${id}/approve`, headers: proposer });
+      expect(res.statusCode).toBe(403);
+      expect(res.json().error.code).toBe("forbidden");
+    });
+
+    it("rejecting a proposal keeps it un-activatable", async () => {
+      const server = approvalApp();
+      const id = (await server.inject({ method: "POST", url: "/v1/admin/policy/versions", headers: proposer, payload: { yaml: VALID_YAML } })).json().id;
+      const rejected = await server.inject({ method: "POST", url: `/v1/admin/policy/versions/${id}/reject`, headers: approver });
+      expect(rejected.statusCode).toBe(200);
+      expect(rejected.json().status).toBe("rejected");
+      const act = await server.inject({ method: "POST", url: `/v1/admin/policy/versions/${id}/activate`, headers: proposer });
+      expect(act.statusCode).toBe(409);
     });
   });
 

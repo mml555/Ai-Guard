@@ -26,6 +26,57 @@ guarantees in `docs/versioning.md` apply.
   `modelgov doctor production` flags this before you deploy.
 
 ### Added
+- **Platform tenant switching**: a platform (non-tenant-bound) operator can scope
+  any request to one tenant via the `X-Modelgov-Tenant` header — it sets the
+  effective `ctx.tenantId`, so every tenant-scoped read/write (usage, requests,
+  audit, policy) targets that tenant. A tenant-**bound** key ignores the header
+  (locked to its own tenant — no cross-tenant escape). New `GET /v1/admin/tenants`
+  lists selectable tenants (platform sees all; a bound key sees only its own),
+  `GET /v1/admin/whoami` now returns `tenantBound`, and the operator console gains
+  a **tenant switcher** that re-scopes every page. `GET /v1/usage`'s
+  `globalMonthly.capUsd` now follows the effective tenant's active policy (and
+  hot-reloaded versions) instead of the static boot cap.
+- **Env interpolation for the policy store**: configs loaded from the versioned
+  store now resolve `env/VAR` provider-key references (boot load and per-request
+  resolver), matching the file path — a stored version can reference a secret via
+  `providers.<name>.api_key: env/OPENAI_KEY` without baking it into the database.
+  Resolution runs only on the serving path, never on diff/preview (which must not
+  expose resolved secrets).
+- **Operator console Metrics page**: scrapes Prometheus `/metrics` (with an
+  optional `METRICS_AUTH_TOKEN`) and renders the deployment-wide `modelgov_*`
+  domain counters (requests, cost, fallbacks, budget/safety blocks) and gauges —
+  a dependency-free text-format parser, no chart library.
+- **Zero-restart policy hot reload** (default on when `POLICY_STORE_ENABLED=true`,
+  toggle `POLICY_HOT_RELOAD`): activating a version applies without a restart —
+  each request resolves the active version through a short-TTL cache, and
+  activation fires a transactional Postgres `NOTIFY modelgov_policy_activated`
+  that every replica LISTENs on to invalidate its cache instantly (TTL is the
+  backstop if a notification is missed). Previously a single-tenant deployment
+  applied an activated version only on the next rolling restart. The listener is
+  a dedicated connection that reconnects with backoff, so an outage degrades to
+  TTL-bounded convergence rather than a failed boot or request.
+- **Two-person approval for policy changes** (opt-in, `POLICY_APPROVAL_REQUIRED`):
+  a saved version is `proposed` and can only be activated after a **different**
+  operator holding the new `policy:approve` permission approves it
+  (`POST /v1/admin/policy/versions/:id/approve`); self-approval is rejected
+  (`403 self_approval`) and activating an unapproved version returns
+  `409 not_approved`. Adds a `policy-approver` role (kept distinct from
+  `policy-admin`, which authors but cannot approve), a `/reject` endpoint, and
+  `policy.approve` / `policy.reject` audit actions. Migration `0025` adds the
+  `status` state machine (`proposed`/`approved`/`rejected`) plus `proposed_by` /
+  `reviewed_by`; existing rows backfill to `approved`, so with the flag off the
+  save→activate flow is unchanged.
+- **Operator console v1** (`apps/operator-console`): the Policy page is now a full
+  editor — validate + diff a proposed YAML against the active version, save,
+  approve/reject (two-person rule), and activate/rollback with a version-history
+  table showing status, proposer, and reviewer. Adds an Audit page (action log +
+  hash-chain verify) and a Privacy/DSAR erasure page, and the nav plus per-row
+  actions are permission-aware via the new `GET /v1/admin/whoami`. The Overview
+  is now a **live dashboard** — it polls `usage/summary` + `usage` every 15s
+  (live/pause toggle, 24h/7d/30d window) and renders a global spend-vs-cap gauge
+  and a request-outcome bar chart with dependency-free CSS bars.
+- **`GET /v1/usage` now returns `globalMonthly.capUsd`**: the configured global
+  monthly cap, so the console can render spend-vs-cap without fetching policy.
 - **`metered` billing mode**: bill usage through a Stripe Billing Meter instead
   of (not alongside) prepaid credits. Requires `billing.provider: stripe` and
   `billing.stripe.meter_event_name`; the maintenance loop reports settled usage
