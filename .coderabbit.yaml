@@ -1,0 +1,94 @@
+# CodeRabbit configuration — https://docs.coderabbit.ai/reference/configuration
+# Runs alongside the existing Codex reviewer (both review each PR).
+# yaml-language-server: $schema=https://storage.googleapis.com/coderabbit_public_assets/schema.v2.json
+language: en-US
+
+reviews:
+  # More thorough / nitpicky feedback (team chose assertive).
+  profile: assertive
+  # Post a status note when a review is skipped.
+  review_status: true
+  # Do NOT auto-approve/gate merges on resolving comments — CI and Codex already
+  # gate; CodeRabbit is advisory here.
+  request_changes_workflow: false
+
+  auto_review:
+    enabled: true
+    # Skip drafts; review once a PR is marked ready.
+    drafts: false
+    base_branches:
+      - main
+
+  # Don't spend review effort on generated, vendored, or build output.
+  path_filters:
+    - "!**/dist/**"
+    - "!**/node_modules/**"
+    - "!coverage/**"
+    - "!pnpm-lock.yaml"
+    - "!**/*.snap"
+    # Generated OpenAPI spec (produced by `openapi:export`, checked by CI).
+    - "!packages/api/openapi.json"
+    # Compiled Python artifacts / caches.
+    - "!**/__pycache__/**"
+    - "!**/*.py[cod]"
+
+  path_instructions:
+    - path: "**/*.{ts,tsx}"
+      instructions: >-
+        This repo enforces a hard 650-LOC file-size limit
+        (scripts/check-file-sizes.sh) — flag edits that push a .ts/.tsx file over
+        it and suggest splitting instead of adding an exception. Match the
+        surrounding style; the project uses strict ESLint with --max-warnings 0.
+
+    - path: "packages/api/src/modules/billing/**/*.ts"
+      instructions: >-
+        Money path. The deliberate bias is "never overcharge the customer":
+        reservations are worst-case estimates and actual cost is settled from
+        real provider usage. Credit settlement is idempotent via a lease-consume
+        invariant (deleting the hold's leases gates the wallet debit), so retries
+        and the stale-lease sweep can't double-book. Flag anything that could
+        double-charge, bypass the lease, drive a balance negative, or bill from a
+        client-supplied token estimate instead of the server-side floor / real
+        usage. Stripe webhooks must stay idempotent (per event id) and gate on
+        subscription status.
+
+    - path: "packages/api/src/modules/audit/**/*.ts"
+      instructions: >-
+        The admin audit log is a tamper-evident hash chain: each row's SHA-256 is
+        computed over the previous hash + row content, and verification recomputes
+        it. This MUST stay a deterministic hash (SHA-256) — do NOT recommend
+        bcrypt/scrypt/argon2/PBKDF2 here (a salted slow KDF is non-deterministic
+        and would make the chain unverifiable). Do flag any change that puts a
+        secret (API key, token) into the hashed content.
+
+    - path: "packages/api/src/modules/keys/**/*.ts"
+      instructions: >-
+        API keys are 256-bit random tokens (randomBytes(32)) stored and looked up
+        by their SHA-256 hash. SHA-256 is the correct choice for high-entropy
+        tokens — do NOT recommend slow password KDFs (bcrypt/scrypt/argon2) here;
+        they would break the indexed by-hash lookup and add a DoS vector on the
+        auth hot path. The plaintext secret must never be returned in list/get
+        responses, logged, or included in an audit event.
+
+    - path: "packages/api/src/modules/**/routes.ts"
+      instructions: >-
+        Every route is behind the root auth hook. Admin routes must additionally
+        check a specific permission (requirePerm / ctx.permissions), and any
+        tenant-scoped query must filter by tenant_id. Flag a new route that skips
+        the permission check or that could read/write across tenants. Tenant
+        switching via the X-Modelgov-Tenant header requires the `tenant:switch`
+        permission for unbound principals.
+
+    - path: "**/*.integration.test.ts"
+      instructions: >-
+        These are Postgres-backed integration tests. The 650-LOC file-size limit
+        applies to test files too — prefer splitting a large suite into a focused
+        second file over adding an exception header.
+
+  tools:
+    # The repo's own linter — surface its findings inline.
+    eslint:
+      enabled: true
+
+chat:
+  auto_reply: true
