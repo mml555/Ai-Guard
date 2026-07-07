@@ -27,6 +27,12 @@ guarantees in `docs/versioning.md` apply.
   (they already ignore the header).
 
 ### Security
+- **Embeddings now enforce input PII masking/blocking.** `POST /v1/embeddings`
+  previously shipped the raw caller text to the provider (and typically into a
+  vector store) regardless of the feature's PII plan — chat masked/blocked but
+  embeddings didn't. Input PII is now masked or blocked before the provider call
+  with the same fail-closed semantics as chat (`503` on a safety-backend outage);
+  the injection classifier is not run (embedding input is data, not instructions).
 - **OIDC operators can be tenant-scoped** via `OIDC_TENANT_CLAIM`: when the token
   carries that claim the operator is bound to that tenant and cannot switch.
 - **`env/VAR` in a policy is restricted to provider credentials.** A stored/file
@@ -42,6 +48,21 @@ guarantees in `docs/versioning.md` apply.
   principal without a name — defense against a fail-open edge).
 
 ### Fixed
+- **Repinned the LiteLLM image to a tag that exists.**
+  `ghcr.io/berriai/litellm:main-v1.55.10-stable` was removed upstream and no
+  longer resolves, so `./setup` (`docker-compose.simple.yml`) and the Helm
+  default (`deploy/helm/modelgov/values.yaml`) both failed at image pull. Both
+  now pin `main-v1.72.0-stable`.
+- **`./setup` smoke test no longer false-positives on the demo reply.** The
+  bundled demo provider's canned response contained the word "Modelgov", which
+  Presidio's spaCy recognizer classifies as a `LOCATION` entity, so the `strict`
+  `support_chat` smoke was blocked by output-PII detection (`403`) on a clean
+  install. The demo reply no longer contains a PII-triggering token.
+- **`modelgov doctor production` reads the env file relative to the invocation
+  directory.** It resolved `.env.production` against the CLI's own install path,
+  so an installed/`npx` CLI read `node_modules/.env.production` (i.e. nothing) and
+  reported a bogus production posture. It now uses the invocation cwd
+  (`resolveUserPath`) like every other command.
 - **`docker-compose.production.yml` now boots as documented.** Previously the
   shipped `.env.production.example` defaulted `DATABASE_SSL=require` while the
   bundled `postgres` service ships with TLS off (crash-loop at connect), the

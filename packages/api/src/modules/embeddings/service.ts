@@ -6,6 +6,7 @@ import {
   type AiRequest,
   type BudgetRemaining,
   type PolicyDecision,
+  type SafetyPlan,
 } from "@modelgov/policy-engine";
 import type { FastifyBaseLogger } from "fastify";
 import type { Pool } from "pg";
@@ -23,12 +24,18 @@ import {
   ProviderError,
   type LiteLLMClient,
 } from "../../services/litellm";
+import { SafetyServiceError, type SafetyGuard } from "../../services/safety";
+import { messageText } from "../../types";
 import type { EmbeddingsInput } from "./schemas";
 
 export interface EmbeddingsDeps {
   config: ModelgovConfig;
   pool: Pool;
   litellm: LiteLLMClient;
+  /** Enforces the feature's PII plan on the embedding input. Embeddings ship the
+   * caller text to the provider (and usually into a vector store), so raw PII
+   * must be masked/blocked before the call — the same guarantee chat gives. */
+  safety: SafetyGuard;
   /** Optional tracing/metrics sink. When set, every embeddings outcome is
    * recorded the same way chat outcomes are (spend + decision visibility). */
   observability?: Observability;
@@ -72,10 +79,12 @@ function estimateTokensFromText(texts: string[]): number {
 
 /**
  * Governed embeddings: same policy/budget/audit spine as chat, but a single
- * OpenAI-compatible /embeddings call (no output safety — there's no text to
- * screen — and no injection classifier). Every call declares its feature and
- * user type, is checked before the provider runs, reserves budget, settles the
- * real cost, and lands one audit row.
+ * OpenAI-compatible /embeddings call. Input PII is masked/blocked before the
+ * provider call per the feature's plan (see below); there is no OUTPUT safety
+ * (a vector has no text to screen) and no injection classifier (embedding input
+ * is data, not instructions). Every call declares its feature and user type, is
+ * checked before the provider runs, reserves budget, settles the real cost, and
+ * lands one audit row.
  *
  * The hold lifecycle (fallback top-up + release) rides the shared
  * `createFlatProviderBudget` context so the credit/internal lease bookkeeping is
@@ -156,6 +165,61 @@ export async function handleEmbeddings(
       message: decision.reason ?? "Request blocked by policy",
       auditRequestId,
     };
+  }
+
+  // ── Input PII (mask/block) — before any spend or provider call ─────────────
+  // Embeddings send the caller text to the provider (and typically persist it in
+  // a vector store), so raw PII must be handled first, exactly like chat input.
+  // Run a PII-ONLY plan: the injection classifier is skipped (embedding input is
+  // data, not instructions). Fails closed (503) on a safety backend outage, and
+  // charges nothing on a PII block (PII masking incurs no classifier cost).
+  let embedTexts = texts;
+  const piiOnlyPlan: SafetyPlan = { ...decision.safetyPlan, promptInjection: "off" };
+  let safetyResult;
+  try {
+    safetyResult = await deps.safety.inspectInput(
+      texts.map((t) => ({ role: "user" as const, content: t })),
+      piiOnlyPlan,
+    );
+  } catch (err) {
+    if (err instanceof SafetyServiceError) {
+      deps.log?.error({ err }, "embeddings safety backend failure");
+      const auditRequestId = await tryLog(deps, { ...rowBase, status: "failed", error: "safety_unavailable" });
+      return {
+        ok: false,
+        status: 503,
+        code: "safety_unavailable",
+        details: {},
+        message: "Safety service unavailable",
+        retryable: true,
+        auditRequestId,
+      };
+    }
+    throw err;
+  }
+  if (safetyResult.action === "block") {
+    const auditRequestId = await tryLog(deps, {
+      ...rowBase,
+      status: "safety_blocked",
+      error: safetyResult.blockReason,
+    });
+    deps.observability?.recordChat({
+      ...baseObs(aiRequest, decision),
+      status: "safety_blocked",
+      reason: safetyResult.blockReason,
+    });
+    return {
+      ok: false,
+      status: 403,
+      code: "safety_blocked",
+      details: { reason: safetyResult.blockReason, findings: safetyResult.findings },
+      message: "Safety Blocked",
+      auditRequestId,
+    };
+  }
+  if (safetyResult.piiMasked) {
+    // Send the masked copy to the provider (order + count preserved 1:1).
+    embedTexts = safetyResult.messages.map((m) => messageText(m.content));
   }
 
   // ── Prepaid credits: reserve BEFORE the internal ledger (parity with the chat
@@ -264,7 +328,7 @@ export async function handleEmbeddings(
   let usedFallback = false;
   let result: Awaited<ReturnType<NonNullable<LiteLLMClient["embed"]>>>;
   try {
-    result = await deps.litellm.embed({ model, input: texts });
+    result = await deps.litellm.embed({ model, input: embedTexts });
   } catch (err) {
     if (err instanceof ProviderError && decision.fallbackModel) {
       // Re-evaluate with forceFallback so the fallback model/provider is re-run
@@ -351,7 +415,7 @@ export async function handleEmbeddings(
       try {
         model = fb.resolvedModel;
         usedFallback = true;
-        result = await deps.litellm.embed({ model, input: texts });
+        result = await deps.litellm.embed({ model, input: embedTexts });
       } catch (fallbackErr) {
         return providerFailure(deps, providerBudget.release, rowBase, model, fallbackErr, { aiRequest, decision });
       }
@@ -409,6 +473,10 @@ export async function handleEmbeddings(
       status: "ok",
       actualCostUsd,
       inputTokens: result.inputTokens,
+      // Persist that input PII was masked so a masked request is distinguishable
+      // from a clean one in the audit trail (parity with the chat success row).
+      piiMasked: safetyResult.piiMasked,
+      ...(safetyResult.findings.length > 0 ? { safetyFindings: safetyResult.findings } : {}),
     });
   } catch {
     // The provider ran (spend is real) but the audit write failed — settle the
@@ -426,6 +494,7 @@ export async function handleEmbeddings(
     model,
     inputTokens: result.inputTokens,
     actualCostUsd,
+    piiMasked: safetyResult.piiMasked,
     reason: usedFallback
       ? "provider failure on primary — routed to fallback model"
       : decision.reason,

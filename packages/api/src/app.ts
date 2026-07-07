@@ -299,6 +299,7 @@ export function buildServer(opts: BuildServerOptions): FastifyInstance {
       config: opts.config,
       pool: opts.pool,
       litellm: opts.litellm,
+      safety: opts.safety,
       observability,
       hierarchicalBudgets: opts.hierarchicalBudgets,
       policyMeta: opts.policyMeta,

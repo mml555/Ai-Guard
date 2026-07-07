@@ -3,6 +3,7 @@ import type { FastifyInstance, FastifyReply, FastifyRequest } from "fastify";
 import type { Pool } from "pg";
 import { sendError } from "../../errors";
 import type { LiteLLMClient } from "../../services/litellm";
+import type { SafetyGuard } from "../../services/safety";
 import type { RequestContext } from "../../plugins/requestContext";
 import {
   checkEnvironmentScope,
@@ -30,6 +31,8 @@ export interface EmbeddingsRouteDeps {
   config: ModelgovConfig;
   pool: Pool;
   litellm: LiteLLMClient;
+  /** PII enforcement on embedding input (masked/blocked before the provider). */
+  safety: SafetyGuard;
   observability?: Observability;
   idempotencyCaptureContent?: boolean;
   /** Enables node-tree budgets on chat. Embeddings do NOT implement the
@@ -139,6 +142,7 @@ export function registerEmbeddingsRoute(
       config: rdeps.config,
       pool: rdeps.pool,
       litellm: rdeps.litellm,
+      safety: rdeps.safety,
       observability: rdeps.observability,
       billing: rdeps.billing,
       policyMeta: rdeps.policyMeta

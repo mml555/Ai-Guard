@@ -27,7 +27,7 @@ services:
   litellm:
     # pin: update deliberately (was floating :main-stable — a moving tag drifts
     # the dev stack under everyone without a commit). Bump this intentionally.
-    image: ghcr.io/berriai/litellm:main-v1.55.10-stable
+    image: ghcr.io/berriai/litellm:main-v1.72.0-stable
     command: ["--config", "/app/config.yaml", "--port", "4000"]
     environment:
       OPENAI_API_KEY: ${OPENAI_API_KEY:-demo-unused}

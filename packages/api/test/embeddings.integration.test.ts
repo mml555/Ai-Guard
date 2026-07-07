@@ -9,7 +9,12 @@ import {
   type LiteLLMEmbeddingParams,
 } from "../src/services/litellm";
 import { NoopObservability } from "../src/services/observability";
-import { NoopGuard } from "../src/services/safety";
+import {
+  NoopGuard,
+  SafetyServiceError,
+  type SafetyGuard,
+} from "../src/services/safety";
+import { messageText } from "../src/types";
 import { createBillingService } from "../src/modules/billing/service";
 import { buildServer } from "../src/server";
 
@@ -67,6 +72,53 @@ const okEmbed = fakeEmbedClient(async (p) => ({
   raw: {},
 }));
 
+const SSN = /\d{3}-\d{2}-\d{4}/g;
+// Fake safety guards exercising the embeddings input-PII contract without Presidio.
+const maskGuard = (): SafetyGuard => ({
+  async inspectInput(messages) {
+    const masked = messages.map((m) => ({
+      role: m.role,
+      content: messageText(m.content).replace(SSN, "[REDACTED]"),
+    }));
+    const found = messages.some((m) => SSN.test(messageText(m.content)));
+    return {
+      action: "allow",
+      messages: masked,
+      piiMasked: found,
+      injectionBlocked: false,
+      findings: found ? [{ type: "pii", detail: "US_SSN" }] : [],
+      safetyCostUsd: 0,
+    };
+  },
+  async inspectOutput(content) {
+    return { action: "allow", content, piiMasked: false, findings: [] };
+  },
+});
+const blockGuard = (): SafetyGuard => ({
+  async inspectInput() {
+    return {
+      action: "block",
+      messages: [],
+      piiMasked: false,
+      injectionBlocked: false,
+      findings: [{ type: "pii", detail: "US_SSN" }],
+      blockReason: "pii_detected",
+      safetyCostUsd: 0,
+    };
+  },
+  async inspectOutput(content) {
+    return { action: "allow", content, piiMasked: false, findings: [] };
+  },
+});
+const throwGuard = (): SafetyGuard => ({
+  async inspectInput() {
+    throw new SafetyServiceError("presidio down");
+  },
+  async inspectOutput(content) {
+    return { action: "allow", content, piiMasked: false, findings: [] };
+  },
+});
+
 describe.skipIf(!DATABASE_URL)("POST /v1/embeddings (integration)", () => {
   let pool: Pool;
 
@@ -94,6 +146,28 @@ describe.skipIf(!DATABASE_URL)("POST /v1/embeddings (integration)", () => {
       logger: false,
       allowUnauthenticated: true,
     });
+  }
+
+  function appWithSafety(litellm: LiteLLMClient, safety: SafetyGuard): FastifyInstance {
+    return buildServer({
+      config,
+      pool,
+      litellm,
+      safety,
+      observability: new NoopObservability(),
+      logger: false,
+      allowUnauthenticated: true,
+    });
+  }
+
+  /** An embed client that records the exact input it received. */
+  function capturingEmbed(): { client: LiteLLMClient; seen: () => string[] | undefined } {
+    let captured: string[] | undefined;
+    const client = fakeEmbedClient(async (p) => {
+      captured = p.input;
+      return { embeddings: p.input.map(() => [0.1]), model: p.model, actualCostUsd: 0.00001, inputTokens: 8, raw: {} };
+    });
+    return { client, seen: () => captured };
   }
 
   const post = (app: FastifyInstance, body: Record<string, unknown>) =>
@@ -234,6 +308,60 @@ describe.skipIf(!DATABASE_URL)("POST /v1/embeddings (integration)", () => {
     });
     expect(res.statusCode).toBe(501);
     expect(res.json().error.code).toBe("not_implemented");
+  });
+
+  describe("input PII safety", () => {
+    it("masks input PII before sending it to the provider", async () => {
+      const { client, seen } = capturingEmbed();
+      const app = appWithSafety(client, maskGuard());
+      const res = await post(app, {
+        userId: "svc_pii",
+        userType: "workflow",
+        feature: "kb_embedding",
+        input: ["my ssn is 123-45-6789", "no pii here"],
+      });
+      expect(res.statusCode).toBe(200);
+      // The provider must never see the raw SSN.
+      expect(seen()).toEqual(["my ssn is [REDACTED]", "no pii here"]);
+      // The success audit row records that masking occurred (parity with chat).
+      const log = await pool.query(
+        "SELECT pii_masked FROM request_logs WHERE user_id='svc_pii'",
+      );
+      expect(log.rows[0].pii_masked).toBe(true);
+    });
+
+    it("blocks the request with 403 and makes no provider call when PII must be blocked", async () => {
+      const { client, seen } = capturingEmbed();
+      const app = appWithSafety(client, blockGuard());
+      const res = await post(app, {
+        userId: "svc_block",
+        userType: "workflow",
+        feature: "kb_embedding",
+        input: ["ssn 123-45-6789"],
+      });
+      expect(res.statusCode).toBe(403);
+      expect(res.json().error.code).toBe("safety_blocked");
+      expect(res.json().error.details.reason).toBe("pii_detected");
+      expect(seen()).toBeUndefined(); // provider never called
+      const logs = await pool.query(
+        "SELECT status, error FROM request_logs WHERE user_id='svc_block'",
+      );
+      expect(logs.rows[0]).toMatchObject({ status: "safety_blocked", error: "pii_detected" });
+    });
+
+    it("fails closed with 503 (no provider call) when the safety backend is down", async () => {
+      const { client, seen } = capturingEmbed();
+      const app = appWithSafety(client, throwGuard());
+      const res = await post(app, {
+        userId: "svc_503",
+        userType: "workflow",
+        feature: "kb_embedding",
+        input: ["hello"],
+      });
+      expect(res.statusCode).toBe(503);
+      expect(res.json().error.code).toBe("safety_unavailable");
+      expect(seen()).toBeUndefined();
+    });
   });
 
   describe("billing integration", () => {
