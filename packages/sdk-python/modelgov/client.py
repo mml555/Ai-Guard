@@ -527,6 +527,21 @@ class ChatStream:
     def __next__(self) -> str:
         return next(self._gen)
 
+    def close(self) -> None:
+        """Close the underlying stream, releasing the HTTP response.
+
+        Safe to call more than once and after full consumption. Lets a caller
+        abandon a long stream early — the same guarantee the previous plain
+        generator gave via ``generator.close()`` / ``contextlib.closing(...)``.
+        """
+        self._gen.close()
+
+    def __enter__(self) -> "ChatStream":
+        return self
+
+    def __exit__(self, *_exc: object) -> None:
+        self.close()
+
     @property
     def done(self) -> Optional[ChatStreamDone]:
         """Terminal ``{model, usage, requestId}`` metadata, once fully consumed."""

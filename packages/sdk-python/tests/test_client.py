@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import contextlib
 import json
 
 import httpx
@@ -599,6 +600,51 @@ def test_chat_stream_supports_simple_delta_shape() -> None:
             )
         )
     assert chunks == ["foo", "bar"]
+
+
+@respx.mock
+def test_chat_stream_is_closable_early() -> None:
+    # A caller abandoning a long stream can release it via close() /
+    # contextlib.closing without AttributeError.
+    stream_bytes = b'data: {"delta":"a"}\n\ndata: {"delta":"b"}\n\ndata: [DONE]\n\n'
+    respx.post(f"{BASE_URL}/v1/chat").mock(
+        return_value=httpx.Response(
+            200, headers={"content-type": "text/event-stream"}, content=stream_bytes
+        )
+    )
+
+    with make_client() as client:
+        with contextlib.closing(
+            client.chat_stream(
+                user_id="u",
+                user_type="logged_in",
+                feature="support_chat",
+                messages=[{"role": "user", "content": "Hi"}],
+            )
+        ) as stream:
+            first = next(iter(stream))
+            assert first == "a"
+        # Idempotent: closing again (and after contextlib already closed) is a no-op.
+        stream.close()
+
+
+@respx.mock
+def test_chat_stream_context_manager_closes() -> None:
+    stream_bytes = b'data: {"delta":"x"}\n\ndata: [DONE]\n\n'
+    respx.post(f"{BASE_URL}/v1/chat").mock(
+        return_value=httpx.Response(
+            200, headers={"content-type": "text/event-stream"}, content=stream_bytes
+        )
+    )
+
+    with make_client() as client:
+        with client.chat_stream(
+            user_id="u",
+            user_type="logged_in",
+            feature="support_chat",
+            messages=[{"role": "user", "content": "Hi"}],
+        ) as stream:
+            assert list(stream) == ["x"]
 
 
 @respx.mock

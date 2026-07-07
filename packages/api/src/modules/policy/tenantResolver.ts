@@ -78,8 +78,22 @@ export function createTenantPolicyResolver(opts: {
   const cache = new Map<string, { value: Promise<ResolvedTenantPolicy>; expiresAt: number }>();
   // Last successfully-resolved policy per key, so a version that later fails to
   // load (bad parse during a rolling upgrade, transient DB error) degrades to the
-  // last-good policy instead of 500ing every request for this tenant.
+  // last-good policy instead of 500ing every request for this tenant. Only REAL
+  // active versions are stored here (never the shared fallback), so a caller
+  // spraying arbitrary X-Modelgov-Tenant values — which have no active version —
+  // can't populate it; and it is bounded to maxEntries like the main cache.
   const lastGood = new Map<string, ResolvedTenantPolicy>();
+
+  function rememberLastGood(tenantId: string, resolved: ResolvedTenantPolicy): void {
+    lastGood.set(tenantId, resolved);
+    // Bound it the same way as the main cache (oldest-insertion eviction) so a
+    // large/hostile tenant space can't grow it without limit.
+    while (lastGood.size > maxEntries) {
+      const oldest = lastGood.keys().next().value;
+      if (oldest === undefined) break;
+      lastGood.delete(oldest);
+    }
+  }
 
   async function load(tenantId: string): Promise<ResolvedTenantPolicy> {
     let active: Awaited<ReturnType<typeof getActiveConfigVersion>>;
@@ -89,17 +103,22 @@ export function createTenantPolicyResolver(opts: {
       // A stored version that fails to parse (e.g. a newer-schema enum reaching an
       // older replica mid-rollout) or a transient DB error must NOT take the
       // gateway down. Serve the last-good policy for this tenant (or the boot
-      // fallback) and log loudly so the bad version is visible.
+      // fallback) and log loudly so the bad version is visible. Self-heals on the
+      // next TTL re-read once the store/version is fixed.
       log?.error({ err, tenantId }, "active policy version failed to load; serving last-good policy");
       return lastGood.get(tenantId) ?? fallback;
     }
-    const resolved: ResolvedTenantPolicy = active
-      ? {
-          config: resolveConfig(active.config),
-          policyMeta: { configHash: active.record.checksum, policyVersion: active.record.id },
-        }
-      : fallback;
-    lastGood.set(tenantId, resolved);
+    if (!active) {
+      // No active version for this tenant — return the shared fallback but do NOT
+      // store it in lastGood (that's the unbounded-growth vector for unknown/
+      // attacker-chosen tenant ids, which all land here).
+      return fallback;
+    }
+    const resolved: ResolvedTenantPolicy = {
+      config: resolveConfig(active.config),
+      policyMeta: { configHash: active.record.checksum, policyVersion: active.record.id },
+    };
+    rememberLastGood(tenantId, resolved);
     return resolved;
   }
 

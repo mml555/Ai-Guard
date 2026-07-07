@@ -3,7 +3,7 @@ import { createHash } from "node:crypto";
 import type { FastifyInstance } from "fastify";
 import type { Pool } from "pg";
 import type Redis from "ioredis";
-import { type ModelgovConfig, resolveSafetyPlan } from "@modelgov/policy-engine";
+import { type ModelgovConfig, PolicyConfigError, resolveSafetyPlan } from "@modelgov/policy-engine";
 import type { loadEnv } from "./config/env";
 import { loadConfigFromFile, resolveEnvRefs } from "./config/loadConfig";
 import { assertPoolReachable, createPool, resolveSsl } from "./db/pool";
@@ -135,12 +135,17 @@ export async function resolvePolicy(
   try {
     active = await getActiveConfigVersion(pool);
   } catch (err) {
-    // The stored active version won't parse (e.g. a version written by a
-    // newer-schema replica during a rolling upgrade reaching this older one).
-    // Boot on the file config rather than crash-looping — the file is the known-
-    // good baseline baked into the image — and log loudly so the operator sees it.
+    // ONLY a parse/validation failure of the stored version falls back to the
+    // file config: e.g. a version written by a newer-schema replica during a
+    // rolling upgrade reaches this older one and won't parse. Booting on the
+    // known-good file baseline beats crash-looping there. A store READ failure
+    // (DB down, connection/statement timeout) must NOT silently bypass the
+    // DB-active policy — it would strand the gateway on the file config until a
+    // restart even after the DB recovers — so those errors propagate and fail
+    // boot (the orchestrator retries).
+    if (!(err instanceof PolicyConfigError)) throw err;
     console.error(
-      "active policy version failed to parse; booting on the file config (MODELGOV_CONFIG) instead. Roll back or fix the active version.",
+      "active policy version failed to PARSE; booting on the file config (MODELGOV_CONFIG) instead. Roll back or fix the active version.",
       err,
     );
     return {
