@@ -97,11 +97,11 @@ export function registerPolicyRoutes(
       record = await saveConfigVersion(pool, {
         yaml: parsed.data.yaml,
         note: parsed.data.note,
-        author: request.ctx.apiKeyName,
+        author: request.ctx.principalName,
         tenantId: request.ctx.tenantId,
         approvalRequired: deps.approvalRequired,
       }, (saved) => ({
-        actor: request.ctx.apiKeyName ?? "unknown",
+        actor: request.ctx.principalName ?? "unknown",
         action: "policy.save",
         target: saved.id,
         tenantId: request.ctx.tenantId,
@@ -198,7 +198,7 @@ export function registerPolicyRoutes(
         id,
         request.ctx.tenantId ?? "default",
         (activated) => ({
-          actor: request.ctx.apiKeyName ?? "unknown",
+          actor: request.ctx.principalName ?? "unknown",
           action: "policy.activate",
           target: activated.id,
           tenantId: request.ctx.tenantId,
@@ -272,9 +272,9 @@ export function registerPolicyRoutes(
       if (!UUID_OR_INT.test(id)) return sendError(reply, 404, "not_found", {}, "Version not found");
       const result = await reviewConfigVersion(
         pool,
-        { id, decision, reviewer: request.ctx.apiKeyName ?? "unknown", tenantId: request.ctx.tenantId },
+        { id, decision, reviewer: request.ctx.principalName ?? "unknown", tenantId: request.ctx.tenantId },
         (reviewed) => ({
-          actor: request.ctx.apiKeyName ?? "unknown",
+          actor: request.ctx.principalName ?? "unknown",
           action: decision === "approved" ? "policy.approve" : "policy.reject",
           target: reviewed.id,
           tenantId: request.ctx.tenantId,

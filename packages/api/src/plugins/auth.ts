@@ -170,7 +170,7 @@ export function registerAuth(
       );
     }
     setRequestContext(request, {
-      apiKeyName: principal.name,
+      principalName: principal.name,
       projectId: principal.projectId,
       environment: principal.environment,
       allowedUserTypes: principal.allowedUserTypes,
