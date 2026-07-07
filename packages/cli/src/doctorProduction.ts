@@ -1,11 +1,12 @@
 import { readFileSync, existsSync } from "node:fs";
-import { resolve } from "node:path";
 import { productionDoctorChecksFromEnv } from "./productionDoctorChecks.js";
-
-const ROOT = resolve(import.meta.dirname, "../../..");
+import { resolveUserPath } from "./paths.js";
 
 function parseEnvFile(path: string): Record<string, string> {
-  const full = resolve(ROOT, path);
+  // Resolve against the user's invocation cwd (INIT_CWD/cwd), NOT the CLI's own
+  // install location — otherwise an installed/npx CLI reads `.env.production`
+  // from inside node_modules and silently checks an empty env.
+  const full = resolveUserPath(path);
   if (!existsSync(full)) return {};
   const out: Record<string, string> = {};
   for (const line of readFileSync(full, "utf8").split(/\r?\n/)) {

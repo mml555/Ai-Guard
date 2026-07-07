@@ -34,7 +34,7 @@ function completionFor(messages) {
   if (systemText.includes("Reply with exactly one word: INJECTION")) {
     return "SAFE";
   }
-  return "Hello from the local Modelgov demo provider. Your one-command setup is working.";
+  return "Hello from the local demo provider. Your one-command setup is working.";
 }
 
 const server = http.createServer(async (req, res) => {
