@@ -15,6 +15,8 @@ guarantees in `docs/versioning.md` apply.
 
 ## [Unreleased]
 
+## [1.2.0] - 2026-07-07
+
 ### ⚠ Breaking
 - **Tenant switching now requires the `tenant:switch` permission.** Previously any
   unbound (platform) principal could scope a request to any tenant via the
