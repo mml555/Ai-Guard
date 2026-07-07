@@ -41,6 +41,17 @@ describe("server-side input-token floor (H4)", () => {
     expect(req.inputTokensEstimate).toBeGreaterThan(6000);
   });
 
+  it("includes grounding context in the floor (can't under-declare via context)", () => {
+    // Small messages, tiny declared estimate, but a huge context passage: the
+    // floor must reflect the context that a grounded feature sends to the model.
+    const bigContext = "c".repeat(40_000); // ~10k tokens
+    const req = buildAiRequest(
+      body({ messages: [{ role: "user", content: "hi" }], context: [bigContext], inputTokensEstimate: 1 }),
+      config,
+    );
+    expect(req.inputTokensEstimate).toBeGreaterThan(9000);
+  });
+
   it("honors a client estimate that is LARGER than the content floor", () => {
     const req = buildAiRequest(body({ messages: [{ role: "user", content: "hi" }], inputTokensEstimate: 5000 }), config);
     expect(req.inputTokensEstimate).toBe(5000);

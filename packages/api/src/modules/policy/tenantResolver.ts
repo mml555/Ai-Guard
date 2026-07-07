@@ -1,4 +1,4 @@
-import type { ModelgovConfig } from "@modelgov/policy-engine";
+import { type ModelgovConfig, PolicyConfigError } from "@modelgov/policy-engine";
 import type { Pool } from "pg";
 import { getActiveConfigVersion } from "./repo";
 
@@ -100,13 +100,27 @@ export function createTenantPolicyResolver(opts: {
     try {
       active = await getActiveConfigVersion(pool, tenantId);
     } catch (err) {
-      // A stored version that fails to parse (e.g. a newer-schema enum reaching an
-      // older replica mid-rollout) or a transient DB error must NOT take the
-      // gateway down. Serve the last-good policy for this tenant (or the boot
-      // fallback) and log loudly so the bad version is visible. Self-heals on the
-      // next TTL re-read once the store/version is fixed.
-      log?.error({ err, tenantId }, "active policy version failed to load; serving last-good policy");
-      return lastGood.get(tenantId) ?? fallback;
+      // Serve this tenant's last-good policy if we have one — correct for the
+      // tenant, just stale; self-heals on the next TTL re-read.
+      const lg = lastGood.get(tenantId);
+      if (lg) {
+        log?.error({ err, tenantId }, "active policy version failed to load; serving last-good policy");
+        return lg;
+      }
+      // No last-good for this tenant — distinguish the failure:
+      //  - PARSE/validation error: the stored version is bad (e.g. newer-schema
+      //    version reaching an older replica mid-rollout). Fall back to the boot
+      //    baseline rather than hard-fail the tenant.
+      //  - READ error (DB down / connection or statement timeout): FAIL CLOSED.
+      //    Serving the boot/file fallback could evaluate this tenant's requests
+      //    against a MORE PERMISSIVE policy, so rethrow (the request errors out).
+      //    Self-heals once the store is reachable again.
+      if (err instanceof PolicyConfigError) {
+        log?.error({ err, tenantId }, "active policy version failed to PARSE; serving boot fallback (no last-good)");
+        return fallback;
+      }
+      log?.error({ err, tenantId }, "policy store read failed and no last-good policy for tenant; failing closed");
+      throw err;
     }
     if (!active) {
       // No active version for this tenant — return the shared fallback but do NOT
