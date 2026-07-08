@@ -15,6 +15,8 @@ guarantees in `docs/versioning.md` apply.
 
 ## [Unreleased]
 
+## [1.3.0] - 2026-07-08
+
 ### Added
 
 - **First-class multi-provider support.** A new provider registry
