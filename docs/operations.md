@@ -159,7 +159,7 @@ roles**, which expand to permissions. Application traffic keeps using API keys.
 | `OIDC_ROLES_CLAIM` | Claim holding roles/groups (default `roles`) |
 | `OIDC_NAME_CLAIM` | Claim used as display name (default `sub`) |
 | `OIDC_ROLE_MAP` | JSON mapping IdP group → Modelgov role(s) |
-| `OIDC_TENANT_CLAIM` | Claim binding the operator to one tenant. When set, the operator is tenant-bound (cannot switch); when unset, an OIDC operator is unbound and needs the `tenant:switch` permission to scope another tenant (see below). |
+| `OIDC_TENANT_CLAIM` | Name of the token claim that binds the operator to a tenant. An operator is tenant-bound only when this var is set **and** the named claim is present and non-empty on their token; otherwise the operator is unbound and needs the `tenant:switch` permission to scope another tenant (see below). |
 
 Built-in operator roles (least privilege):
 
