@@ -204,8 +204,12 @@ describe("providers (openrouter / azure / azure_ai)", () => {
     const litellm = files.get("litellm_config.yaml")!;
     expect(litellm).toContain("model: github_copilot/gpt-4o-mini");
     // No api_key line for the copilot model (OAuth device flow, LiteLLM-owned).
-    const copilotBlock = litellm.slice(litellm.indexOf("github_copilot/gpt-4o-mini"));
-    expect(copilotBlock.slice(0, 120)).not.toContain("api_key");
+    // Scope to the model's own block (up to the next model_name) so the check
+    // stays valid if the entry is reformatted or grows.
+    const start = litellm.indexOf("github_copilot/gpt-4o-mini");
+    const nextEntry = litellm.indexOf("- model_name:", start + 1);
+    const copilotBlock = litellm.slice(start, nextEntry === -1 ? undefined : nextEntry);
+    expect(copilotBlock).not.toContain("api_key");
     expect(files.get(".env")!).toContain("GITHUB_COPILOT_TOKEN=");
   });
 

@@ -48,6 +48,11 @@ const providerHealthSchema = {
   },
 } as const;
 
+// LiteLLM's /health live-pings every configured provider and can take up to the
+// full client timeout, so a monitoring poller must not trigger a fresh fan-out
+// on every request. Serve a short-lived cached result (per app instance).
+const PROVIDER_HEALTH_CACHE_TTL_MS = 15_000;
+
 export function registerHealthRoute(app: FastifyInstance, deps: HealthDeps): void {
   app.get("/health", { schema: healthSchema }, async () => checkHealth());
 
@@ -63,10 +68,17 @@ export function registerHealthRoute(app: FastifyInstance, deps: HealthDeps): voi
     );
   });
 
+  let providerHealthCache: { at: number; result: Awaited<ReturnType<typeof checkProviderHealth>> } | undefined;
   app.get("/v1/admin/providers/health", { schema: providerHealthSchema }, async (request, reply) => {
     if (!request.ctx.permissions?.includes("usage:read")) {
       return sendError(reply, 403, "forbidden", {}, "API key is not permitted to read provider health (requires usage:read)");
     }
-    return checkProviderHealth(deps);
+    const now = Date.now();
+    if (providerHealthCache && now - providerHealthCache.at < PROVIDER_HEALTH_CACHE_TTL_MS) {
+      return providerHealthCache.result;
+    }
+    const result = await checkProviderHealth(deps);
+    providerHealthCache = { at: now, result };
+    return result;
   });
 }

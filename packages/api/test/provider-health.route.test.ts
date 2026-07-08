@@ -1,5 +1,5 @@
 import { parseConfigObject } from "@modelgov/policy-engine";
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import { NoopObservability } from "../src/services/observability";
 import { NoopGuard } from "../src/services/safety";
 import { buildServer } from "../src/server";
@@ -83,5 +83,26 @@ describe("GET /v1/admin/providers/health", () => {
     });
     expect(res.statusCode).toBe(200);
     expect(res.json().status).toBe("skipped");
+  });
+
+  it("serves a cached result within the TTL (no per-poll fan-out to LiteLLM)", async () => {
+    const fetchImpl = vi.fn(async () => new Response(JSON.stringify(litellmHealthBody), { status: 200 }));
+    const server = buildServer({
+      config,
+      pool: mockPool() as never,
+      litellm: { chat: async () => { throw new Error("unreached"); } },
+      safety: new NoopGuard(),
+      observability: new NoopObservability(),
+      logger: false,
+      apiKeys: [{ name: "viewer", key: "viewer-key", permissions: ["usage:read"] }],
+      health: { litellmBaseUrl: "http://litellm:4000", fetchImpl: fetchImpl as typeof fetch },
+    });
+    const call = () => server.inject({ method: "GET", url: "/v1/admin/providers/health", headers: { authorization: "Bearer viewer-key" } });
+    const first = await call();
+    const second = await call();
+    expect(first.statusCode).toBe(200);
+    expect(second.json()).toEqual(first.json());
+    // Two requests, but LiteLLM was hit only once (second served from cache).
+    expect(fetchImpl).toHaveBeenCalledTimes(1);
   });
 });
