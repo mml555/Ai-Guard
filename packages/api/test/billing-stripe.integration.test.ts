@@ -139,6 +139,7 @@ describe.skipIf(!DATABASE_URL)("billing stripe webhooks + meter flush (integrati
     const created = JSON.stringify({
       id: "evt_sub_created",
       type: "customer.subscription.created",
+      created: 1000,
       data: { object: { customer: "cus_sub", status: "active", items: { data: [{ price: { id: "price_pro" } }] } } },
     });
     await svc.handleStripeWebhook(Buffer.from(created), signStripe(secret, created));
@@ -147,6 +148,7 @@ describe.skipIf(!DATABASE_URL)("billing stripe webhooks + meter flush (integrati
     const deleted = JSON.stringify({
       id: "evt_sub_deleted",
       type: "customer.subscription.deleted",
+      created: 2000,
       data: { object: { customer: "cus_sub", status: "canceled", items: { data: [{ price: { id: "price_pro" } }] } } },
     });
     await svc.handleStripeWebhook(Buffer.from(deleted), signStripe(secret, deleted));
@@ -198,6 +200,39 @@ describe.skipIf(!DATABASE_URL)("billing stripe webhooks + meter flush (integrati
     expect((await svc.getBalance("", "u_ord")).userType).toBe("free_user");
   });
 
+  it("breaks a SAME-SECOND deleted/active tie toward the downgrade (P2)", async () => {
+    const secret = "whsec_tie";
+    const subConfig = parseConfigObject({
+      ...RAW_CONFIG,
+      billing: {
+        provider: "stripe",
+        mode: "hybrid",
+        stripe: { plan_map: { price_pro: "paid_user" }, downgrade_user_type: "free_user" },
+      },
+    });
+    const svc = createBillingService(pool, { billing: subConfig.billing, stripeWebhookSecret: secret })!;
+    await topUpCreditsInTransaction(pool, { tenantId: "", userId: "u_tie", creditsUsd: 1, stripeCustomerId: "cus_tie" });
+
+    const evt = (id: string, type: string, status: string) =>
+      JSON.stringify({
+        id,
+        type,
+        created: 1000, // all three share the same Unix-second timestamp
+        data: { object: { customer: "cus_tie", status, items: { data: [{ price: { id: "price_pro" } }] } } },
+      });
+
+    // active, then deleted, then a redelivered stale active — all @ t=1000.
+    for (const [id, type, status] of [
+      ["e1", "customer.subscription.updated", "active"],
+      ["e2", "customer.subscription.deleted", "canceled"],
+      ["e3", "customer.subscription.updated", "active"], // stale retry, same second
+    ] as const) {
+      await svc.handleStripeWebhook(Buffer.from(evt(id, type, status)), signStripe(secret, evt(id, type, status)));
+    }
+    // The same-second stale active must NOT re-upgrade the cancelled account.
+    expect((await svc.getBalance("", "u_tie")).userType).toBe("free_user");
+  });
+
   it("does not upgrade on an incomplete subscription (M3)", async () => {
     const secret = "whsec_incomplete";
     const subConfig = parseConfigObject({
@@ -213,6 +248,7 @@ describe.skipIf(!DATABASE_URL)("billing stripe webhooks + meter flush (integrati
     const body = JSON.stringify({
       id: "evt_sub_incomplete",
       type: "customer.subscription.updated",
+      created: 1000,
       data: { object: { customer: "cus_inc", status: "incomplete", items: { data: [{ price: { id: "price_pro" } }] } } },
     });
     await svc.handleStripeWebhook(Buffer.from(body), signStripe(secret, body));

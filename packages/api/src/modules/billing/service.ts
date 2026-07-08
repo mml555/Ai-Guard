@@ -20,7 +20,6 @@ import {
   reserveCredits,
   settleCredits,
   topUpCreditsInTransaction,
-  upsertBillingAccount,
 } from "./repo";
 import {
   createStripeMeterEvent,
@@ -425,8 +424,9 @@ async function applyStripeEvent(
       // downgrades on an unexpected payload shape.
       const ACTIVE_STATUSES = new Set(["active", "trialing"]);
       const isActive = status ? ACTIVE_STATUSES.has(status) : true;
+      const isDowngrade = deleted || !isActive;
       let userType: string | undefined;
-      if (deleted || !isActive) {
+      if (isDowngrade) {
         userType = opts.downgradeUserType;
       } else {
         const priceId = sub.items?.data?.[0]?.price?.id;
@@ -444,6 +444,7 @@ async function applyStripeEvent(
           userType,
           stripeCustomerId: customerId,
           eventCreatedAt: typeof event.created === "number" ? event.created : 0,
+          isDowngrade,
         });
         if (!applied) {
           opts.log?.warn(
@@ -460,11 +461,16 @@ async function applyStripeEvent(
       if (!customerId) return;
       const account = await findAccountByStripeCustomer(pool, customerId);
       if (!account) return;
-      await upsertBillingAccount(pool, {
+      // A payment failure is a downgrade — route it through the SAME ordering
+      // guard so a late-redelivered failure can't overwrite a newer active
+      // subscription state that already restored access.
+      await applySubscriptionUserType(pool, {
         tenantId: account.tenantId,
         userId: account.userId,
         userType: opts.downgradeUserType,
         stripeCustomerId: customerId,
+        eventCreatedAt: typeof event.created === "number" ? event.created : 0,
+        isDowngrade: true,
       });
       break;
     }

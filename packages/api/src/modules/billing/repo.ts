@@ -85,6 +85,15 @@ export async function upsertBillingAccount(
  * newer state (e.g. a retried `active` after a `deleted`). Returns false when the
  * event was skipped as stale. The account must already exist (the caller resolves
  * it by stripe_customer_id first).
+ *
+ * Stripe `event.created` is only second-granular, so two lifecycle events can
+ * share a timestamp. The direction breaks that tie safely:
+ *  - an UPGRADE (grant paid access) applies only when strictly newer
+ *    (`created > last`) — a same-second stale `active` redelivered after a
+ *    `deleted` is skipped;
+ *  - a DOWNGRADE applies at the same-or-newer timestamp (`created >= last`) —
+ *    downgrades are terminal and idempotent, and same-second ambiguity resolves
+ *    to the safe (no-access) side.
  */
 export async function applySubscriptionUserType(
   pool: Pool,
@@ -94,8 +103,10 @@ export async function applySubscriptionUserType(
     userType: string;
     stripeCustomerId?: string | null;
     eventCreatedAt: number;
+    isDowngrade: boolean;
   },
 ): Promise<boolean> {
+  const cmp = params.isDowngrade ? "<=" : "<";
   const { rowCount } = await pool.query(
     `UPDATE billing_accounts
         SET user_type = $3,
@@ -103,7 +114,7 @@ export async function applySubscriptionUserType(
             last_subscription_event_at = GREATEST(last_subscription_event_at, $5),
             updated_at = now()
       WHERE tenant_id = $1 AND user_id = $2
-        AND last_subscription_event_at <= $5`,
+        AND last_subscription_event_at ${cmp} $5`,
     [params.tenantId, params.userId, params.userType, params.stripeCustomerId ?? null, params.eventCreatedAt],
   );
   return (rowCount ?? 0) > 0;

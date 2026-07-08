@@ -274,13 +274,29 @@ class ModelgovClient:
                 response.read()
                 self._raise_for_status(response)
 
+            # Track an `event: error` line so the data frame that follows it is
+            # raised even if it is malformed (missing `code`, null `delta`) and so
+            # slips past the shape check in _parse_sse_line. A well-formed error
+            # frame is raised by _parse_sse_line directly; this is the backstop.
+            saw_error_event = False
             for line in response.iter_lines():
+                stripped = line.strip() if line else ""
+                if stripped.startswith("event:"):
+                    saw_error_event = stripped[len("event:"):].strip() == "error"
+                    continue
                 chunk = _parse_sse_line(line)
                 if chunk is _DONE:
                     break
                 if isinstance(chunk, _DoneFrame):
                     stream._done = chunk.payload
+                    saw_error_event = False
                     continue
+                if stripped.startswith("data:"):
+                    if saw_error_event:
+                        raise ModelgovError(
+                            502, "stream_error", None, message="stream interrupted"
+                        )
+                    saw_error_event = False
                 if chunk:
                     yield chunk
 

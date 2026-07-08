@@ -82,37 +82,45 @@ describe.skipIf(!DATABASE_URL)("control-plane tenant confinement (integration)",
   }
 
   describe("API keys", () => {
-    it("confines list/get/rotate/revoke to the default partition without tenant:switch", async () => {
+    it("confines list/get/rotate/revoke without tenant:switch and never exposes NULL platform keys", async () => {
       const server = app();
+      const platformId = await seedKey("platform-svc"); // untenanted → NULL = a PLATFORM key
       const acmeId = await seedKey("acme-svc", "acme");
-      const defaultId = await seedKey("default-svc"); // untenanted → NULL
+      const defaultId = await seedKey("default-svc", ""); // default partition → tenant_id ''
 
-      // List: the confined key-admin sees ONLY the untenanted key, never acme's.
+      // List: the confined key-admin sees ONLY the '' default-partition key —
+      // never acme's, and CRUCIALLY never the NULL platform key (rotating which
+      // would hand it a tenant:switch secret).
       const list = await server.inject({ method: "GET", url: "/v1/admin/keys", headers: auth("keyadmin-key") });
       expect(list.statusCode).toBe(200);
       const ids = (list.json().items as Array<{ id: string }>).map((k) => k.id);
-      expect(ids).toContain(defaultId);
-      expect(ids).not.toContain(acmeId);
+      expect(ids).toEqual([defaultId]);
 
-      // Get / rotate / revoke another tenant's key → 404 (looks unknown, no secret leak).
-      expect((await server.inject({ method: "GET", url: `/v1/admin/keys/${acmeId}`, headers: auth("keyadmin-key") })).statusCode).toBe(404);
-      const rotate = await server.inject({ method: "POST", url: `/v1/admin/keys/${acmeId}/rotate`, headers: auth("keyadmin-key") });
-      expect(rotate.statusCode).toBe(404);
-      expect(rotate.json().secret).toBeUndefined();
-      expect((await server.inject({ method: "POST", url: `/v1/admin/keys/${acmeId}/revoke`, headers: auth("keyadmin-key") })).statusCode).toBe(404);
+      // Get / rotate / revoke a platform (NULL) or another tenant's key → 404
+      // (looks unknown, no secret leak).
+      for (const id of [platformId, acmeId]) {
+        expect((await server.inject({ method: "GET", url: `/v1/admin/keys/${id}`, headers: auth("keyadmin-key") })).statusCode).toBe(404);
+        const rotate = await server.inject({ method: "POST", url: `/v1/admin/keys/${id}/rotate`, headers: auth("keyadmin-key") });
+        expect(rotate.statusCode).toBe(404);
+        expect(rotate.json().secret).toBeUndefined();
+        expect((await server.inject({ method: "POST", url: `/v1/admin/keys/${id}/revoke`, headers: auth("keyadmin-key") })).statusCode).toBe(404);
+      }
     });
 
-    it("lets a platform operator (tenant:switch) see and rotate any tenant's key", async () => {
+    it("lets a platform operator (tenant:switch) see and rotate any tenant's key, including NULL platform keys", async () => {
       const server = app();
+      const platformId = await seedKey("platform-svc"); // NULL
       const acmeId = await seedKey("acme-svc", "acme");
-      await seedKey("default-svc");
+      await seedKey("default-svc", "");
 
       const list = await server.inject({ method: "GET", url: "/v1/admin/keys", headers: auth("platform-key") });
-      expect((list.json().items as unknown[]).length).toBe(2);
+      expect((list.json().items as unknown[]).length).toBe(3);
 
-      const rotate = await server.inject({ method: "POST", url: `/v1/admin/keys/${acmeId}/rotate`, headers: auth("platform-key") });
-      expect(rotate.statusCode).toBe(200);
-      expect(rotate.json().secret).toMatch(/^sk-modelgov-/);
+      for (const id of [platformId, acmeId]) {
+        const rotate = await server.inject({ method: "POST", url: `/v1/admin/keys/${id}/rotate`, headers: auth("platform-key") });
+        expect(rotate.statusCode).toBe(200);
+        expect(rotate.json().secret).toMatch(/^sk-modelgov-/);
+      }
     });
 
     it("forbids minting a key for another tenant without tenant:switch", async () => {

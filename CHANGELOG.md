@@ -16,6 +16,7 @@ guarantees in `docs/versioning.md` apply.
 ## [Unreleased]
 
 ### ⚠ Breaking
+
 - **`image_url` in chat/vision content is restricted to `data:` and `https:`
   URLs.** The upstream provider/vision backend dereferences the URL, so an
   arbitrary `http(s)` URL pointing at an internal address (e.g.
@@ -30,6 +31,7 @@ guarantees in `docs/versioning.md` apply.
   `OIDC_ROLE_MAP={"platform-admins":"owner"}`.
 
 ### Security
+
 - **Control-plane tenant isolation for unbound operators.** An unbound operator
   without `tenant:switch` (e.g. an OIDC `key-admin`/`finops` with no
   `OIDC_TENANT_CLAIM`) could omit the `X-Modelgov-Tenant` header to reach *every*
@@ -62,6 +64,7 @@ guarantees in `docs/versioning.md` apply.
   name.
 
 ### Fixed
+
 - **Stripe subscription webhooks are ordered.** A late-redelivered
   `customer.subscription.updated` (`active`) arriving after a `deleted` no longer
   re-upgrades a cancelled account; events older than the last applied one (by
@@ -85,6 +88,17 @@ guarantees in `docs/versioning.md` apply.
 - **CI/release test gate.** The `pnpm test … | tee` steps ran under GitHub's
   default shell (no `pipefail`), so a failing suite took `tee`'s exit code and
   passed CI *and* the release gate; all workflows now force `shell: bash`.
+- **Streaming: client disconnect before the first token now aborts the upstream
+  and releases the budget hold** (the disconnect handler was previously attached
+  only after the first token, so a pre-first-byte disconnect drained the whole
+  generation into a dead socket and settled for it). SSE writes now honor
+  backpressure (`drain`) so a slow reader can't buffer the whole completion in
+  memory.
+- **LiteLLM client keeps its abort timeout armed until the response body is
+  read** (chat + embeddings), so a provider that sends headers then stalls the
+  body can't outlive the request/reservation waiting on the transport default.
+- **Fallback budget top-up rolls back if the reservation lease was already swept**,
+  instead of stranding `reserved_usd` with no lease behind it.
 
 ## [1.2.0] - 2026-07-07
 

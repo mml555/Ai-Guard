@@ -182,7 +182,10 @@ describe("createModelgovClient", () => {
     const it = client.chatStream(baseRequest);
     const first = await it.next();
     expect(first.value).toBe("Hel");
-    await expect(it.next()).rejects.toMatchObject({ code: "provider_unavailable" });
+    await expect(it.next()).rejects.toMatchObject({
+      code: "provider_unavailable",
+      message: expect.stringContaining("Stream interrupted"),
+    });
   });
 
   it("chatStream throws typed errors before streaming begins", async () => {

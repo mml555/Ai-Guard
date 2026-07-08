@@ -105,6 +105,15 @@ describe("CompositeGuard", () => {
     expect(r.action).toBe("allow");
   });
 
+  it("does not block an image for an output-only PII plan (input was never scanned)", async () => {
+    const g = new CompositeGuard(maskingPii, cleanInjection);
+    const r = await g.inspectInput(
+      WITH_IMAGE,
+      plan({ pii: "block", piiScope: "output", promptInjection: "off" }),
+    );
+    expect(r.action).toBe("allow");
+  });
+
   it("blocks on detected prompt injection", async () => {
     const g = new CompositeGuard(cleanPii, flaggingInjection);
     const r = await g.inspectInput(USER, plan());

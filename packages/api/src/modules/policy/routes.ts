@@ -281,6 +281,11 @@ export function registerPolicyRoutes(
           // Match author: stable identity, so a renamed display name can't defeat
           // the self-approval check.
           reviewer: request.ctx.principalId ?? request.ctx.principalName ?? "unknown",
+          // Both identities so a proposal stored under the OLD name-based identity
+          // (before this change) still can't be self-approved by the same operator.
+          reviewerAliases: [request.ctx.principalId, request.ctx.principalName].filter(
+            (v): v is string => typeof v === "string",
+          ),
           tenantId: request.ctx.tenantId,
         },
         (reviewed) => ({

@@ -34,8 +34,12 @@ export class ModelgovError extends Error {
   readonly userType?: string;
   readonly resolvedModelClass?: string;
 
-  constructor(status: number, code: string, body: unknown) {
-    super(`modelgov request failed (${status}): ${code}`);
+  constructor(status: number, code: string, body: unknown, message?: string) {
+    super(
+      message
+        ? `modelgov request failed (${status}): ${code} - ${message}`
+        : `modelgov request failed (${status}): ${code}`,
+    );
     this.name = "ModelgovError";
     this.status = status;
     this.code = code;
@@ -242,7 +246,8 @@ export function createModelgovClient(
                 (typeof parsed.code === "string" && typeof parsed.delta !== "string" && parsed.done !== true)
               ) {
                 const code = typeof parsed.code === "string" ? parsed.code : "stream_error";
-                throw new ModelgovError(502, code, parsed);
+                const message = typeof parsed.message === "string" ? parsed.message : undefined;
+                throw new ModelgovError(502, code, parsed, message);
               }
               if (parsed.done === true) done = parsed as unknown as ChatStreamDone;
               else if (typeof parsed.delta === "string") yield parsed.delta;

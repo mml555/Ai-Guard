@@ -149,10 +149,16 @@ export async function createApiKey(
 
 /**
  * Tenant predicate for a control-plane key query. Three cases:
- *  - `undefined`: platform operator with tenant:switch — no filter, all tenants.
- *  - `""`: the default (untenanted) partition. api_keys stores such keys as NULL
- *    (see migration 0014), so `= ''` would match nothing and silently hide a
- *    default-partition admin's own keys — match NULL (and tolerate any '').
+ *  - `undefined`: platform operator with tenant:switch — no filter, all tenants
+ *    (this is the ONLY scope that can see NULL-tenant PLATFORM keys, e.g. the
+ *    bootstrap/owner key).
+ *  - `""`: the default (untenanted) partition, matched as `tenant_id = ''`.
+ *    Crucially NOT `IS NULL`: NULL is reserved for platform keys, so an operator
+ *    confined to `""` (an unbound key-admin without tenant:switch) must NOT see or
+ *    rotate a NULL platform key — that would hand it a `tenant:switch` secret and
+ *    re-open the very cross-tenant escalation this confinement closes. Keys minted
+ *    within the default partition are stamped `''` (authorizeKeyCreation), so a
+ *    confined admin still sees its own partition's keys.
  *  - a tenant id: that tenant only.
  * `nextParamIndex` is the positional-parameter number the tenant value would
  * take when it is bound (callers pass the count after their fixed params).
@@ -162,7 +168,7 @@ function keyTenantScope(
   nextParamIndex: number,
 ): { scope: string; params: string[] } {
   if (tenantId === undefined) return { scope: "", params: [] };
-  if (tenantId === "") return { scope: " AND (tenant_id IS NULL OR tenant_id = '')", params: [] };
+  if (tenantId === "") return { scope: " AND tenant_id = ''", params: [] };
   return { scope: ` AND tenant_id = $${nextParamIndex}`, params: [tenantId] };
 }
 
@@ -178,9 +184,10 @@ export async function listApiKeys(
     conditions.push(`project_id = $${values.length}`);
   }
   // A tenant-scoped admin only ever sees its own tenant's keys; "" is the
-  // default (untenanted, NULL) partition, undefined is a platform operator.
+  // default partition (tenant_id = ''), NOT NULL — NULL platform keys are
+  // visible only to a tenant:switch operator (undefined). See keyTenantScope.
   if (opts.tenantId === "") {
-    conditions.push("(tenant_id IS NULL OR tenant_id = '')");
+    conditions.push("tenant_id = ''");
   } else if (opts.tenantId !== undefined) {
     values.push(opts.tenantId);
     conditions.push(`tenant_id = $${values.length}`);
