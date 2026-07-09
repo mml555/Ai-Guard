@@ -15,7 +15,7 @@ import {
 } from "../authz/scope";
 import type { TenantPolicyResolver } from "../policy/tenantResolver";
 import { useHierarchicalBudgets } from "../chat/routing";
-import { requestHash, withIdempotency } from "../idempotency/service";
+import { parseIdempotencyKey, requestHash, withIdempotency } from "../idempotency/service";
 import type { Observability } from "../../services/observability";
 import {
   embeddingsBodyJsonSchema,
@@ -38,7 +38,7 @@ export interface EmbeddingsRouteDeps {
   /** Enables node-tree budgets on chat. Embeddings do NOT implement the
    * hierarchical path, so this is used only to fail closed (see below). */
   hierarchicalBudgets?: boolean;
-  policyMeta?: { configHash?: string; policyVersion?: string; tenantId?: string };
+  policyMeta?: { configHash?: string; policyVersion?: string; tenantId?: string; correlationId?: string };
   tenantPolicy?: TenantPolicyResolver;
   /** Prepaid-credit / metered billing — embeddings must not bypass the wallet. */
   billing?: import("../billing/service").BillingService;
@@ -100,11 +100,7 @@ export function registerEmbeddingsRoute(
       return sendError(reply, auth.status, auth.code, auth.details, auth.message);
     }
 
-    const rawKey = request.headers["idempotency-key"];
-    const idempotencyKey =
-      typeof rawKey === "string" && rawKey.trim() && rawKey.length <= 256
-        ? rawKey.trim()
-        : undefined;
+    const idempotencyKey = parseIdempotencyKey(request.headers["idempotency-key"]);
 
     // Per-tenant policy resolution (MULTI_TENANT_POLICY), same as chat.
     const rdeps: EmbeddingsRouteDeps = deps.tenantPolicy
@@ -145,9 +141,13 @@ export function registerEmbeddingsRoute(
       safety: rdeps.safety,
       observability: rdeps.observability,
       billing: rdeps.billing,
-      policyMeta: rdeps.policyMeta
-        ? { ...rdeps.policyMeta, tenantId: request.ctx.tenantId }
-        : (request.ctx.tenantId ? { tenantId: request.ctx.tenantId } : undefined),
+      // Always stamp the correlation key (reused x-request-id) for cost
+      // attribution; add tenantId only when the request is tenant-scoped.
+      policyMeta: {
+        ...rdeps.policyMeta,
+        correlationId: request.ctx.requestId,
+        ...(request.ctx.tenantId ? { tenantId: request.ctx.tenantId } : {}),
+      },
       log: request.log,
     };
 

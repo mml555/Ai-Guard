@@ -15,6 +15,54 @@ guarantees in `docs/versioning.md` apply.
 
 ## [Unreleased]
 
+## [1.4.0] - 2026-07-08
+
+### Added
+
+- **Cost attribution & correlation.** Every `request_logs` row now carries a
+  `correlation_id` (from the reused `x-request-id`), so many gateway calls roll
+  up as one business transaction. New `GET /v1/usage/transactions` returns a
+  per-transaction cost rollup (LLM + external, broken out), and
+  `POST /v1/usage/external` (permission **`usage:write`**) records externally-
+  tracked non-LLM cost against a transaction. The operator console gains a "Cost
+  by transaction" view and a correlation filter on the Requests explorer.
+- **Governed document extraction.** `POST /v1/documents/extract` proxies
+  OCR / document-AI providers — **Tesseract** (self-hosted sidecar), **Azure
+  Document Intelligence**, and **Amazon Textract** — as first-class governed
+  calls: budget-reserved per page, PII-masked on the extracted text, audited,
+  and idempotent (`Idempotency-Key`). Textract is signed with an in-house AWS
+  SigV4 signer (no AWS SDK dependency). See `docs/design/document-ai.md`.
+- **SDK support** for document extraction: `extractDocument` (TypeScript) and
+  `extract_document` (Python).
+
+### Changed
+
+- New config/env: `EXTERNAL_COST_SOURCES`, `EXTERNAL_COST_MAX_USD`,
+  `TESSERACT_URL`, `AZURE_DI_ENDPOINT` / `AZURE_DI_KEY`, `TEXTRACT_REGION`
+  (+ standard AWS creds), `DOCUMENT_PRICE_PER_PAGE_*`, `DOCUMENT_MAX_PAGES`.
+  New permission `usage:write`, granted to the `finops` and `owner` roles.
+
+### Security
+
+- Caller-supplied document `url` sources are DNS-resolved and rejected when they
+  resolve to a private/link-local address, and HTTP redirects are not followed —
+  closing an SSRF vector on the gateway document-fetch path.
+
+### Fixed
+
+- Document budget reservations are floored at a worst-case page count, so a
+  caller can't under-report `pages` to slip a large document past a budget cap.
+- Audit-write failures that occur after a provider call has settled are now
+  non-retryable, so an idempotent retry cannot re-call the provider and
+  re-charge (documents and embeddings).
+- Azure DI poll `4xx` responses are classified as (non-retryable) client errors;
+  gateway `url` document fetches are size-capped while streaming (no unbounded
+  buffering); the credit hold is settled rather than leaked on an unexpected
+  safety-backend error.
+- Externally-ingested cost rows are excluded from LLM request counts in
+  `/v1/usage/summary`, `/v1/usage/transactions`, and the default `/v1/requests`
+  list. A `(tenant_id, created_at)` index backs the time-window aggregates.
+
 ## [1.3.0] - 2026-07-08
 
 ### Added
