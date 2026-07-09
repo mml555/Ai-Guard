@@ -234,8 +234,11 @@ DOCUMENT_SUCCESS_BODY = {
     "text": "extracted text",
     "pages": 2,
     "provider": "azure-di",
+    "model": "azure-di/prebuilt-layout",
+    "tables": [{"rowCount": 1, "columnCount": 1, "cells": [{"rowIndex": 0, "columnIndex": 0, "content": "cell"}]}],
+    "fields": {"Total": {"content": "$5"}},
     "decision": "allow",
-    "cost": {"estimatedUsd": 0.003, "actualUsd": 0.003},
+    "cost": {"estimatedUsd": 0.02, "actualUsd": 0.02},
     "budgetRemaining": None,
     "safety": {"piiMasked": False},
     "requestId": "req_88",
@@ -254,13 +257,14 @@ def test_extract_document_success_and_auth() -> None:
             user_type="logged_in",
             feature="doc_review",
             provider="azure-di",
+            model="prebuilt-layout",
             document={"base64": "ZmFrZQ=="},
             pages=2,
             idempotency_key="idem-doc-1",
         )
 
     assert res == DOCUMENT_SUCCESS_BODY
-    assert res["text"] == "extracted text"
+    assert res["tables"][0]["cells"][0]["content"] == "cell"
     request = route.calls.last.request
     assert request.headers["authorization"] == f"Bearer {API_KEY}"
     assert request.headers["idempotency-key"] == "idem-doc-1"
@@ -270,6 +274,7 @@ def test_extract_document_success_and_auth() -> None:
         "userType": "logged_in",
         "feature": "doc_review",
         "provider": "azure-di",
+        "model": "prebuilt-layout",
         "document": {"base64": "ZmFrZQ=="},
         "pages": 2,
     }

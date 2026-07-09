@@ -212,6 +212,33 @@ class DocumentSafety(TypedDict):
     piiMasked: bool
 
 
+class DocumentTableCell(TypedDict):
+    rowIndex: int
+    columnIndex: int
+    content: str
+    rowSpan: NotRequired[int]
+    columnSpan: NotRequired[int]
+
+
+class DocumentTable(TypedDict):
+    rowCount: int
+    columnCount: int
+    cells: List[DocumentTableCell]
+
+
+class DocumentField(TypedDict):
+    content: NotRequired[str]
+    value: NotRequired[Any]
+    type: NotRequired[str]
+    confidence: NotRequired[float]
+
+
+class DocumentEntity(TypedDict):
+    docType: NotRequired[str]
+    confidence: NotRequired[float]
+    fields: Dict[str, DocumentField]
+
+
 class DocumentExtractResponse(TypedDict):
     """``200`` body of ``POST /v1/documents/extract``."""
 
@@ -219,6 +246,10 @@ class DocumentExtractResponse(TypedDict):
     pages: int
     provider: str
     model: NotRequired[str]
+    # Structure-aware model output (Azure DI prebuilt-layout / prebuilt-*).
+    tables: NotRequired[List[DocumentTable]]
+    fields: NotRequired[Dict[str, DocumentField]]
+    documents: NotRequired[List[DocumentEntity]]
     decision: str  # "allow" | "degrade"
     reason: NotRequired[str]
     cost: Cost
@@ -262,6 +293,10 @@ __all__ = [
     "EmbeddingsResponse",
     "EmbeddingsResult",
     "DocumentSafety",
+    "DocumentTableCell",
+    "DocumentTable",
+    "DocumentField",
+    "DocumentEntity",
     "DocumentExtractResponse",
     "DocumentExtractResult",
     "ExplainRequested",

@@ -27,6 +27,20 @@ import {
 } from "./bootstrap";
 import { createBillingService } from "./modules/billing/service";
 
+/** Parse `AZURE_DI_MODEL_PRICES` ("model:usd,model:usd") into a price map. */
+function parseModelPrices(raw?: string): Record<string, number> | undefined {
+  if (!raw) return undefined;
+  const out: Record<string, number> = {};
+  for (const pair of raw.split(",")) {
+    const idx = pair.lastIndexOf(":");
+    if (idx <= 0) continue;
+    const model = pair.slice(0, idx).trim();
+    const price = Number(pair.slice(idx + 1).trim());
+    if (model && Number.isFinite(price) && price >= 0) out[model] = price;
+  }
+  return Object.keys(out).length ? out : undefined;
+}
+
 /**
  * Composition root: assemble each dependency via the focused `bootstrap`
  * helpers, hand them to `buildServer`, then start background jobs and the
@@ -108,6 +122,7 @@ async function main(): Promise<void> {
               endpoint: env.AZURE_DI_ENDPOINT,
               key: env.AZURE_DI_KEY,
               perPageUsd: env.DOCUMENT_PRICE_PER_PAGE_AZURE_DI,
+              perPageUsdByModel: parseModelPrices(env.AZURE_DI_MODEL_PRICES),
               apiVersion: env.AZURE_DI_API_VERSION,
             }
           : undefined,

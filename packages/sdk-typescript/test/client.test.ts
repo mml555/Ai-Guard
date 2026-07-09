@@ -95,8 +95,11 @@ describe("createModelgovClient", () => {
         text: "extracted text",
         pages: 2,
         provider: "azure-di",
+        model: "azure-di/prebuilt-layout",
+        tables: [{ rowCount: 1, columnCount: 1, cells: [{ rowIndex: 0, columnIndex: 0, content: "cell" }] }],
+        fields: { Total: { content: "$5" } },
         decision: "allow",
-        cost: { estimatedUsd: 0.003, actualUsd: 0.003 },
+        cost: { estimatedUsd: 0.02, actualUsd: 0.02 },
         budgetRemaining: null,
         safety: { piiMasked: false },
         requestId: "req_9",
@@ -109,17 +112,18 @@ describe("createModelgovClient", () => {
         userId: "u1",
         userType: "logged_in",
         feature: "doc_review",
+        model: "prebuilt-layout",
         document: { base64: "ZmFrZQ==" },
-        pages: 2,
       },
       { idempotencyKey: "idem-doc-1" },
     );
 
     expect(capturedUrl).toBe("http://api/v1/documents/extract");
-    expect(capturedBody).toMatchObject({ provider: "azure-di", document: { base64: "ZmFrZQ==" } });
+    expect(capturedBody).toMatchObject({ provider: "azure-di", model: "prebuilt-layout", document: { base64: "ZmFrZQ==" } });
     expect(idempotencyHeader).toBe("idem-doc-1");
     expect(res.text).toBe("extracted text");
-    expect(res.pages).toBe(2);
+    expect(res.tables?.[0]?.cells[0]?.content).toBe("cell");
+    expect(res.fields?.Total?.content).toBe("$5");
   });
 
   it("extractDocument throws PolicyBlockedError on a 403 budget_exceeded", async () => {

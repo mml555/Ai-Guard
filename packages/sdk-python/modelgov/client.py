@@ -403,6 +403,7 @@ class ModelgovClient:
         provider: str,
         document: Mapping[str, str],
         model_class: Optional[str] = None,
+        model: Optional[str] = None,
         pages: Optional[int] = None,
         project_id: Optional[str] = None,
         environment: Optional[str] = None,
@@ -423,6 +424,11 @@ class ModelgovClient:
                 ``"textract"``). Must be configured server-side, else ``400``.
             document: Exactly one source — ``{"base64": ...}``, ``{"url": ...}``
                 (https), or ``{"s3": "s3://bucket/key"}`` (Textract only).
+            model: Provider model to run (providers that support selection only).
+                Azure DI: ``"prebuilt-read"`` (default), ``"prebuilt-layout"``
+                (tables), ``"prebuilt-invoice"``, ``"prebuilt-bankStatement.us"``,
+                or a custom model id. Structured output is returned under
+                ``tables`` / ``fields`` / ``documents``.
             pages: Caller estimate of page count for the pre-call budget reserve.
             idempotency_key: Sent as the ``Idempotency-Key`` header. Retrying
                 with the same key + body replays the first result instead of
@@ -437,6 +443,8 @@ class ModelgovClient:
         }
         if model_class is not None:
             body["modelClass"] = model_class
+        if model is not None:
+            body["model"] = model
         if pages is not None:
             body["pages"] = pages
         if project_id is not None:

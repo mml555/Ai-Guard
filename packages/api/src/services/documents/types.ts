@@ -12,6 +12,38 @@ export type DocumentSource =
 
 export type DocumentInputKind = DocumentSource["kind"];
 
+/** One cell of an extracted table (0-indexed row/column). */
+export interface DocumentTableCell {
+  rowIndex: number;
+  columnIndex: number;
+  content: string;
+  rowSpan?: number;
+  columnSpan?: number;
+}
+
+/** A table extracted by a structure-aware model (e.g. Azure DI prebuilt-layout). */
+export interface DocumentTable {
+  rowCount: number;
+  columnCount: number;
+  cells: DocumentTableCell[];
+}
+
+/** A key/value or prebuilt-model field. */
+export interface DocumentField {
+  content?: string;
+  /** Typed value when the model provides one (string/number/date/…). */
+  value?: string | number | boolean | null;
+  type?: string;
+  confidence?: number;
+}
+
+/** A prebuilt-model document result (e.g. one bank statement / invoice). */
+export interface DocumentEntity {
+  docType?: string;
+  confidence?: number;
+  fields: Record<string, DocumentField>;
+}
+
 export interface DocumentResult {
   /** Extracted plain text (concatenated across pages). */
   text: string;
@@ -19,7 +51,19 @@ export interface DocumentResult {
   pages: number;
   /** Provider/model identifier stamped on the audit row's resolved_model. */
   model?: string;
+  /** Structured tables (structure-aware models only). */
+  tables?: DocumentTable[];
+  /** Flat key/value fields (Azure DI keyValuePairs + prebuilt document fields). */
+  fields?: Record<string, DocumentField>;
+  /** Full prebuilt-model document results (docType + fields). */
+  documents?: DocumentEntity[];
   raw?: unknown;
+}
+
+/** Per-request options threaded from the caller to the provider adapter. */
+export interface DocumentExtractOptions {
+  /** Provider-specific model, e.g. Azure DI "prebuilt-layout" / "prebuilt-bankStatement". */
+  model?: string;
 }
 
 export interface DocumentProviderAdapter {
@@ -27,9 +71,15 @@ export interface DocumentProviderAdapter {
   readonly slug: string;
   /** Which document source kinds this provider accepts. */
   readonly supportedInputs: readonly DocumentInputKind[];
-  /** USD per page — the cost basis for reserve/settle (0 for self-hosted). */
+  /** Models this provider accepts. Absent/empty ⇒ no model selection (the caller
+   *  must not pass a `model`); the service rejects an unsupported model. */
+  readonly supportedModels?: readonly string[];
+  /** USD per page for the default model — the reserve/settle cost basis. */
   readonly perPageUsd: number;
-  extract(source: DocumentSource): Promise<DocumentResult>;
+  /** USD per page for a specific model (Azure DI prices vary by model). Falls
+   *  back to {@link perPageUsd} when unset. */
+  perPageUsdFor?(model?: string): number;
+  extract(source: DocumentSource, opts?: DocumentExtractOptions): Promise<DocumentResult>;
 }
 
 /** The set of enabled document providers, selected by env config. */

@@ -5,7 +5,13 @@ import type { DocumentAiClient, DocumentProviderAdapter } from "./types";
 
 export interface DocumentClientConfig {
   tesseract?: { url: string; perPageUsd: number };
-  azureDi?: { endpoint: string; key: string; perPageUsd: number; apiVersion?: string };
+  azureDi?: {
+    endpoint: string;
+    key: string;
+    perPageUsd: number;
+    perPageUsdByModel?: Record<string, number>;
+    apiVersion?: string;
+  };
   textract?: {
     region: string;
     accessKeyId: string;

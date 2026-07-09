@@ -15,6 +15,28 @@ guarantees in `docs/versioning.md` apply.
 
 ## [Unreleased]
 
+## [1.5.0] - 2026-07-09
+
+### Added
+
+- **Azure Document Intelligence model selection + structured output.**
+  `POST /v1/documents/extract` accepts an optional `model` (default
+  `prebuilt-read`): `prebuilt-layout` (tables/structure), `prebuilt-invoice`,
+  `prebuilt-receipt`, `prebuilt-idDocument`, `prebuilt-bankStatement.us`, or a
+  custom model id. The response now carries structure-aware output — **`tables`**,
+  **`fields`** (key/value pairs), and **`documents`** (prebuilt-model fields) —
+  alongside `text`/`pages`. The TypeScript (`extractDocument` `model` +
+  `tables`/`fields`/`documents`) and Python (`extract_document`) SDKs are updated.
+  Providers without model selection (Tesseract, Textract) reject a `model` with
+  `400 unsupported_model`.
+
+### Changed
+
+- Azure DI cost is now **per-model**: `AZURE_DI_MODEL_PRICES` (comma-separated
+  `model:usd`) overrides `DOCUMENT_PRICE_PER_PAGE_AZURE_DI` per model (layout /
+  prebuilt-* / custom bill higher than read); the reserve/settle uses the
+  requested model's rate.
+
 ## [1.4.0] - 2026-07-08
 
 ### Added
