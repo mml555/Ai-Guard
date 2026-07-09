@@ -2,6 +2,11 @@ node_modules/
 dist/
 coverage/
 *.log
+
+# Written at runtime by the setup wizard (POST /v1/setup/secrets) from the
+# operator's chosen providers — an environment-specific artifact, not source.
+# The committed litellm_config.yaml / .cloud / .azure / .local examples stay.
+/litellm_config.generated.yaml
 .env
 .env.*
 !.env.example
