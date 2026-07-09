@@ -133,7 +133,16 @@ export function registerDocumentsRoute(app: FastifyInstance, deps: DocumentsRout
     // instead of re-calling the provider and re-charging (documents incur real,
     // per-page spend). Mirrors chat/embeddings. A too-long key is treated as
     // absent (parity with embeddings).
-    const idempotencyKey = parseIdempotencyKey(request.headers["idempotency-key"]);
+    const rawKey = request.headers["idempotency-key"];
+    const idempotencyKey = parseIdempotencyKey(rawKey);
+    // A present-but-unusable key (too long) must be a loud 400, not silently
+    // dropped — otherwise the client believes the call is idempotent while it
+    // runs unprotected, and a retry re-calls the provider and double-charges
+    // (parity with the chat route).
+    const rawKeyStr = Array.isArray(rawKey) ? rawKey[0] : rawKey;
+    if (rawKeyStr && rawKeyStr.trim() !== "" && !idempotencyKey) {
+      return sendError(reply, 400, "invalid_request", {}, "Idempotency-Key must be between 1 and 256 characters");
+    }
     const run = () => handleDocumentExtract(svc, auth.value);
 
     let result;

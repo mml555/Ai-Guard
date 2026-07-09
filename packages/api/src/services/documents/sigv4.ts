@@ -49,7 +49,12 @@ export function signAwsV4(params: SigV4Params): Record<string, string> {
   // Build the canonical, signed header set: caller headers + host + x-amz-date
   // (+ security token). Names lowercased, values trimmed, sorted by name.
   const headerMap: Record<string, string> = {};
-  for (const [k, v] of Object.entries(params.headers)) headerMap[k.toLowerCase()] = v.trim();
+  // SigV4 canonicalization: lowercase the name, trim, AND collapse sequential
+  // internal whitespace to a single space (a value with double spaces would
+  // otherwise sign differently than AWS recomputes → SignatureDoesNotMatch).
+  for (const [k, v] of Object.entries(params.headers)) {
+    headerMap[k.toLowerCase()] = v.trim().replace(/\s+/g, " ");
+  }
   headerMap.host = params.host;
   headerMap["x-amz-date"] = amzDate;
   if (params.sessionToken) headerMap["x-amz-security-token"] = params.sessionToken;

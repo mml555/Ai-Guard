@@ -135,15 +135,23 @@ export async function sourceToBase64(
   const reader = body.getReader();
   const chunks: Buffer[] = [];
   let total = 0;
-  for (;;) {
-    const { done, value } = await reader.read();
-    if (done) break;
-    total += value.byteLength;
-    if (total > maxBytes) {
-      await reader.cancel();
-      throw new DocumentClientError(`document exceeds ${maxBytes} bytes`);
+  try {
+    for (;;) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      total += value.byteLength;
+      if (total > maxBytes) {
+        await reader.cancel();
+        throw new DocumentClientError(`document exceeds ${maxBytes} bytes`);
+      }
+      chunks.push(Buffer.from(value));
     }
-    chunks.push(Buffer.from(value));
+  } catch (err) {
+    // Preserve the size-cap client error; classify a mid-stream abort/timeout/
+    // connection drop as a (retryable) provider error rather than letting a raw
+    // error escape unclassified.
+    if (err instanceof DocumentClientError) throw err;
+    throw new DocumentProviderError(`document url stream failed: ${(err as Error).message}`, { cause: err });
   }
   return Buffer.concat(chunks).toString("base64");
 }

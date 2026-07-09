@@ -100,7 +100,14 @@ export function registerEmbeddingsRoute(
       return sendError(reply, auth.status, auth.code, auth.details, auth.message);
     }
 
-    const idempotencyKey = parseIdempotencyKey(request.headers["idempotency-key"]);
+    const rawKey = request.headers["idempotency-key"];
+    const idempotencyKey = parseIdempotencyKey(rawKey);
+    // A present-but-unusable key (too long) must be a loud 400, not silently
+    // dropped — otherwise a retry runs unprotected and re-charges (parity w/ chat).
+    const rawKeyStr = Array.isArray(rawKey) ? rawKey[0] : rawKey;
+    if (rawKeyStr && rawKeyStr.trim() !== "" && !idempotencyKey) {
+      return sendError(reply, 400, "invalid_request", {}, "Idempotency-Key must be between 1 and 256 characters");
+    }
 
     // Per-tenant policy resolution (MULTI_TENANT_POLICY), same as chat.
     const rdeps: EmbeddingsRouteDeps = deps.tenantPolicy

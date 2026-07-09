@@ -283,15 +283,14 @@ def test_extract_document_maps_policy_blocked() -> None:
         )
     )
 
-    with make_client() as client:
-        with pytest.raises(PolicyBlockedError) as exc_info:
-            client.extract_document(
-                user_id="u",
-                user_type="logged_in",
-                feature="doc_review",
-                provider="tesseract",
-                document={"url": "https://example.com/doc.pdf"},
-            )
+    with make_client() as client, pytest.raises(PolicyBlockedError) as exc_info:
+        client.extract_document(
+            user_id="u",
+            user_type="logged_in",
+            feature="doc_review",
+            provider="tesseract",
+            document={"url": "https://example.com/doc.pdf"},
+        )
     assert exc_info.value.code == "budget_exceeded"
 
 

@@ -33,6 +33,7 @@ const config = parseConfigObject({
 
 const OPS_KEY = "ops-secret-key-value-1234567890";
 const VIEWER_KEY = "viewer-secret-key-value-1234567890";
+const STAGING_KEY = "staging-secret-key-value-1234567890";
 
 function okResult(model: string): LiteLLMChatResult {
   return { content: `reply from ${model}`, model, actualCostUsd: 0.0002, inputTokens: 12, outputTokens: 8, raw: {} };
@@ -67,6 +68,8 @@ describe.skipIf(!DATABASE_URL)("cost attribution (integration)", () => {
           permissions: ["chat:create", "usage:read", "usage:write", "requests:read"],
         },
         { name: "viewer", key: VIEWER_KEY, permissions: ["usage:read", "requests:read"] },
+        // Bound to the "staging" environment — used to assert env-scope on ingest.
+        { name: "staging", key: STAGING_KEY, permissions: ["usage:write"], environment: "staging" },
       ],
       externalCost: opts.externalCost ?? { sources: ["azure-di"], maxUsd: 100 },
     });
@@ -160,6 +163,18 @@ describe.skipIf(!DATABASE_URL)("cost attribution (integration)", () => {
     });
     expect(disabled.statusCode).toBe(400);
     expect(disabled.json().error.code).toBe("external_cost_disabled");
+  });
+
+  it("enforces environment scope on external ingest", async () => {
+    // STAGING_KEY is bound to environment 'staging'; posting cost tagged 'prod'
+    // must be rejected so a scoped key can't attribute cost to another environment.
+    const res = await postExternal(
+      app(),
+      { source: "azure-di", feature: "doc_review", environment: "prod", costUsd: 1 },
+      STAGING_KEY,
+    );
+    expect(res.statusCode).toBe(403);
+    expect(res.json().error.code).toBe("environment_mismatch");
   });
 
   it("falls back to the per-call x-request-id when no explicit correlationId is posted", async () => {
