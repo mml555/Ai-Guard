@@ -20,89 +20,16 @@ import {
 } from "../setup/catalog";
 import { ProviderLogo } from "../setup/ProviderLogo";
 import { CopyButton } from "../setup/CopyButton";
-import { keyFormatWarning } from "../setup/validation";
-
-const SETUP_KEY = "modelgov-setup-v1-complete";
-const WIZARD_STATE_KEY = "modelgov-setup-wizard-state-v1";
-
-export function isSetupComplete(): boolean {
-  return localStorage.getItem(SETUP_KEY) === "1";
-}
-
-export function markSetupComplete(): void {
-  localStorage.setItem(SETUP_KEY, "1");
-  // Drop the in-progress wizard state once setup is finished.
-  try {
-    sessionStorage.removeItem(WIZARD_STATE_KEY);
-  } catch {
-    /* ignore storage errors */
-  }
-}
-
-/** Non-secret wizard selections, persisted to sessionStorage so an accidental
- *  refresh doesn't lose progress. Secrets are NEVER persisted. */
-interface PersistedWizard {
-  step: Step;
-  templateId: TemplateId;
-  backend: BackendMode;
-  providers: Provider[];
-  safety: "dev" | "balanced" | "strict";
-  monthlyBudget: number;
-  customBudget: boolean;
-  quickStart: boolean;
-}
-
-function loadWizardState(): Partial<PersistedWizard> {
-  try {
-    const raw = sessionStorage.getItem(WIZARD_STATE_KEY);
-    return raw ? (JSON.parse(raw) as Partial<PersistedWizard>) : {};
-  } catch {
-    return {};
-  }
-}
-
-/** Restore the saved step, but never strand the user: don't reopen provider/key
- *  steps that don't apply to the saved backend, and never restore into "done". */
-function safeRestoredStep(p: Partial<PersistedWizard>): Step {
-  const s = p.step;
-  if (!s || s === "done") return "welcome";
-  if ((s === "providers" || s === "keys") && p.backend !== "cloud") return "welcome";
-  return s;
-}
-
-type Step =
-  | "welcome"
-  | "template"
-  | "backend"
-  | "providers"
-  | "keys"
-  | "limits"
-  | "review"
-  | "done";
-
-const STEPS: { id: Step; label: string }[] = [
-  { id: "welcome", label: "Start" },
-  { id: "template", label: "Use case" },
-  { id: "backend", label: "AI source" },
-  { id: "providers", label: "Providers" },
-  { id: "keys", label: "Keys" },
-  { id: "limits", label: "Limits" },
-  { id: "review", label: "Review" },
-  { id: "done", label: "Done" },
-];
-
-function stepIndex(step: Step): number {
-  return STEPS.findIndex((s) => s.id === step);
-}
-
-function getVisibleSteps(_step: Step, backend: BackendMode, templateLocalOnly: boolean): typeof STEPS {
-  return STEPS.filter((s) => {
-    if (s.id === "welcome" || s.id === "done") return true;
-    if (s.id === "providers" || s.id === "keys") return backend === "cloud" && !templateLocalOnly;
-    if (s.id === "backend" && templateLocalOnly) return false;
-    return true;
-  });
-}
+import { SetupNav } from "../setup/SetupNav";
+import { WelcomeStep } from "../setup/steps/WelcomeStep";
+import { keyFormatWarning, parseSetupError } from "../setup/validation";
+import { stepIndex, getVisibleSteps, nextStep, backStep, type Step } from "../setup/flow";
+import {
+  loadWizardState,
+  markSetupComplete,
+  safeRestoredStep,
+  saveWizardState,
+} from "../setup/persistence";
 
 export function SetupWizardPage() {
   const nav = useNavigate();
@@ -125,14 +52,7 @@ export function SetupWizardPage() {
 
   // Persist non-secret selections so an accidental refresh keeps progress.
   useEffect(() => {
-    const snapshot: PersistedWizard = {
-      step, templateId, backend, providers, safety, monthlyBudget, customBudget, quickStart,
-    };
-    try {
-      sessionStorage.setItem(WIZARD_STATE_KEY, JSON.stringify(snapshot));
-    } catch {
-      /* ignore storage errors (private mode, quota) */
-    }
+    saveWizardState({ step, templateId, backend, providers, safety, monthlyBudget, customBudget, quickStart });
   }, [step, templateId, backend, providers, safety, monthlyBudget, customBudget, quickStart]);
 
   const template = TEMPLATES[templateId];
@@ -145,7 +65,7 @@ export function SetupWizardPage() {
     [providers],
   );
 
-  const progressSteps = getVisibleSteps(step, backend, templateLocalOnly);
+  const progressSteps = getVisibleSteps(backend, templateLocalOnly);
   const currentProgress = stepIndex(step);
 
   function toggleProvider(p: Provider) {
@@ -173,37 +93,12 @@ export function SetupWizardPage() {
 
   function goNext(from: Step) {
     if (from === "welcome") setQuickStart(false);
-    const flow: Record<Step, Step> = {
-      welcome: "template",
-      template: templateLocalOnly ? "limits" : "backend",
-      backend: backend === "cloud" ? "providers" : "limits",
-      providers: "keys",
-      keys: "limits",
-      limits: "review",
-      review: "done",
-      done: "done",
-    };
-    setStep(flow[from]);
+    setStep(nextStep(from, { backend, templateLocalOnly }));
     setError("");
   }
 
   function goBack(from: Step) {
-    if (from === "review" && quickStart) {
-      setStep("welcome");
-      setError("");
-      return;
-    }
-    const flow: Record<Step, Step> = {
-      welcome: "welcome",
-      template: "welcome",
-      backend: "template",
-      providers: "backend",
-      keys: "providers",
-      limits: useCloud ? "keys" : templateLocalOnly ? "template" : "backend",
-      review: "limits",
-      done: "review",
-    };
-    setStep(flow[from]);
+    setStep(backStep(from, { backend, templateLocalOnly, useCloud, quickStart }));
     setError("");
   }
 
@@ -307,7 +202,6 @@ export function SetupWizardPage() {
     if (step !== "done" || autoTestedRef.current) return;
     autoTestedRef.current = true;
     void sendTest({ retries: useCloud || useLocal ? 4 : 0 });
-    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [step]);
 
   return (
@@ -347,55 +241,7 @@ export function SetupWizardPage() {
 
         <main className="setup-card">
           {step === "welcome" && (
-            <section className="setup-step">
-              <h1>Welcome</h1>
-              <p className="setup-lead">
-                Modelgov sits between your app and AI providers. It enforces spending limits, safety
-                rules, and who can use which models — so one misconfigured feature cannot drain your
-                budget.
-              </p>
-              <div className="setup-info-grid">
-                <div className="setup-info-tile">
-                  <h3>What you will choose</h3>
-                  <ul>
-                    <li>What your product does (support chat, SaaS tiers, etc.)</li>
-                    <li>Where AI runs (demo, OpenAI, Azure, local Ollama, …)</li>
-                    <li>Monthly spend cap and safety level</li>
-                  </ul>
-                </div>
-                <div className="setup-info-tile">
-                  <h3>What you do not need</h3>
-                  <ul>
-                    <li>Editing YAML or config files by hand</li>
-                    <li>Understanding LiteLLM or gateway internals</li>
-                    <li>An OpenAI account to try the demo</li>
-                  </ul>
-                </div>
-              </div>
-              <div className="setup-quickstart-card">
-                <div className="setup-quickstart-head">
-                  <span className="setup-badge setup-badge-accent">Recommended for beginners</span>
-                  <h2>Quick start — try Modelgov in 2 minutes</h2>
-                </div>
-                <p>
-                  Built-in demo AI (no sign-ups), customer support chat template, balanced safety,
-                  and a $200/month spend cap. You can switch to real providers later.
-                </p>
-                <ul className="setup-quickstart-list">
-                  <li>Demo AI — works immediately, no API keys</li>
-                  <li>Support chat — typical starter rules for a help widget</li>
-                  <li>Balanced safety — masks personal data in logs</li>
-                </ul>
-                <button type="button" className="setup-btn-primary" onClick={startBeginnerPath}>
-                  Use recommended settings
-                </button>
-              </div>
-              <div className="setup-actions setup-actions-split">
-                <button type="button" className="setup-btn-secondary" onClick={() => goNext("welcome")}>
-                  Customize step by step
-                </button>
-              </div>
-            </section>
+            <WelcomeStep onQuickStart={startBeginnerPath} onCustomize={() => goNext("welcome")} />
           )}
 
           {step === "template" && (
@@ -754,35 +600,3 @@ export function SetupWizardPage() {
   );
 }
 
-function parseSetupError(e: unknown): string {
-  if (!(e instanceof Error)) return String(e);
-  try {
-    const body = JSON.parse(e.message) as { error?: { message?: string } };
-    return body.error?.message ?? e.message;
-  } catch {
-    return e.message;
-  }
-}
-
-function SetupNav({
-  onBack,
-  onNext,
-  nextLabel = "Continue",
-  nextDisabled = false,
-}: {
-  onBack: () => void;
-  onNext: () => void;
-  nextLabel?: string;
-  nextDisabled?: boolean;
-}) {
-  return (
-    <div className="setup-actions">
-      <button type="button" className="setup-btn-secondary" onClick={onBack}>
-        Back
-      </button>
-      <button type="button" className="setup-btn-primary" disabled={nextDisabled} onClick={onNext}>
-        {nextLabel}
-      </button>
-    </div>
-  );
-}

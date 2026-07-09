@@ -1,7 +1,5 @@
 import { describe, expect, it } from "vitest";
 import {
-  browserOpenCommand,
-  buildAutoconnectConsoleUrl,
   hasAnyProviderCredentials,
   modeConfig,
   parseOpsFlags,
@@ -9,6 +7,7 @@ import {
   assertProductionDeploy,
   smokePayloadFromPolicyYaml,
 } from "../src/ops.js";
+import { browserOpenCommand, buildAutoconnectConsoleUrl } from "../src/browserOpen.js";
 
 describe("smokePayloadFromPolicyYaml", () => {
   it("uses support_chat when present", () => {

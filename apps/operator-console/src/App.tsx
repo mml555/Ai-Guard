@@ -14,7 +14,8 @@ import { AuditPage } from "./pages/AuditPage";
 import { PrivacyPage } from "./pages/PrivacyPage";
 import { MetricsPage } from "./pages/MetricsPage";
 import { HealthPage } from "./pages/HealthPage";
-import { SetupWizardPage, isSetupComplete } from "./pages/SetupWizardPage";
+import { SetupWizardPage } from "./pages/SetupWizardPage";
+import { isSetupComplete } from "./setup/persistence";
 
 interface TenantSwitcher {
   tenants: string[];

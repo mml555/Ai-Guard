@@ -26,3 +26,14 @@ export function keyFormatWarning(key: string, value: string): string | null {
     .replace(/_/g, " ")
     .toLowerCase()} (usually starts with ${spec.example}). Double-check you pasted the right value.`;
 }
+
+/** Pull a human message out of an API error whose `.message` is a JSON envelope. */
+export function parseSetupError(e: unknown): string {
+  if (!(e instanceof Error)) return String(e);
+  try {
+    const body = JSON.parse(e.message) as { error?: { message?: string } };
+    return body.error?.message ?? e.message;
+  } catch {
+    return e.message;
+  }
+}

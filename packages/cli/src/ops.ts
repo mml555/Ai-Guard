@@ -4,6 +4,11 @@ import { basename, resolve } from "node:path";
 import { spawn } from "node:child_process";
 import { parse as parseYaml } from "yaml";
 import { resolveUserPath } from "./paths.js";
+import {
+  DEFAULT_CONSOLE_PORT,
+  buildAutoconnectConsoleUrl,
+  maybeOpenBrowser,
+} from "./browserOpen.js";
 
 export interface SmokeChatPayload {
   feature: string;
@@ -32,7 +37,6 @@ interface OpsFlags {
   json: boolean;
 }
 
-const DEFAULT_CONSOLE_PORT = 5174;
 
 interface ModeConfig {
   apiPort: number;
@@ -173,15 +177,6 @@ function isMode(value: string): value is Mode {
 }
 
 /** Console URL with ?url=&token= so the operator UI can auto-sign-in after setup. */
-export function buildAutoconnectConsoleUrl(
-  apiUrl: string,
-  apiKey: string,
-  consolePort = DEFAULT_CONSOLE_PORT,
-): string {
-  const params = new URLSearchParams({ url: apiUrl, token: apiKey });
-  return `http://localhost:${consolePort}/login?${params.toString()}`;
-}
-
 async function up(flags: OpsFlags, opts: { strictSmoke: boolean; json: boolean }): Promise<void> {
   if (flags.mode === "prod") {
     if (!existsSync(resolve(ROOT, "scripts/up-prod.sh"))) {
@@ -590,37 +585,6 @@ function printSuccess(mode: Mode, json: boolean): void {
   console.log("");
   if (mode === "full") console.log("  Langfuse UI: http://localhost:3001");
   console.log(`  ${rerunCommand("status", mode)} · ${rerunCommand("down", mode)}`);
-}
-
-/** The platform command to open a URL in the default browser (pure/testable). */
-export function browserOpenCommand(
-  platform: NodeJS.Platform,
-  url: string,
-): { cmd: string; args: string[] } {
-  if (platform === "darwin") return { cmd: "open", args: [url] };
-  // `start` needs an empty title arg so a URL with spaces/& isn't read as the title.
-  if (platform === "win32") return { cmd: "cmd", args: ["/c", "start", "", url] };
-  return { cmd: "xdg-open", args: [url] };
-}
-
-/**
- * Best-effort: open the setup console in the operator's browser after `setup`.
- * Skipped for non-interactive/CI/`--json` runs so headless pipelines never spawn
- * a browser; the printed link is always the fallback. Returns whether it tried.
- */
-function maybeOpenBrowser(url: string): boolean {
-  if (process.env.CI || process.env.MODELGOV_NO_OPEN || !process.stdout.isTTY) return false;
-  try {
-    const { cmd, args } = browserOpenCommand(process.platform, url);
-    const child = spawn(cmd, args, { stdio: "ignore", detached: true });
-    child.on("error", () => {
-      /* opener missing (e.g. no xdg-open) — the printed link is the fallback */
-    });
-    child.unref();
-    return true;
-  } catch {
-    return false;
-  }
 }
 
 function rerunCommand(commandOrMode: Mode | OpsCommand, mode?: Mode): string {
