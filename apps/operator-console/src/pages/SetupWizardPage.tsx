@@ -5,7 +5,7 @@ import { renderModelgovYaml, modelStringsFor, type Provider } from "create-model
 import { renderLitellmConfig } from "create-modelgov/litellm";
 import { TEMPLATES, type TemplateId } from "create-modelgov/templates";
 import { activateVersion, previewPolicy, saveVersion } from "../api/policy";
-import { saveSetupSecrets } from "../api/setup";
+import { mergeSetupPolicy, saveSetupSecrets } from "../api/setup";
 import { apiBase, apiFetch } from "../api/client";
 import {
   BACKEND_OPTIONS,
@@ -108,7 +108,7 @@ export function SetupWizardPage() {
     try {
       const effectiveTemplate = useLocal ? TEMPLATES.local_dev : template;
 
-      const yaml = renderModelgovYaml({
+      const generated = renderModelgovYaml({
         projectName: "my-app",
         template: effectiveTemplate,
         providers: useCloud ? providers : ["openai"],
@@ -116,6 +116,11 @@ export function SetupWizardPage() {
         safetyPreset: useLocal ? "dev" : safety,
         monthlyBudgetUsd: monthlyBudget,
       });
+
+      // Preserve the running gateway's boot-only fields (routing.retry, pricing,
+      // injection model, billing) so the stored policy matches what's actually
+      // active — otherwise the wizard's slim config would silently drop them.
+      const yaml = await mergeSetupPolicy(generated);
 
       const preview = await previewPolicy(yaml);
       if (!preview.valid) throw new Error(preview.error ?? "Policy validation failed");

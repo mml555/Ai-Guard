@@ -2,8 +2,13 @@ import { existsSync, mkdtempSync, readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import Fastify, { type FastifyInstance } from "fastify";
+import type { Pool } from "pg";
 import { afterEach, describe, expect, it } from "vitest";
 import { registerSetupRoutes } from "../src/modules/setup/routes";
+
+// Fake pool: no active config version (empty rows) so the merge endpoint returns
+// the generated YAML unchanged without needing a real database.
+const noActivePool = { query: async () => ({ rows: [] }) } as unknown as Pool;
 
 // These tests deliberately never set `useCloud: true`, so the Docker-socket
 // proxy-restart path is never exercised — a test run on a machine with a live
@@ -37,6 +42,7 @@ function buildApp(opts: {
     enabled: opts.enabled ?? true,
     projectRoot: opts.projectRoot,
     production: opts.production ?? false,
+    pool: noActivePool,
   });
   return app;
 }
@@ -111,5 +117,30 @@ describe("POST /v1/setup/secrets", () => {
     const app = buildApp({ permissions: ["policy:write"], projectRoot: tempRoot(), production: true });
     const res = await post(app, { secrets: { OPENAI_API_KEY: "sk-x" } });
     expect(res.statusCode).toBe(404);
+  });
+});
+
+describe("POST /v1/setup/policy/merge", () => {
+  const mergePost = (app: FastifyInstance, payload: Record<string, unknown>) =>
+    app.inject({ method: "POST", url: "/v1/setup/policy/merge", payload });
+
+  it("403s without policy:write", async () => {
+    const app = buildApp({ permissions: ["usage:read"], projectRoot: tempRoot() });
+    const res = await mergePost(app, { yaml: "project:\n  name: x\n" });
+    expect(res.statusCode).toBe(403);
+  });
+
+  it("returns the generated YAML unchanged when there is no active version", async () => {
+    const app = buildApp({ permissions: ["policy:write"], projectRoot: tempRoot() });
+    const yaml = "project:\n  name: x\n";
+    const res = await mergePost(app, { yaml });
+    expect(res.statusCode).toBe(200);
+    expect(res.json().yaml).toContain("name: x");
+  });
+
+  it("400s on a missing yaml body", async () => {
+    const app = buildApp({ permissions: ["policy:write"], projectRoot: tempRoot() });
+    const res = await mergePost(app, {});
+    expect(res.statusCode).toBe(400);
   });
 });

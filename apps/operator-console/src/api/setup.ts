@@ -22,3 +22,17 @@ export function saveSetupSecrets(
     }),
   });
 }
+
+/**
+ * Merge boot-only policy fields (routing.retry, pricing, safety.injection_model,
+ * billing) from the active version into the wizard's generated config, so the
+ * stored policy matches the running gateway instead of silently dropping them.
+ * Returns the generated YAML unchanged when there is no active version.
+ */
+export async function mergeSetupPolicy(yaml: string): Promise<string> {
+  const res = await apiFetch<{ yaml: string }>("/v1/setup/policy/merge", {
+    method: "POST",
+    body: JSON.stringify({ yaml }),
+  });
+  return res.yaml;
+}

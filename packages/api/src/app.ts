@@ -301,6 +301,7 @@ export function buildServer(opts: BuildServerOptions): FastifyInstance {
       enabled: !!opts.setupApi,
       projectRoot: opts.setupApi?.projectRoot ?? ".",
       production: opts.production === true,
+      pool: opts.pool,
     });
     registerExplainRoute(scope, {
       config: opts.config,

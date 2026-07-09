@@ -1,12 +1,15 @@
 import { request as httpRequest } from "node:http";
 import type { FastifyInstance } from "fastify";
+import type { Pool } from "pg";
 import { writeFileSync } from "node:fs";
 import { resolve } from "node:path";
 import { z } from "zod";
 import { PROVIDER_REGISTRY } from "@modelgov/policy-engine";
 import { sendError } from "../../errors";
 import type { RequestContext } from "../../plugins/requestContext";
+import { getActiveConfigVersion } from "../policy/repo";
 import { EnvFileError, mergeEnvFile } from "./envFile";
+import { preserveBootOnlyPolicyYaml } from "./policyMerge";
 
 const GENERATED_LITELLM_CONFIG = "litellm_config.generated.yaml";
 const DOCKER_SOCKET_PATH = "/var/run/docker.sock";
@@ -38,7 +41,11 @@ export interface SetupRouteDeps {
   enabled: boolean;
   projectRoot: string;
   production: boolean;
+  /** For the policy-merge endpoint: load the active version's boot-only fields. */
+  pool: Pool;
 }
+
+const mergeBodySchema = z.object({ yaml: z.string().min(1) });
 
 async function dockerRequest<T>(method: string, path: string): Promise<T> {
   return await new Promise<T>((resolvePromise, reject) => {
@@ -158,5 +165,29 @@ export function registerSetupRoutes(app: FastifyInstance, deps: SetupRouteDeps):
             : "Provider keys saved. Run `pnpm modelgov reload-providers` once so the model proxy uses them.")
         : "Provider keys saved.",
     });
+  });
+
+  app.post("/v1/setup/policy/merge", {
+    schema: {
+      tags: ["setup"],
+      description:
+        "Dev-only: preserve boot-only policy fields (routing.retry, pricing, safety.injection_model, billing) from the active version into the wizard's generated config, so the stored policy matches the running process.",
+      body: { type: "object", required: ["yaml"], properties: { yaml: { type: "string" } } },
+      response: { 200: { type: "object", additionalProperties: true }, 401: { type: "object" }, 403: { type: "object" } },
+    },
+  }, async (request, reply) => {
+    const auth = requireOwner(request.ctx);
+    if (!auth.ok) return sendError(reply, auth.status, auth.code, {}, auth.message);
+
+    const parsed = mergeBodySchema.safeParse(request.body);
+    if (!parsed.success) {
+      return sendError(reply, 400, "invalid_request", {}, parsed.error.message);
+    }
+
+    // Merge the active version's boot-only fields into the generated config. With
+    // no active version yet, there's nothing to preserve — return as-is.
+    const active = await getActiveConfigVersion(deps.pool, request.ctx.tenantId);
+    const yaml = active ? preserveBootOnlyPolicyYaml(parsed.data.yaml, active.yaml) : parsed.data.yaml;
+    return reply.send({ yaml });
   });
 }
