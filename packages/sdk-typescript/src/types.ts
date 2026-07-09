@@ -129,6 +129,31 @@ export interface EmbeddingsResponse {
 /** A document to extract text from — exactly one source. */
 export type DocumentSource = { base64: string } | { url: string } | { s3: string };
 
+/** One cell of an extracted table (0-indexed). */
+export interface DocumentTableCell {
+  rowIndex: number;
+  columnIndex: number;
+  content: string;
+  rowSpan?: number;
+  columnSpan?: number;
+}
+export interface DocumentTable {
+  rowCount: number;
+  columnCount: number;
+  cells: DocumentTableCell[];
+}
+export interface DocumentField {
+  content?: string;
+  value?: string | number | boolean | null;
+  type?: string;
+  confidence?: number;
+}
+export interface DocumentEntity {
+  docType?: string;
+  confidence?: number;
+  fields: Record<string, DocumentField>;
+}
+
 export interface DocumentExtractRequest {
   /** Governed provider slug: "tesseract" | "azure-di" | "textract" (must be configured). */
   provider: string;
@@ -137,6 +162,12 @@ export interface DocumentExtractRequest {
   feature: FeatureName;
   document: DocumentSource;
   modelClass?: ModelClassName;
+  /**
+   * Provider model to run — only providers that support model selection accept
+   * it. Azure DI: "prebuilt-read" (default), "prebuilt-layout" (tables),
+   * "prebuilt-invoice", "prebuilt-bankStatement.us", or a custom model id.
+   */
+  model?: string;
   /** Caller estimate of page count, used for the pre-call budget reserve. */
   pages?: number;
   projectId?: string;
@@ -150,6 +181,10 @@ export interface DocumentExtractResponse {
   pages: number;
   provider: string;
   model?: string;
+  /** Structure-aware model output (Azure DI prebuilt-layout / prebuilt-*). */
+  tables?: DocumentTable[];
+  fields?: Record<string, DocumentField>;
+  documents?: DocumentEntity[];
   decision: "allow" | "degrade";
   reason?: string;
   cost: { estimatedUsd: number; actualUsd: number };

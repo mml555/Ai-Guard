@@ -2,7 +2,7 @@
   "openapi": "3.0.3",
   "info": {
     "title": "Modelgov API",
-    "version": "1.4.0",
+    "version": "1.5.0",
     "description": "Self-hosted AI policy gateway. Every completion is checked against budget, token, model-access, and safety policy before a provider is called."
   },
   "components": {
@@ -5926,6 +5926,11 @@
                   "modelClass": {
                     "type": "string"
                   },
+                  "model": {
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": 128
+                  },
                   "document": {
                     "type": "object",
                     "additionalProperties": false,
@@ -5999,6 +6004,24 @@
                     },
                     "model": {
                       "type": "string"
+                    },
+                    "tables": {
+                      "type": "array",
+                      "items": {
+                        "type": "object",
+                        "additionalProperties": true
+                      }
+                    },
+                    "fields": {
+                      "type": "object",
+                      "additionalProperties": true
+                    },
+                    "documents": {
+                      "type": "array",
+                      "items": {
+                        "type": "object",
+                        "additionalProperties": true
+                      }
                     },
                     "decision": {
                       "type": "string",

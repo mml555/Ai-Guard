@@ -7,8 +7,10 @@ budgets, masks PII in the result, and writes an audit row.
 
 > **Status:** built (`POST /v1/documents/extract`). Providers **Tesseract**
 > (self-hosted sidecar), **Azure DI** (REST), and **Amazon Textract** (SigV4, no
-> AWS SDK). Reuses the embeddings reserve/settle/audit/billing spine verbatim —
-> the only new surface is the provider client and a per-page cost basis.
+> AWS SDK). Reuses the embeddings reserve/settle/audit/billing spine verbatim.
+> Azure DI is **model-selectable** (`prebuilt-read`/`-layout`/`-invoice`/
+> `-bankStatement.us`/custom) with **structured output** (`tables`/`fields`/
+> `documents`) and **per-model pricing** (1.5.0).
 
 ## Why (and how it differs from external-cost recording)
 
@@ -57,9 +59,13 @@ invariant is knowingly broken; it is contained to `modules/documents/` +
 - **tesseract** — self-hosted sidecar (`POST {TESSERACT_URL}/extract { base64 }
   → { text, pages }`); price 0 (still request/budget-governed). Inputs: `base64`,
   `url` (gateway fetches, SSRF-guarded).
-- **azure-di** — Azure DI `prebuilt-read` REST: submit (`Ocp-Apim-Subscription-Key`)
-  → poll `operation-location` to completion (bounded). Inputs: `base64`, `url`
-  (incl. an Azure blob SAS URL, which DI pulls directly).
+- **azure-di** — Azure DI REST: submit (`Ocp-Apim-Subscription-Key`) → poll
+  `operation-location` to completion (bounded). Inputs: `base64`, `url` (incl. an
+  Azure blob SAS URL, which DI pulls directly). The caller picks the **`model`**
+  (default `prebuilt-read`): `prebuilt-layout` (tables + structure),
+  `prebuilt-invoice` / `prebuilt-receipt` / `prebuilt-idDocument` /
+  `prebuilt-bankStatement.us` / … (structured `documents`), or a custom model id.
+  Beyond `text`+`pages`, the response carries structured output (see below).
 - **textract** — Amazon Textract `DetectDocumentText`, signed with a
   dependency-free SigV4 signer (`services/documents/sigv4.ts`) — no AWS SDK.
   Inputs: `base64`, `url` (gateway-fetched → `Bytes`), and `s3://bucket/key`
@@ -68,6 +74,34 @@ invariant is knowingly broken; it is contained to `modules/documents/` +
 - Document source is exactly one of `{ base64 }`, `{ url }` (https), or `{ s3 }`
   (Textract only). Inline `base64` needs a raised `REQUEST_BODY_LIMIT_BYTES`,
   like the chat vision path.
+
+### Models & structured output
+
+The request takes an optional `model`. Providers that support model selection
+declare `supportedModels` (azure-di); providers that don't (tesseract, textract)
+reject a `model` with `400 unsupported_model`. Any model id is accepted for
+azure-di (Azure validates it; an unknown model → `400`), so custom models work.
+
+The response extends `{ text, pages }` with the structure-aware output the model
+produced:
+- **`tables`** — `[{ rowCount, columnCount, cells: [{ rowIndex, columnIndex,
+  content, rowSpan?, columnSpan? }] }]` (from `analyzeResult.tables`; layout/prebuilt).
+- **`fields`** — flat key/value map (from `analyzeResult.keyValuePairs`).
+- **`documents`** — `[{ docType, confidence, fields: { name → { content, value,
+  type, confidence } } }]` (prebuilt-model results, e.g. bank statement fields).
+
+**Per-model pricing:** Azure DI bills layout / prebuilt-* / custom higher than
+read, so `AZURE_DI_MODEL_PRICES` (comma-separated `model:usd`) overrides the
+per-page rate per model; unlisted models use `DOCUMENT_PRICE_PER_PAGE_AZURE_DI`.
+The reserve/settle uses the requested model's rate.
+
+**PII + structured output.** Output PII handling applies to `text`. The
+structured output carries the same content, so its treatment follows the
+feature's `pii` mode: `off` → returned as-is; `block` → the text screen already
+rejects a PII document, so a document that returns has clean structured output;
+`mask` → the structured output is **withheld** (only masked `text` is returned),
+since redacting it field-by-field is error-prone. A feature that needs structured
+extraction should use `pii: off` (the caller owns PII) or `pii: block`.
 
 ## Config / env
 
@@ -78,7 +112,8 @@ invariant is knowingly broken; it is contained to `modules/documents/` +
 | `AZURE_DI_API_VERSION` | override the DI API version |
 | `TEXTRACT_REGION` | AWS region — the explicit enable signal for Textract |
 | `AWS_ACCESS_KEY_ID` / `AWS_SECRET_ACCESS_KEY` / `AWS_SESSION_TOKEN` | Textract credentials |
-| `DOCUMENT_PRICE_PER_PAGE_TESSERACT` / `_AZURE_DI` / `_TEXTRACT` | per-page USD cost basis |
+| `DOCUMENT_PRICE_PER_PAGE_TESSERACT` / `_AZURE_DI` / `_TEXTRACT` | per-page USD cost basis (default rate) |
+| `AZURE_DI_MODEL_PRICES` | per-model USD/page overrides, `model:usd,…` (layout/prebuilt-*/custom cost more) |
 | `DOCUMENT_MAX_PAGES` | worst-case pages reserved per request (budget-cap floor; default 30) |
 | `TEXTRACT_S3_ALLOWED_BUCKETS` | buckets a caller may reference via an `s3` source (empty ⇒ `s3` rejected) |
 

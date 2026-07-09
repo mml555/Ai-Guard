@@ -244,6 +244,66 @@ describe("azure-di adapter", () => {
     const res = await adapter.extract({ kind: "base64", base64: "eA==" });
     expect(res.pages).toBe(1);
   });
+
+  it("runs the selected model, parses tables/fields/documents, and prices per model", async () => {
+    let submitUrl = "";
+    const fetchImpl = (async (url: string, init?: RequestInit) => {
+      if (init?.method === "POST") {
+        submitUrl = url;
+        return new Response(null, { status: 202, headers: { "operation-location": "https://di/op" } });
+      }
+      return new Response(
+        JSON.stringify({
+          status: "succeeded",
+          analyzeResult: {
+            content: "doc text",
+            pages: [{}, {}],
+            tables: [
+              {
+                rowCount: 1,
+                columnCount: 2,
+                cells: [
+                  { rowIndex: 0, columnIndex: 0, content: "A" },
+                  { rowIndex: 0, columnIndex: 1, content: "B" },
+                ],
+              },
+            ],
+            keyValuePairs: [{ key: { content: "Total" }, value: { content: "$5" }, confidence: 0.9 }],
+            documents: [
+              {
+                docType: "bankStatement.us",
+                confidence: 0.8,
+                fields: { AccountNumber: { type: "string", valueString: "123", content: "123", confidence: 0.95 } },
+              },
+            ],
+          },
+        }),
+        { status: 200 },
+      );
+    }) as unknown as typeof fetch;
+
+    const adapter = createAzureDiAdapter({
+      endpoint: "https://di",
+      key: "k",
+      perPageUsd: 0.0015,
+      perPageUsdByModel: { "prebuilt-layout": 0.01 },
+      fetchImpl,
+      sleepImpl: noSleep,
+    });
+    const res = await adapter.extract({ kind: "base64", base64: "eA==" }, { model: "prebuilt-layout" });
+
+    expect(submitUrl).toContain("documentModels/prebuilt-layout:analyze");
+    expect(res.model).toBe("azure-di/prebuilt-layout");
+    expect(res.pages).toBe(2);
+    expect(res.tables?.[0]?.cells).toHaveLength(2);
+    expect(res.fields?.Total?.content).toBe("$5");
+    expect(res.documents?.[0]?.docType).toBe("bankStatement.us");
+    expect(res.documents?.[0]?.fields.AccountNumber?.value).toBe("123");
+    // Per-model pricing: override for layout, fallback to default otherwise.
+    expect(adapter.perPageUsdFor?.("prebuilt-layout")).toBe(0.01);
+    expect(adapter.perPageUsdFor?.("prebuilt-read")).toBe(0.0015);
+    expect(adapter.supportedModels).toContain("prebuilt-layout");
+  });
 });
 
 describe("sigv4 signer", () => {

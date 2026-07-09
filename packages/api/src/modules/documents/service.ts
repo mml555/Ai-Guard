@@ -22,7 +22,10 @@ import {
   assertFetchableDocumentUrl,
   DocumentClientError,
   type DocumentAiClient,
+  type DocumentEntity,
+  type DocumentField,
   type DocumentSource,
+  type DocumentTable,
 } from "../../services/documents";
 import type { DocumentBody } from "./schemas";
 
@@ -52,6 +55,10 @@ export interface DocumentSuccessBody {
   pages: number;
   provider: string;
   model?: string;
+  /** Structure-aware model output (Azure DI prebuilt-layout / prebuilt-*). */
+  tables?: DocumentTable[];
+  fields?: Record<string, DocumentField>;
+  documents?: DocumentEntity[];
   decision: "allow" | "degrade";
   reason?: string;
   cost: { estimatedUsd: number; actualUsd: number };
@@ -80,6 +87,8 @@ function toSource(document: DocumentBody["document"]): DocumentSource {
   // instead of leaning on a non-null assertion tied to a refine in another file.
   throw new DocumentClientError("document must have exactly one of base64, url, or s3");
 }
+
+type StructuredOutput = Pick<DocumentSuccessBody, "tables" | "fields" | "documents">;
 
 /**
  * Governed document extraction: the same policy/budget/audit/billing spine as
@@ -124,6 +133,18 @@ export async function handleDocumentExtract(
       code: "unsupported_source",
       details: { provider: input.provider, kind: source.kind, supported: adapter.supportedInputs },
       message: `provider '${input.provider}' does not support a '${source.kind}' source`,
+    };
+  }
+  // Reject a `model` for providers that don't offer model selection (Tesseract
+  // is OCR-only; Textract uses one API). Providers that DO (azure-di) accept any
+  // model id — the provider validates it (unknown model → 400 upstream).
+  if (input.model && !adapter.supportedModels?.length) {
+    return {
+      ok: false,
+      status: 400,
+      code: "unsupported_model",
+      details: { provider: input.provider },
+      message: `provider '${input.provider}' does not support model selection`,
     };
   }
   // SSRF guard for url sources — DNS-resolve and reject private/link-local hosts
@@ -174,8 +195,11 @@ export async function handleDocumentExtract(
   // reserve (an honest large-doc hint), never lower it below the worst-case
   // floor — so a caller can't under-report pages to slip a big document past a
   // budget cap. Actual pages are settled afterwards.
+  // Cost basis is the requested model's per-page rate (Azure DI layout/prebuilt-*
+  // cost more than read); falls back to the adapter's default rate.
+  const perPageUsd = adapter.perPageUsdFor ? adapter.perPageUsdFor(input.model) : adapter.perPageUsd;
   const estimatedPages = Math.max(input.pages ?? 0, deps.maxPages);
-  const reservedUsd = roundUsd(estimatedPages * adapter.perPageUsd);
+  const reservedUsd = roundUsd(estimatedPages * perPageUsd);
 
   // Base audit row for THIS request: stamp the page-based reserved amount as the
   // estimate (baseLog's token estimate is 0 for documents) and default the model
@@ -303,7 +327,7 @@ export async function handleDocumentExtract(
   // ── Provider call (the second egress — gateway calls the provider directly) ─
   let extracted;
   try {
-    extracted = await adapter.extract(source);
+    extracted = await adapter.extract(source, { model: input.model });
   } catch (err) {
     await providerBudget.release();
     deps.log?.error({ err, provider: input.provider }, "document provider failure");
@@ -334,7 +358,7 @@ export async function handleDocumentExtract(
 
   // ── Settle real cost against the reservation (pages actually processed) ─────
   const settledReservedUsd = providerBudget.getReservedUsd();
-  const actualCostUsd = roundUsd(extracted.pages * adapter.perPageUsd);
+  const actualCostUsd = roundUsd(extracted.pages * perPageUsd);
   const resolvedModel = extracted.model ?? input.provider;
   const settleBilling = (requestId: string) =>
     settleBillingCredits(billing, deps.log, {
@@ -366,9 +390,16 @@ export async function handleDocumentExtract(
     );
   }
 
-  // ── Output PII masking on the extracted text ───────────────────────────────
+  // ── Output PII masking on the extracted text AND structured output ─────────
+  // tables/fields/documents carry the SAME extracted content as `text`, so
+  // masking `text` alone would leak PII through the structured fields.
   let text = extracted.text;
   let piiMasked = false;
+  let structured: StructuredOutput = {
+    ...(extracted.tables ? { tables: extracted.tables } : {}),
+    ...(extracted.fields ? { fields: extracted.fields } : {}),
+    ...(extracted.documents ? { documents: extracted.documents } : {}),
+  };
   try {
     const out = await deps.safety.inspectOutput(text, decision.safetyPlan);
     if (out.action === "block") {
@@ -392,6 +423,15 @@ export async function handleDocumentExtract(
     }
     text = out.content;
     piiMasked = out.piiMasked;
+    // The structured output holds the SAME content as `text`, so in MASK mode it
+    // would carry the PII that was only redacted from `text` — withhold it. (In
+    // `block` mode a PII document already 403'd above via the text screen, so a
+    // document that reaches here is clean and its structured output is safe; in
+    // `off` mode there is nothing to mask.) Callers needing structured extraction
+    // use pii:off (they own PII handling) or pii:block.
+    if (decision.safetyPlan.pii === "mask") {
+      structured = {};
+    }
   } catch (err) {
     if (err instanceof SafetyServiceError) {
       deps.log?.error({ err }, "document output safety backend failure");
@@ -451,6 +491,7 @@ export async function handleDocumentExtract(
       pages: extracted.pages,
       provider: input.provider,
       model: extracted.model,
+      ...structured,
       decision: responseDecision,
       reason: decision.reason,
       cost: { estimatedUsd: reservedUsd, actualUsd: actualCostUsd },

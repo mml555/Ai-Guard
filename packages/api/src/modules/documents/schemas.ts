@@ -28,6 +28,9 @@ export const documentBodySchema = z.object({
   userType: z.string().min(1),
   feature: z.string().min(1),
   modelClass: z.string().optional(),
+  /** Provider model to run, e.g. Azure DI "prebuilt-layout" / "prebuilt-bankStatement.us"
+   *  (only providers that support model selection accept this). */
+  model: z.string().min(1).max(128).optional(),
   document: documentSourceSchema,
   /** Caller estimate of page count, used for the pre-call budget reserve. */
   pages: z.number().int().positive().max(MAX_PAGES_ESTIMATE).optional(),
@@ -53,6 +56,7 @@ export const documentBodyJsonSchema = {
     userType: { type: "string", minLength: 1 },
     feature: { type: "string", minLength: 1 },
     modelClass: { type: "string" },
+    model: { type: "string", minLength: 1, maxLength: 128 },
     document: {
       type: "object",
       additionalProperties: false,
@@ -80,6 +84,10 @@ export const documentSuccessJsonSchema = {
     pages: { type: "integer" },
     provider: { type: "string" },
     model: { type: "string" },
+    // Structure-aware model output; shapes vary by model, so kept permissive.
+    tables: { type: "array", items: { type: "object", additionalProperties: true } },
+    fields: { type: "object", additionalProperties: true },
+    documents: { type: "array", items: { type: "object", additionalProperties: true } },
     decision: { type: "string", enum: ["allow", "degrade"] },
     reason: { type: "string" },
     cost: costJsonSchema,

@@ -26,9 +26,13 @@ from .types import (
     ChatStreamDone,
     ContentPart,
     Cost,
+    DocumentEntity,
     DocumentExtractResponse,
     DocumentExtractResult,
+    DocumentField,
     DocumentSafety,
+    DocumentTable,
+    DocumentTableCell,
     EmbeddingsResponse,
     EmbeddingsResult,
     EmbeddingsUsage,
@@ -50,7 +54,7 @@ from .types import (
     UsageResult,
 )
 
-__version__ = "1.4.0"
+__version__ = "1.5.0"
 
 __all__ = [
     "ModelgovClient",
@@ -69,9 +73,13 @@ __all__ = [
     "EmbeddingsResponse",
     "EmbeddingsResult",
     "EmbeddingsUsage",
+    "DocumentEntity",
     "DocumentExtractResponse",
     "DocumentExtractResult",
+    "DocumentField",
     "DocumentSafety",
+    "DocumentTable",
+    "DocumentTableCell",
     "Usage",
     "Cost",
     "BudgetRemaining",

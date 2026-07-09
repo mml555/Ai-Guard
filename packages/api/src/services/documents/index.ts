@@ -7,6 +7,11 @@ export {
   type DocumentResult,
   type DocumentSource,
   type DocumentInputKind,
+  type DocumentExtractOptions,
+  type DocumentTable,
+  type DocumentTableCell,
+  type DocumentField,
+  type DocumentEntity,
 } from "./types";
 export { createTesseractAdapter } from "./tesseract";
 export { createAzureDiAdapter } from "./azureDi";

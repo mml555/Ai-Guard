@@ -29,7 +29,12 @@ const config = parseConfigObject({
     global: { monthly_usd: 1000, hard_stop_at_percent: 100 },
     by_user_type: { logged_in: { daily_usd: 1, daily_requests: 1000, models: ["cheap"] } },
   },
-  features: { doc_review: { safety: "dev", model_class: "cheap", max_tokens: 500 } },
+  features: {
+    doc_review: { safety: "dev", model_class: "cheap", max_tokens: 500 },
+    // "balanced" preset masks PII (pii: mask) — used to assert structured output
+    // is masked, not just `text`.
+    doc_review_masked: { safety: "balanced", model_class: "cheap", max_tokens: 500 },
+  },
   model_classes: { cheap: { primary: "openai/gpt-4o-mini", fallback: "anthropic/claude-haiku" } },
   safety: { preset: "dev" },
 });
@@ -38,15 +43,34 @@ function okChat(model: string): LiteLLMChatResult {
   return { content: "ok", model, actualCostUsd: 0.0002, inputTokens: 5, outputTokens: 3, raw: {} };
 }
 
-/** A single-provider ("tesseract") mock document client. */
+/**
+ * Mock client with two providers: "tesseract" (no model selection, driven by the
+ * injected `extract`) and "azure-di" (model-capable + structured output, used to
+ * exercise the model param + per-model pricing + structured passthrough).
+ */
 function mockDocClient(extract: DocumentProviderAdapter["extract"]): DocumentAiClient {
-  const adapter: DocumentProviderAdapter = {
+  const tesseract: DocumentProviderAdapter = {
     slug: "tesseract",
     supportedInputs: ["base64", "url"],
     perPageUsd: PER_PAGE_USD,
     extract,
   };
-  return { providers: () => ["tesseract"], get: (p) => (p === "tesseract" ? adapter : undefined) };
+  const azureDi: DocumentProviderAdapter = {
+    slug: "azure-di",
+    supportedInputs: ["base64", "url"],
+    supportedModels: ["prebuilt-read", "prebuilt-layout"],
+    perPageUsd: PER_PAGE_USD,
+    perPageUsdFor: (model) => (model === "prebuilt-layout" ? PER_PAGE_USD * 5 : PER_PAGE_USD),
+    // Echo the requested model + emit a table so structured passthrough is testable.
+    extract: async (_s, opts) => ({
+      text: "extracted",
+      pages: 2,
+      model: `azure-di/${opts?.model ?? "prebuilt-read"}`,
+      tables: [{ rowCount: 1, columnCount: 1, cells: [{ rowIndex: 0, columnIndex: 0, content: "cell" }] }],
+    }),
+  };
+  const map: Record<string, DocumentProviderAdapter> = { tesseract, "azure-di": azureDi };
+  return { providers: () => Object.keys(map), get: (p) => map[p] };
 }
 
 const okExtract = async (): Promise<DocumentResult> => ({ text: "hello world", pages: 3, model: "tesseract" });
@@ -180,6 +204,41 @@ describe.skipIf(!DATABASE_URL)("document extraction (integration)", () => {
     const badSource = await extract(a, { document: { s3: "s3://bucket/key" } });
     expect(badSource.statusCode).toBe(400);
     expect(badSource.json().error.code).toBe("unsupported_source");
+  });
+
+  it("runs a selected model, returns structured output, and prices per model", async () => {
+    const a = app();
+    const res = await extract(a, { provider: "azure-di", model: "prebuilt-layout", document: { base64: "ZmFrZQ==" } });
+    expect(res.statusCode).toBe(200);
+    const body = res.json();
+    expect(body.model).toBe("azure-di/prebuilt-layout");
+    expect(body.tables[0].cells[0].content).toBe("cell");
+    // layout rate = PER_PAGE_USD × 5 (= 0.05); 2 pages ⇒ $0.10 actual.
+    expect(body.cost.actualUsd).toBeCloseTo(0.1, 6);
+  });
+
+  it("rejects a model on a provider that doesn't support model selection", async () => {
+    const a = app();
+    const res = await extract(a, { provider: "tesseract", model: "prebuilt-layout", document: { base64: "ZmFrZQ==" } });
+    expect(res.statusCode).toBe(400);
+    expect(res.json().error.code).toBe("unsupported_model");
+  });
+
+  it("withholds structured output in mask mode (it would carry unmasked PII)", async () => {
+    // balanced preset ⇒ pii: mask. `text` is masked; the structured output would
+    // still carry the raw PII, so it is withheld entirely rather than leaked.
+    const a = app({ safety: maskingGuard });
+    const res = await extract(a, {
+      provider: "azure-di",
+      model: "prebuilt-layout",
+      feature: "doc_review_masked",
+      document: { base64: "ZmFrZQ==" },
+    });
+    expect(res.statusCode).toBe(200);
+    const body = res.json();
+    expect(body.text).toBe("<MASKED>"); // text still masked + returned
+    expect(body.tables).toBeUndefined(); // structured withheld (no leak)
+    expect(body.safety.piiMasked).toBe(true);
   });
 
   it("dedupes a retried extract via Idempotency-Key (provider called once, charged once)", async () => {

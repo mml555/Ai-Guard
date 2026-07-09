@@ -103,6 +103,13 @@ const baseEnvSchema = z.object({
   /** Per-page USD prices (the reserve/settle cost basis). Tesseract is 0 (self-hosted). */
   DOCUMENT_PRICE_PER_PAGE_TESSERACT: z.coerce.number().nonnegative().default(0),
   DOCUMENT_PRICE_PER_PAGE_AZURE_DI: z.coerce.number().nonnegative().default(0.0015),
+  /**
+   * Per-model USD/page overrides for Azure DI (layout / prebuilt-* / custom cost
+   * more than read). Comma-separated `model:usd` pairs, e.g.
+   * `prebuilt-layout:0.01,prebuilt-invoice:0.01`. Models not listed fall back to
+   * DOCUMENT_PRICE_PER_PAGE_AZURE_DI.
+   */
+  AZURE_DI_MODEL_PRICES: z.string().optional(),
   DOCUMENT_PRICE_PER_PAGE_TEXTRACT: z.coerce.number().nonnegative().default(0.0015),
   /**
    * Worst-case pages reserved per document request — the budget cap is checked
