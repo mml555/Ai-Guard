@@ -90,45 +90,6 @@ function toSource(document: DocumentBody["document"]): DocumentSource {
 
 type StructuredOutput = Pick<DocumentSuccessBody, "tables" | "fields" | "documents">;
 
-async function maskFieldValue(f: DocumentField, mask: (s: string) => Promise<string>): Promise<DocumentField> {
-  return {
-    ...f,
-    ...(f.content !== undefined ? { content: await mask(f.content) } : {}),
-    ...(typeof f.value === "string" ? { value: await mask(f.value) } : {}),
-  };
-}
-
-/** Apply the output-safety `mask` to every textual value in the structured
- *  output (table cells, key/value fields, prebuilt document fields), in parallel. */
-async function maskStructured(src: StructuredOutput, mask: (s: string) => Promise<string>): Promise<StructuredOutput> {
-  const out: StructuredOutput = {};
-  if (src.tables) {
-    out.tables = await Promise.all(
-      src.tables.map(async (t) => ({
-        ...t,
-        cells: await Promise.all(t.cells.map(async (c) => ({ ...c, content: await mask(c.content) }))),
-      })),
-    );
-  }
-  if (src.fields) {
-    const entries = await Promise.all(
-      Object.entries(src.fields).map(async ([k, f]) => [k, await maskFieldValue(f, mask)] as const),
-    );
-    out.fields = Object.fromEntries(entries);
-  }
-  if (src.documents) {
-    out.documents = await Promise.all(
-      src.documents.map(async (d) => ({
-        ...d,
-        fields: Object.fromEntries(
-          await Promise.all(Object.entries(d.fields).map(async ([k, f]) => [k, await maskFieldValue(f, mask)] as const)),
-        ),
-      })),
-    );
-  }
-  return out;
-}
-
 /**
  * Governed document extraction: the same policy/budget/audit/billing spine as
  * embeddings, but the cost basis is PAGES×perPageUsd (not tokens) and PII is
@@ -462,15 +423,14 @@ export async function handleDocumentExtract(
     }
     text = out.content;
     piiMasked = out.piiMasked;
-    // Mask the structured output with the SAME plan. Skip when the feature's plan
-    // doesn't mask PII (pii: off) — nothing to leak, and it avoids a Presidio call
-    // per cell/field. Runs inside this try so a backend outage maps to 503 too.
-    if (decision.safetyPlan.pii !== "off" && (structured.tables || structured.fields || structured.documents)) {
-      structured = await maskStructured(structured, async (s) => {
-        const r = await deps.safety.inspectOutput(s, decision.safetyPlan);
-        if (r.piiMasked) piiMasked = true;
-        return r.action === "block" ? "" : r.content;
-      });
+    // The structured output holds the SAME content as `text`, so in MASK mode it
+    // would carry the PII that was only redacted from `text` — withhold it. (In
+    // `block` mode a PII document already 403'd above via the text screen, so a
+    // document that reaches here is clean and its structured output is safe; in
+    // `off` mode there is nothing to mask.) Callers needing structured extraction
+    // use pii:off (they own PII handling) or pii:block.
+    if (decision.safetyPlan.pii === "mask") {
+      structured = {};
     }
   } catch (err) {
     if (err instanceof SafetyServiceError) {

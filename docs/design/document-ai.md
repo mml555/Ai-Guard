@@ -95,6 +95,14 @@ read, so `AZURE_DI_MODEL_PRICES` (comma-separated `model:usd`) overrides the
 per-page rate per model; unlisted models use `DOCUMENT_PRICE_PER_PAGE_AZURE_DI`.
 The reserve/settle uses the requested model's rate.
 
+**PII + structured output.** Output PII handling applies to `text`. The
+structured output carries the same content, so its treatment follows the
+feature's `pii` mode: `off` → returned as-is; `block` → the text screen already
+rejects a PII document, so a document that returns has clean structured output;
+`mask` → the structured output is **withheld** (only masked `text` is returned),
+since redacting it field-by-field is error-prone. A feature that needs structured
+extraction should use `pii: off` (the caller owns PII) or `pii: block`.
+
 ## Config / env
 
 | Env | Meaning |

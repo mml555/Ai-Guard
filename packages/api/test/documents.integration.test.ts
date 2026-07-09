@@ -224,9 +224,9 @@ describe.skipIf(!DATABASE_URL)("document extraction (integration)", () => {
     expect(res.json().error.code).toBe("unsupported_model");
   });
 
-  it("masks PII in the STRUCTURED output too when the feature masks (not just text)", async () => {
-    // balanced preset ⇒ pii: mask, so the structured masking gate fires and the
-    // masking guard redacts every table cell — not only the text field.
+  it("withholds structured output in mask mode (it would carry unmasked PII)", async () => {
+    // balanced preset ⇒ pii: mask. `text` is masked; the structured output would
+    // still carry the raw PII, so it is withheld entirely rather than leaked.
     const a = app({ safety: maskingGuard });
     const res = await extract(a, {
       provider: "azure-di",
@@ -236,8 +236,8 @@ describe.skipIf(!DATABASE_URL)("document extraction (integration)", () => {
     });
     expect(res.statusCode).toBe(200);
     const body = res.json();
-    expect(body.text).toBe("<MASKED>");
-    expect(body.tables[0].cells[0].content).toBe("<MASKED>"); // structured masked, no leak
+    expect(body.text).toBe("<MASKED>"); // text still masked + returned
+    expect(body.tables).toBeUndefined(); // structured withheld (no leak)
     expect(body.safety.piiMasked).toBe(true);
   });
 

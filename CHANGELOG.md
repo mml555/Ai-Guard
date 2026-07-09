@@ -28,7 +28,9 @@ guarantees in `docs/versioning.md` apply.
   alongside `text`/`pages`. The TypeScript (`extractDocument` `model` +
   `tables`/`fields`/`documents`) and Python (`extract_document`) SDKs are updated.
   Providers without model selection (Tesseract, Textract) reject a `model` with
-  `400 unsupported_model`.
+  `400 unsupported_model`. Output PII handling applies to the structured fields
+  too: in `mask` mode the structured output is withheld (it would carry unmasked
+  PII); use `pii: off` or `pii: block` for structured extraction.
 
 ### Changed
 
