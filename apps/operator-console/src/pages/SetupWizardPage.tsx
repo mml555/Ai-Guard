@@ -1,4 +1,4 @@
-import { useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { useNavigate } from "react-router-dom";
 import { PROVIDER_REGISTRY } from "@modelgov/policy-engine";
 import { renderModelgovYaml, modelStringsFor, type Provider } from "create-modelgov/render";
@@ -19,8 +19,10 @@ import {
   providerSummary,
 } from "../setup/catalog";
 import { ProviderLogo } from "../setup/ProviderLogo";
+import { CopyButton } from "../setup/CopyButton";
 
 const SETUP_KEY = "modelgov-setup-v1-complete";
+const WIZARD_STATE_KEY = "modelgov-setup-wizard-state-v1";
 
 export function isSetupComplete(): boolean {
   return localStorage.getItem(SETUP_KEY) === "1";
@@ -28,6 +30,43 @@ export function isSetupComplete(): boolean {
 
 export function markSetupComplete(): void {
   localStorage.setItem(SETUP_KEY, "1");
+  // Drop the in-progress wizard state once setup is finished.
+  try {
+    sessionStorage.removeItem(WIZARD_STATE_KEY);
+  } catch {
+    /* ignore storage errors */
+  }
+}
+
+/** Non-secret wizard selections, persisted to sessionStorage so an accidental
+ *  refresh doesn't lose progress. Secrets are NEVER persisted. */
+interface PersistedWizard {
+  step: Step;
+  templateId: TemplateId;
+  backend: BackendMode;
+  providers: Provider[];
+  safety: "dev" | "balanced" | "strict";
+  monthlyBudget: number;
+  customBudget: boolean;
+  quickStart: boolean;
+}
+
+function loadWizardState(): Partial<PersistedWizard> {
+  try {
+    const raw = sessionStorage.getItem(WIZARD_STATE_KEY);
+    return raw ? (JSON.parse(raw) as Partial<PersistedWizard>) : {};
+  } catch {
+    return {};
+  }
+}
+
+/** Restore the saved step, but never strand the user: don't reopen provider/key
+ *  steps that don't apply to the saved backend, and never restore into "done". */
+function safeRestoredStep(p: Partial<PersistedWizard>): Step {
+  const s = p.step;
+  if (!s || s === "done") return "welcome";
+  if ((s === "providers" || s === "keys") && p.backend !== "cloud") return "welcome";
+  return s;
 }
 
 type Step =
@@ -66,19 +105,34 @@ function getVisibleSteps(_step: Step, backend: BackendMode, templateLocalOnly: b
 
 export function SetupWizardPage() {
   const nav = useNavigate();
-  const [step, setStep] = useState<Step>("welcome");
-  const [templateId, setTemplateId] = useState<TemplateId>("support_chat");
-  const [backend, setBackend] = useState<BackendMode>("demo");
-  const [providers, setProviders] = useState<Provider[]>(["openai"]);
+  const [persisted] = useState(loadWizardState);
+  const [step, setStep] = useState<Step>(() => safeRestoredStep(persisted));
+  const [templateId, setTemplateId] = useState<TemplateId>(persisted.templateId ?? "support_chat");
+  const [backend, setBackend] = useState<BackendMode>(persisted.backend ?? "demo");
+  const [providers, setProviders] = useState<Provider[]>(persisted.providers ?? ["openai"]);
   const [secrets, setSecrets] = useState<Record<string, string>>({});
-  const [safety, setSafety] = useState<"dev" | "balanced" | "strict">("balanced");
-  const [monthlyBudget, setMonthlyBudget] = useState(500);
-  const [customBudget, setCustomBudget] = useState(false);
+  const [safety, setSafety] = useState<"dev" | "balanced" | "strict">(persisted.safety ?? "balanced");
+  const [monthlyBudget, setMonthlyBudget] = useState(persisted.monthlyBudget ?? 500);
+  const [customBudget, setCustomBudget] = useState(persisted.customBudget ?? false);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
   const [nextCommand, setNextCommand] = useState<string | undefined>();
   const [testReply, setTestReply] = useState("");
-  const [quickStart, setQuickStart] = useState(false);
+  const [testStatus, setTestStatus] = useState<"idle" | "checking" | "ok" | "error">("idle");
+  const [quickStart, setQuickStart] = useState(persisted.quickStart ?? false);
+  const autoTestedRef = useRef(false);
+
+  // Persist non-secret selections so an accidental refresh keeps progress.
+  useEffect(() => {
+    const snapshot: PersistedWizard = {
+      step, templateId, backend, providers, safety, monthlyBudget, customBudget, quickStart,
+    };
+    try {
+      sessionStorage.setItem(WIZARD_STATE_KEY, JSON.stringify(snapshot));
+    } catch {
+      /* ignore storage errors (private mode, quota) */
+    }
+  }, [step, templateId, backend, providers, safety, monthlyBudget, customBudget, quickStart]);
 
   const template = TEMPLATES[templateId];
   const templateLocalOnly = template.localOnly === true;
@@ -205,26 +259,55 @@ export function SetupWizardPage() {
     }
   }
 
-  async function sendTest() {
+  async function sendTest({ retries = 0 }: { retries?: number } = {}) {
     setError("");
     setTestReply("");
+    setTestStatus("checking");
     const t = useLocal ? TEMPLATES.local_dev : template;
-    try {
-      const res = await apiFetch<{ message?: { content?: string } }>("/v1/chat", {
-        method: "POST",
-        body: JSON.stringify({
-          userId: "setup-test",
-          userType: t.exampleUserType,
-          feature: t.primaryFeature,
-          modelClass: useLocal ? "local" : "cheap",
-          messages: [{ role: "user", content: t.examplePrompt }],
-        }),
-      });
-      setTestReply(res.message?.content ?? "(no content)");
-    } catch (e) {
-      setError(e instanceof Error ? e.message : String(e));
+    // After a cloud/local key save the model proxy may still be restarting/warming
+    // up, so retry a few times before declaring failure — the happy path succeeds
+    // on the first try.
+    for (let attempt = 0; attempt <= retries; attempt++) {
+      try {
+        const res = await apiFetch<{ message?: { content?: string } }>("/v1/chat", {
+          method: "POST",
+          body: JSON.stringify({
+            userId: "setup-test",
+            userType: t.exampleUserType,
+            feature: t.primaryFeature,
+            modelClass: useLocal ? "local" : "cheap",
+            messages: [{ role: "user", content: t.examplePrompt }],
+          }),
+        });
+        setTestReply(res.message?.content ?? "(no content)");
+        setTestStatus("ok");
+        return;
+      } catch (e) {
+        if (attempt === retries) {
+          setTestStatus("error");
+          setError(
+            useCloud || useLocal
+              ? "The model proxy isn't responding yet. Give it a few seconds and click “Test again”."
+              : e instanceof Error
+                ? e.message
+                : String(e),
+          );
+          return;
+        }
+        await new Promise((r) => setTimeout(r, 2500));
+      }
     }
   }
+
+  // On reaching the final step, auto-run one test so a non-technical operator
+  // sees the AI reply without clicking anything. Cloud/local get warmup retries
+  // (the proxy may be restarting); demo is instant.
+  useEffect(() => {
+    if (step !== "done" || autoTestedRef.current) return;
+    autoTestedRef.current = true;
+    void sendTest({ retries: useCloud || useLocal ? 4 : 0 });
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [step]);
 
   return (
     <div className="setup-wizard">
@@ -251,6 +334,7 @@ export function SetupWizardPage() {
                   <div
                     key={s.id}
                     className={`setup-progress-step${active ? " active" : ""}${done ? " done" : ""}`}
+                    aria-current={active ? "step" : undefined}
                   >
                     <span className="setup-progress-dot" />
                     <span className="setup-progress-label">{s.label}</span>
@@ -453,6 +537,11 @@ export function SetupWizardPage() {
                     />
                     <p className="setup-field-help">{f.help}</p>
                     {f.optional && <p className="setup-field-optional">Optional</p>}
+                    {keyFormatWarning(f.key, secrets[f.key] ?? "") && (
+                      <p className="setup-field-warn" role="status">
+                        {keyFormatWarning(f.key, secrets[f.key] ?? "")}
+                      </p>
+                    )}
                   </div>
                 ))}
               </div>
@@ -600,9 +689,12 @@ export function SetupWizardPage() {
                       ? "Run this in your project folder (requires Ollama installed):"
                       : "Run this once in your project folder so the model proxy loads your API keys:"}
                   </p>
-                  <pre className="setup-terminal">{nextCommand}</pre>
+                  <div className="setup-terminal-row">
+                    <pre className="setup-terminal">{nextCommand}</pre>
+                    <CopyButton text={nextCommand} className="setup-btn-secondary setup-copy-btn" />
+                  </div>
                   <p className="setup-field-help">
-                    Wait until services are healthy, then send a test message below.
+                    Wait until services are healthy — we&apos;ll check for you below.
                   </p>
                 </div>
               )}
@@ -620,9 +712,26 @@ export function SetupWizardPage() {
               )}
 
               <div className="setup-test-block">
-                <button type="button" className="setup-btn-secondary" onClick={() => void sendTest()}>
-                  Send test message
-                </button>
+                <div className="setup-test-head">
+                  <button
+                    type="button"
+                    className="setup-btn-secondary"
+                    onClick={() => void sendTest({ retries: useCloud || useLocal ? 4 : 0 })}
+                    disabled={testStatus === "checking"}
+                  >
+                    {testStatus === "checking" ? "Checking…" : "Test again"}
+                  </button>
+                  {testStatus === "checking" && (
+                    <span className="setup-test-status" aria-live="polite">
+                      Checking that AI responds…
+                    </span>
+                  )}
+                  {testStatus === "ok" && (
+                    <span className="setup-test-status setup-test-status-ok" aria-live="polite">
+                      ✓ AI responded
+                    </span>
+                  )}
+                </div>
                 {testReply && (
                   <div className="setup-test-reply">
                     <span className="setup-test-label">AI replied:</span>
@@ -630,7 +739,7 @@ export function SetupWizardPage() {
                   </div>
                 )}
               </div>
-              {error && <p className="setup-error">{error}</p>}
+              {error && testStatus === "error" && <p className="setup-error">{error}</p>}
               <div className="setup-actions setup-actions-end">
                 <button type="button" className="setup-btn-primary" onClick={() => nav("/overview")}>
                   Open dashboard
@@ -642,6 +751,33 @@ export function SetupWizardPage() {
       </div>
     </div>
   );
+}
+
+/** Common key prefixes, for a non-blocking "that doesn't look right" hint. */
+const KEY_PREFIXES: Record<string, { prefix: string; example: string }> = {
+  OPENAI_API_KEY: { prefix: "sk-", example: "sk-…" },
+  ANTHROPIC_API_KEY: { prefix: "sk-ant-", example: "sk-ant-…" },
+  OPENROUTER_API_KEY: { prefix: "sk-or-", example: "sk-or-…" },
+  GEMINI_API_KEY: { prefix: "AIza", example: "AIza…" },
+  GROQ_API_KEY: { prefix: "gsk_", example: "gsk_…" },
+  XAI_API_KEY: { prefix: "xai-", example: "xai-…" },
+  AWS_ACCESS_KEY_ID: { prefix: "AKIA", example: "AKIA… (or ASIA… for temporary)" },
+};
+
+/**
+ * Returns a gentle, non-blocking warning when a pasted key clearly doesn't match
+ * the provider's usual prefix — catches a wrong-field paste before Apply.
+ * Returns null when empty or plausibly correct (never blocks progress).
+ */
+export function keyFormatWarning(key: string, value: string): string | null {
+  const v = value.trim();
+  if (!v) return null;
+  const spec = KEY_PREFIXES[key];
+  if (!spec) return null;
+  // AWS temporary keys start with ASIA; accept either.
+  if (key === "AWS_ACCESS_KEY_ID" && v.startsWith("ASIA")) return null;
+  if (v.startsWith(spec.prefix)) return null;
+  return `This doesn't look like a ${key.replace(/_/g, " ").toLowerCase()} (usually starts with ${spec.example}). Double-check you pasted the right value.`;
 }
 
 function parseSetupError(e: unknown): string {

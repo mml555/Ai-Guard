@@ -662,8 +662,42 @@ input, textarea {
   overflow-x: auto;
 }
 
+.setup-terminal-row {
+  display: flex;
+  align-items: stretch;
+  gap: 0.5rem;
+}
+.setup-terminal-row .setup-terminal {
+  flex: 1;
+}
+.setup-copy-btn {
+  flex-shrink: 0;
+  align-self: flex-start;
+  white-space: nowrap;
+}
+
 .setup-test-block {
   margin: 1rem 0;
+}
+
+.setup-test-head {
+  display: flex;
+  align-items: center;
+  gap: 0.75rem;
+}
+.setup-test-status {
+  font-size: 0.85rem;
+  color: #9ca3af;
+}
+.setup-test-status-ok {
+  color: #34d399;
+  font-weight: 600;
+}
+
+.setup-field-warn {
+  margin: 0.25rem 0 0;
+  font-size: 0.75rem;
+  color: #fbbf24;
 }
 
 .setup-test-reply {
