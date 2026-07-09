@@ -418,4 +418,44 @@ describe("createModelgovClient", () => {
     expect(seen[0]).toBe("txn-42");
     expect(seen[1]).toBeNull();
   });
+
+  it("forwards requestId on embed, explain, extractDocument, and chatStream", async () => {
+    const seen: Record<string, string | null> = {};
+    const fetchImpl: typeof fetch = async (url, init) => {
+      const headers = new Headers(init?.headers);
+      const path = new URL(String(url)).pathname;
+      seen[path] = headers.get("x-request-id");
+      if (headers.get("accept") === "text/event-stream") return sseResponse(["[DONE]"]);
+      return jsonResponse({
+        embeddings: [[0.1]],
+        decision: "allow",
+        text: "t",
+        pages: 1,
+        provider: "p",
+      });
+    };
+    const client = createModelgovClient({ baseUrl: "http://api", fetchImpl });
+    const rid = "txn-99";
+    await client.embed(
+      { userId: "u1", userType: "logged_in", feature: "rag_ingest", input: "x" },
+      { requestId: rid },
+    );
+    await client.explain(
+      { userId: "u1", userType: "logged_in", feature: "support_chat" },
+      { requestId: rid },
+    );
+    await client.extractDocument(
+      { userId: "u1", userType: "logged_in", feature: "doc_review", provider: "tesseract", document: { base64: "eA==" } },
+      { requestId: rid },
+    );
+    const it = client.chatStream(baseRequest, { requestId: rid });
+    while (!(await it.next()).done) {
+      /* drain the stream */
+    }
+
+    expect(seen["/v1/embeddings"]).toBe(rid);
+    expect(seen["/v1/explain"]).toBe(rid);
+    expect(seen["/v1/documents/extract"]).toBe(rid);
+    expect(seen["/v1/chat"]).toBe(rid); // chatStream
+  });
 });

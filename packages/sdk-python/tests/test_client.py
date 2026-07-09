@@ -644,9 +644,8 @@ def test_get_provider_health_maps_forbidden() -> None:
         return_value=httpx.Response(403, json={"error": {"code": "forbidden"}})
     )
 
-    with make_client() as client:
-        with pytest.raises(ModelgovError) as exc:
-            client.get_provider_health()
+    with make_client() as client, pytest.raises(ModelgovError) as exc:
+        client.get_provider_health()
 
     assert exc.value.status == 403
     assert exc.value.code == "forbidden"
@@ -693,6 +692,54 @@ def test_request_id_sent_as_correlation_header_across_calls() -> None:
 
     assert chat_route.calls.last.request.headers["x-request-id"] == "txn-42"
     assert doc_route.calls.last.request.headers["x-request-id"] == "txn-42"
+
+
+@respx.mock
+def test_request_id_forwarded_by_embed_explain_and_stream() -> None:
+    """embed / explain / chat_stream also forward x-request-id (all 5 covered)."""
+    embed_route = respx.post(f"{BASE_URL}/v1/embeddings").mock(
+        return_value=httpx.Response(
+            200,
+            json={
+                "embeddings": [[0.1]],
+                "model": "m",
+                "provider": "p",
+                "decision": "allow",
+                "usage": {"inputTokens": 1},
+                "cost": {"estimatedUsd": 0.0, "actualUsd": 0.0},
+                "budgetRemaining": None,
+                "requestId": "req_e",
+            },
+        )
+    )
+    explain_route = respx.post(f"{BASE_URL}/v1/explain").mock(
+        return_value=httpx.Response(200, json={"decision": "allow", "summary": "ok"})
+    )
+    stream_route = respx.post(f"{BASE_URL}/v1/chat").mock(
+        return_value=httpx.Response(
+            200, headers={"content-type": "text/event-stream"}, content=SSE_STREAM
+        )
+    )
+
+    with make_client() as client:
+        client.embed(
+            user_id="u", user_type="logged_in", feature="rag_ingest",
+            input="x", request_id="rid",
+        )
+        client.explain(
+            user_id="u", user_type="logged_in", feature="support_chat",
+            request_id="rid",
+        )
+        list(
+            client.chat_stream(
+                user_id="u", user_type="logged_in", feature="support_chat",
+                messages=[{"role": "user", "content": "hi"}], request_id="rid",
+            )
+        )
+
+    assert embed_route.calls.last.request.headers["x-request-id"] == "rid"
+    assert explain_route.calls.last.request.headers["x-request-id"] == "rid"
+    assert stream_route.calls.last.request.headers["x-request-id"] == "rid"
 
 
 @respx.mock

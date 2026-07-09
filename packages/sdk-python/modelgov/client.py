@@ -262,6 +262,10 @@ class ModelgovClient:
         Policy/safety blocks that happen *before* streaming starts are returned
         as a normal non-2xx JSON response and raised as the usual typed errors.
 
+        ``idempotency_key`` and ``request_id`` behave exactly as in :meth:`chat`
+        (the ``Idempotency-Key`` and ``x-request-id`` headers respectively); pass
+        the same ``request_id`` to correlate this stream with related calls.
+
         Returns:
             A :class:`ChatStream` yielding ``str`` chunks of assistant text, in
             order, exposing ``.done`` once fully consumed.
@@ -287,10 +291,11 @@ class ModelgovClient:
         body["stream"] = True
 
         extra: Dict[str, str] = {"accept": "text/event-stream"}
-        if idempotency_key:
-            extra["idempotency-key"] = idempotency_key
-        if request_id:
-            extra["x-request-id"] = request_id
+        merged = self._extra_headers(
+            idempotency_key=idempotency_key, request_id=request_id
+        )
+        if merged:
+            extra.update(merged)
 
         return ChatStream(self, body, extra)
 
