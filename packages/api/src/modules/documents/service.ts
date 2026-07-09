@@ -132,7 +132,7 @@ export async function handleDocumentExtract(
   // even for Azure DI (which pulls the url itself) we refuse an internal host.
   if (source.kind === "url") {
     try {
-      await assertFetchableDocumentUrl(source.url);
+      assertFetchableDocumentUrl(source.url);
     } catch (err) {
       return { ok: false, status: 400, code: "invalid_request", details: { detail: (err as Error).message } };
     }

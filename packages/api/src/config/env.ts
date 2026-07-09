@@ -93,6 +93,13 @@ const baseEnvSchema = z.object({
   AWS_ACCESS_KEY_ID: z.string().min(1).optional(),
   AWS_SECRET_ACCESS_KEY: z.string().min(1).optional(),
   AWS_SESSION_TOKEN: z.string().min(1).optional(),
+  /**
+   * Comma-separated allowlist of S3 buckets a caller may reference via a
+   * `document.s3` source. The gateway reads S3 with ITS OWN AWS credentials, so
+   * without an allowlist any caller could read arbitrary internal/tenant buckets
+   * (confused deputy) — unset ⇒ `s3` sources are rejected (fail closed).
+   */
+  TEXTRACT_S3_ALLOWED_BUCKETS: z.string().optional(),
   /** Per-page USD prices (the reserve/settle cost basis). Tesseract is 0 (self-hosted). */
   DOCUMENT_PRICE_PER_PAGE_TESSERACT: z.coerce.number().nonnegative().default(0),
   DOCUMENT_PRICE_PER_PAGE_AZURE_DI: z.coerce.number().nonnegative().default(0.0015),

@@ -7,8 +7,26 @@ import {
   DocumentClientError,
   DocumentProviderError,
   signAwsV4,
+  ssrfGuardedLookup,
   type SigV4Params,
 } from "../src/services/documents";
+
+describe("ssrfGuardedLookup (connect-time SSRF guard)", () => {
+  const run = (host: string) =>
+    new Promise<NodeJS.ErrnoException | null>((resolve) => {
+      ssrfGuardedLookup(host, {}, (err) => resolve(err));
+    });
+
+  it("rejects a resolved private/link-local address", async () => {
+    // Numeric literals resolve locally (no network) to themselves.
+    expect(String(await run("10.0.0.1"))).toMatch(/private|SSRF/i);
+    expect(String(await run("169.254.169.254"))).toMatch(/private|SSRF/i);
+  });
+
+  it("allows a resolved public address", async () => {
+    expect(await run("93.184.216.34")).toBeNull();
+  });
+});
 
 describe("document client registry", () => {
   it("registers only configured providers and resolves their adapters", () => {
@@ -312,9 +330,25 @@ describe("textract adapter", () => {
       body = init?.body ? JSON.parse(init.body as string) : undefined;
       return new Response(JSON.stringify({ DocumentMetadata: { Pages: 1 }, Blocks: [] }), { status: 200 });
     }) as unknown as typeof fetch;
-    const adapter = createTextractAdapter({ ...creds, fetchImpl });
+    const adapter = createTextractAdapter({ ...creds, s3AllowedBuckets: ["my-bucket"], fetchImpl });
     await adapter.extract({ kind: "s3", s3: "s3://my-bucket/scans/doc.pdf" });
     expect(body).toEqual({ Document: { S3Object: { Bucket: "my-bucket", Name: "scans/doc.pdf" } } });
+  });
+
+  it("rejects an s3 bucket not on the allowlist (confused-deputy guard)", async () => {
+    const fetchImpl = (async () => new Response("{}", { status: 200 })) as unknown as typeof fetch;
+    const adapter = createTextractAdapter({ ...creds, s3AllowedBuckets: ["allowed-bucket"], fetchImpl });
+    await expect(adapter.extract({ kind: "s3", s3: "s3://internal-secrets/key" })).rejects.toBeInstanceOf(
+      DocumentClientError,
+    );
+  });
+
+  it("rejects all s3 sources when no allowlist is configured (fail closed)", async () => {
+    const fetchImpl = (async () => new Response("{}", { status: 200 })) as unknown as typeof fetch;
+    const adapter = createTextractAdapter({ ...creds, fetchImpl });
+    await expect(adapter.extract({ kind: "s3", s3: "s3://any-bucket/key" })).rejects.toBeInstanceOf(
+      DocumentClientError,
+    );
   });
 
   it("rejects an invalid s3 uri as a client error", async () => {

@@ -12,4 +12,9 @@ export { createTesseractAdapter } from "./tesseract";
 export { createAzureDiAdapter } from "./azureDi";
 export { createTextractAdapter } from "./textract";
 export { signAwsV4, type SigV4Params } from "./sigv4";
-export { assertFetchableDocumentUrl, sourceToBase64, DEFAULT_URL_MAX_BYTES } from "./util";
+export {
+  assertFetchableDocumentUrl,
+  sourceToBase64,
+  ssrfGuardedLookup,
+  DEFAULT_URL_MAX_BYTES,
+} from "./util";

@@ -42,7 +42,7 @@ invariant is knowingly broken; it is contained to `modules/documents/` +
 2. `evaluateAiRequest` (tokens = 0) → reuse budget **caps**, **safety plan**, and
    policy gating.
 3. Cost basis is **pages**, not tokens: `estimatedCostUsd = estimatedPages ×
-   perPageUsd` (`estimatedPages` = `body.pages` or `DOCUMENT_DEFAULT_PAGES`).
+   perPageUsd` (`estimatedPages` = `max(body.pages, DOCUMENT_MAX_PAGES)`).
 4. `acquireCreditHold` → `reserveBudget` (over cap → 403, hold released).
 5. Provider call — `documentClient.get(provider).extract(source)`.
 6. `settleActualCostWithRetry` with `actualPages × perPageUsd`.
@@ -79,7 +79,8 @@ invariant is knowingly broken; it is contained to `modules/documents/` +
 | `TEXTRACT_REGION` | AWS region — the explicit enable signal for Textract |
 | `AWS_ACCESS_KEY_ID` / `AWS_SECRET_ACCESS_KEY` / `AWS_SESSION_TOKEN` | Textract credentials |
 | `DOCUMENT_PRICE_PER_PAGE_TESSERACT` / `_AZURE_DI` / `_TEXTRACT` | per-page USD cost basis |
-| `DOCUMENT_DEFAULT_PAGES` | pages reserved when the caller gives no estimate |
+| `DOCUMENT_MAX_PAGES` | worst-case pages reserved per request (budget-cap floor; default 30) |
+| `TEXTRACT_S3_ALLOWED_BUCKETS` | buckets a caller may reference via an `s3` source (empty ⇒ `s3` rejected) |
 
 Textract is enabled only when `TEXTRACT_REGION` **and** AWS credentials are set,
 so generic AWS creds present for other reasons don't silently turn it on.

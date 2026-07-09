@@ -15,6 +15,12 @@ export interface TextractAdapterOptions {
   sessionToken?: string;
   /** USD per page (Textract DetectDocumentText ≈ $0.0015/page). */
   perPageUsd: number;
+  /**
+   * Buckets a caller may reference via an `s3` source. The gateway reads S3 with
+   * its own credentials, so an empty allowlist rejects ALL s3 sources (fail
+   * closed) to prevent a caller from reading arbitrary buckets (confused deputy).
+   */
+  s3AllowedBuckets?: readonly string[];
   fetchImpl?: typeof fetch;
   timeoutMs?: number;
   urlMaxBytes?: number;
@@ -64,10 +70,21 @@ export function createTextractAdapter(opts: TextractAdapterOptions): DocumentPro
     supportedInputs: ["base64", "url", "s3"],
     perPageUsd: opts.perPageUsd,
     async extract(source: DocumentSource): Promise<DocumentResult> {
-      const document =
-        source.kind === "s3"
-          ? { S3Object: parseS3Uri(source.s3) }
-          : { Bytes: await sourceToBase64(source, doFetch, { timeoutMs, maxBytes: opts.urlMaxBytes }) };
+      let document: { S3Object: { Bucket: string; Name: string } } | { Bytes: string };
+      if (source.kind === "s3") {
+        const s3 = parseS3Uri(source.s3);
+        const allowed = opts.s3AllowedBuckets ?? [];
+        if (!allowed.includes(s3.Bucket)) {
+          throw new DocumentClientError(
+            allowed.length === 0
+              ? "s3 document sources are disabled (set TEXTRACT_S3_ALLOWED_BUCKETS)"
+              : `s3 bucket '${s3.Bucket}' is not in the allowlist (TEXTRACT_S3_ALLOWED_BUCKETS)`,
+          );
+        }
+        document = { S3Object: s3 };
+      } else {
+        document = { Bytes: await sourceToBase64(source, doFetch, { timeoutMs, maxBytes: opts.urlMaxBytes }) };
+      }
       const payload = JSON.stringify({ Document: document });
 
       const signed = signAwsV4({

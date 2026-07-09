@@ -39,14 +39,20 @@ guarantees in `docs/versioning.md` apply.
 
 - New config/env: `EXTERNAL_COST_SOURCES`, `EXTERNAL_COST_MAX_USD`,
   `TESSERACT_URL`, `AZURE_DI_ENDPOINT` / `AZURE_DI_KEY`, `TEXTRACT_REGION`
-  (+ standard AWS creds), `DOCUMENT_PRICE_PER_PAGE_*`, `DOCUMENT_MAX_PAGES`.
-  New permission `usage:write`, granted to the `finops` and `owner` roles.
+  (+ standard AWS creds), `TEXTRACT_S3_ALLOWED_BUCKETS`,
+  `DOCUMENT_PRICE_PER_PAGE_*`, `DOCUMENT_MAX_PAGES`. New permission `usage:write`,
+  granted to the `finops` and `owner` roles.
 
 ### Security
 
-- Caller-supplied document `url` sources are DNS-resolved and rejected when they
-  resolve to a private/link-local address, and HTTP redirects are not followed —
-  closing an SSRF vector on the gateway document-fetch path.
+- Caller-supplied document `url` sources are fetched through an SSRF-guarded
+  dispatcher whose **connect-time** lookup rejects private/link-local addresses
+  (the address validated is the address connected to, closing the DNS-rebinding
+  TOCTOU), and HTTP redirects are not followed.
+- Textract `s3://` sources are gated by a `TEXTRACT_S3_ALLOWED_BUCKETS` allowlist,
+  fail-closed (unset ⇒ rejected) — the gateway reads S3 with its own credentials,
+  so an unrestricted `s3` source would be a confused-deputy read of arbitrary
+  internal/tenant buckets.
 
 ### Fixed
 

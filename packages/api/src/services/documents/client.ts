@@ -12,6 +12,7 @@ export interface DocumentClientConfig {
     secretAccessKey: string;
     sessionToken?: string;
     perPageUsd: number;
+    s3AllowedBuckets?: readonly string[];
   };
   /** Injectable for tests. */
   fetchImpl?: typeof fetch;

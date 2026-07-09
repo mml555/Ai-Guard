@@ -1,4 +1,6 @@
-import { lookup } from "node:dns/promises";
+import { lookup as dnsLookup } from "node:dns";
+import type { LookupFunction } from "node:net";
+import { Agent } from "undici";
 import { assertPublicHttpUrl, isPrivateHttpHost } from "../../util/httpUrlGuard";
 import { DocumentClientError, DocumentProviderError, type DocumentSource } from "./types";
 
@@ -25,17 +27,11 @@ export async function readJsonSafe<T>(res: Response): Promise<T> {
 }
 
 /**
- * Validate a caller-supplied document URL before the gateway fetches it. Unlike
- * the operator-configured webhook URLs `assertPublicHttpUrl` was built for, this
- * URL is UNTRUSTED caller input, so the syntactic host check is not enough (a
- * public hostname can resolve to a private/metadata address). We therefore also
- * resolve the host and reject if ANY resolved address is private/link-local —
- * the upgrade `httpUrlGuard`'s own comment calls for. Returns the validated URL.
- *
- * Residual TOCTOU (the host could re-resolve differently when fetch connects) is
- * further contained by refusing to follow redirects in {@link fetchDocumentBytes}.
+ * Syntactic gate for a caller-supplied document URL: must be https and not a
+ * literal private/link-local host. This is the fast preflight; the AUTHORITATIVE
+ * anti-SSRF check happens at connect time in {@link ssrfGuardedLookup}.
  */
-export async function assertFetchableDocumentUrl(rawUrl: string): Promise<URL> {
+export function assertFetchableDocumentUrl(rawUrl: string): URL {
   let target: URL;
   try {
     target = assertPublicHttpUrl(rawUrl);
@@ -45,28 +41,57 @@ export async function assertFetchableDocumentUrl(rawUrl: string): Promise<URL> {
   if (target.protocol !== "https:") {
     throw new DocumentClientError("document url must be https");
   }
-  let resolved: Array<{ address: string }>;
-  try {
-    resolved = await lookup(target.hostname, { all: true });
-  } catch (err) {
-    throw new DocumentClientError(`could not resolve document url host: ${(err as Error).message}`);
-  }
-  for (const { address } of resolved) {
-    if (isPrivateHttpHost(address)) {
-      throw new DocumentClientError(
-        `document url host '${target.hostname}' resolves to a private/link-local address (SSRF guard)`,
-      );
-    }
-  }
   return target;
 }
 
 /**
+ * A net.connect-style lookup that rejects any resolved private/link-local
+ * address AT CONNECT TIME. Because undici uses this exact lookup for the socket
+ * it opens, the address validated is the address connected to — closing the
+ * DNS-rebinding TOCTOU that a preflight-only resolve leaves open (a rebinding
+ * host can answer the preflight with a public IP and the real fetch with a
+ * private one). Exported for direct testing.
+ */
+export const ssrfGuardedLookup: LookupFunction = (hostname, options, callback) => {
+  // Force `all` so single- and multi-address results validate uniformly; net's
+  // connect path requests one address, so we answer with the first validated one.
+  dnsLookup(hostname, { ...options, all: true }, (err, addresses) => {
+    if (err) {
+      callback(err, "", 0);
+      return;
+    }
+    const bad = addresses.find((a) => isPrivateHttpHost(a.address));
+    if (bad) {
+      const blocked: NodeJS.ErrnoException = new Error(
+        `refusing to connect to private address ${bad.address} for '${hostname}' (SSRF guard)`,
+      );
+      blocked.code = "ESSRFBLOCKED";
+      callback(blocked, "", 0);
+      return;
+    }
+    const first = addresses[0];
+    if (!first) {
+      callback(new Error(`no address for '${hostname}'`) as NodeJS.ErrnoException, "", 0);
+      return;
+    }
+    callback(null, first.address, first.family);
+  });
+};
+
+/**
+ * Dispatcher used for every gateway-side document fetch. Its connect-time lookup
+ * ({@link ssrfGuardedLookup}) is the real SSRF boundary — validating the address
+ * the socket actually connects to, not a re-resolvable preflight.
+ */
+const documentFetchAgent = new Agent({ connect: { lookup: ssrfGuardedLookup } });
+
+/**
  * Resolve a document source to raw base64 for adapters that must send bytes
- * (Tesseract, Textract inline). `base64` passes through; `url` is SSRF-validated
- * (DNS-checked) and streamed by the gateway with an incremental size cap so an
- * unbounded/chunked body can't be buffered whole; `s3` cannot be materialized
- * here (only a provider that pulls it — Textract — supports it) and is rejected.
+ * (Tesseract, Textract inline). `base64` passes through; `url` is https-checked,
+ * fetched through the SSRF-guarded dispatcher (connect-time private-address
+ * rejection + no redirect following) and streamed with an incremental size cap;
+ * `s3` cannot be materialized here (only a provider that pulls it — Textract —
+ * supports it) and is rejected.
  */
 export async function sourceToBase64(
   source: DocumentSource,
@@ -77,14 +102,18 @@ export async function sourceToBase64(
   if (source.kind === "s3") {
     throw new DocumentClientError("this provider cannot fetch an s3 source; supply base64 or a url");
   }
-  const target = await assertFetchableDocumentUrl(source.url);
+  const target = assertFetchableDocumentUrl(source.url);
   const maxBytes = opts.maxBytes ?? DEFAULT_URL_MAX_BYTES;
 
   let res: Response;
   try {
-    // redirect:"manual" — never follow a 3xx to a fresh (unvalidated) host; that
-    // is the SSRF-via-redirect vector (mirrors budgetAlerts/webhookOutbox).
-    res = await fetchImpl(target.href, { redirect: "manual", signal: AbortSignal.timeout(opts.timeoutMs) });
+    // redirect:"manual" — never follow a 3xx to a fresh (unvalidated) host; the
+    // dispatcher validates the connect address so a rebinding host can't SSRF.
+    res = await fetchImpl(target.href, {
+      redirect: "manual",
+      signal: AbortSignal.timeout(opts.timeoutMs),
+      dispatcher: documentFetchAgent,
+    } as RequestInit & { dispatcher: Agent });
   } catch (err) {
     throw new DocumentProviderError(`failed to fetch document url: ${(err as Error).message}`, { cause: err });
   }

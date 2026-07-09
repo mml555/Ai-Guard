@@ -121,6 +121,7 @@ async function main(): Promise<void> {
               secretAccessKey: env.AWS_SECRET_ACCESS_KEY,
               sessionToken: env.AWS_SESSION_TOKEN,
               perPageUsd: env.DOCUMENT_PRICE_PER_PAGE_TEXTRACT,
+              s3AllowedBuckets: parseCsv(env.TEXTRACT_S3_ALLOWED_BUCKETS) ?? [],
             }
           : undefined,
     }),
