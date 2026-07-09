@@ -15,6 +15,32 @@ guarantees in `docs/versioning.md` apply.
 
 ## [Unreleased]
 
+### Changed
+
+- **Versioning is now patch-by-default.** Backward-compatible changes — including
+  small or gap-filling additive changes — ship as **PATCH**; **MINOR** is
+  reserved for substantial, announced capability milestones; **MAJOR** for
+  breaking changes only. Releases are batched (accumulated under `[Unreleased]`
+  and cut deliberately) rather than one-per-PR. This is stricter than textbook
+  SemVer on the minor digit but preserves the same compatibility contract.
+  Rationale and mechanics: [docs/versioning.md](docs/versioning.md) and the new
+  [docs/releasing.md](docs/releasing.md). (Releases `1.1`–`1.6` predate this and
+  stand.)
+- **Contribution conventions documented.** [CONTRIBUTING.md](CONTRIBUTING.md) now
+  specifies the Conventional Commits format, the "update docs in the same PR"
+  rule, and CHANGELOG-per-change discipline; the PR template gained a
+  **version-impact** section.
+
+### Fixed
+
+- **`verify-versions` now checks `packages/api/package.json`.** It was omitted
+  from the guard, so a stale API package version (which ships in the Docker
+  image) could pass `pnpm verify` and the tag guard undetected. All listed
+  version surfaces are now enforced.
+- **The release workflow gates the PyPI publish on the Python SDK tests.**
+  `release.yml`'s `pypi` job now runs `pytest` before building/publishing, so a
+  tag can no longer ship a Python package whose tests fail.
+
 ## [1.6.0] - 2026-07-09
 
 ### Added

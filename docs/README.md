@@ -60,7 +60,8 @@ model request reaches a provider.
 | [SOC 2 control mapping](./compliance/soc2-controls.md) | Security / GRC | TSC controls, gaps |
 | [Data flow & DLP](./compliance/data-flow.md) | Security / privacy | Stored vs transient data |
 | [Enterprise readiness checklist](./enterprise-readiness-checklist.md) | Platform leads | Pre-GA checklist with links |
-| [Versioning & compatibility](./versioning.md) | Integrators | SemVer, support window |
+| [Versioning & compatibility](./versioning.md) | Integrators | SemVer contract, patch-by-default policy, support window |
+| [Releasing](./releasing.md) | Maintainers | How to cut a release (version surfaces, tag, publish) |
 
 ## Reference
 

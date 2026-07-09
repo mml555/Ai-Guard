@@ -35,7 +35,9 @@ check "OPENAPI_VERSION" "$OPENAPI_PLUGIN"
 check "openapi.json info.version" "$OPENAPI_JSON"
 check "Helm values image.tag (without v)" "$HELM_TAG"
 
-for pkgdir in packages/policy-engine packages/sdk-typescript packages/cli packages/create-modelgov; do
+# packages/api is included: its package.json version ships in the Docker image,
+# so a stale value there must fail the guard just like a publishable package.
+for pkgdir in packages/api packages/policy-engine packages/sdk-typescript packages/cli packages/create-modelgov; do
   PV="$(node -p "require('./$pkgdir/package.json').version")"
   PN="$(node -p "require('./$pkgdir/package.json').name")"
   check "$PN" "$PV"

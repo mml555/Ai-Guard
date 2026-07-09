@@ -10,10 +10,48 @@ supported-version window; and the compatibility guarantees you can build on.
 
 ---
 
+## How we choose the version number
+
+Modelgov honors SemVer's **compatibility contract**: the only guarantee a `^1.x`
+consumer relies on is that **nothing breaks the HTTP API, SDKs, or config schema
+except a MAJOR bump.** Within that contract we are deliberately **conservative
+about the MINOR digit** so the version tracks real maturity, not commit volume:
+
+| Change | Version bump |
+| --- | --- |
+| Breaking change to any surface (see the compatibility tables below) | **MAJOR** — `1.6.0 → 2.0.0` |
+| A substantial, cohesive, **announced capability milestone** | **MINOR** — `1.6.0 → 1.7.0` (rare, deliberate) |
+| Everything else backward-compatible — bug fixes, docs, perf, refactors, dependency/security bumps, and **small or gap-filling additive changes** (a new optional field, an SDK method that fills a parity gap) | **PATCH** — `1.6.0 → 1.6.1` |
+| A change not yet part of a cut release | **no bump** — log under `[Unreleased]`; it ships in the next release |
+
+This is intentionally **stricter than textbook SemVer**, which tags every
+additive change a MINOR. Patch-shipping a small addition is safe — it never
+breaks a `^1.x` consumer — and it keeps the minor digit meaningful as a
+milestone marker.
+
+**Cadence — not every merge is a release.** Changes accumulate under
+`[Unreleased]` in [CHANGELOG.md](../CHANGELOG.md); cutting a release is a
+deliberate act (bump every version surface, tag `vX.Y.Z`), taken when there is a
+coherent set worth shipping. Default to a **PATCH**; reach for a MINOR only when
+you are shipping a milestone worth naming. The full mechanics are in
+[releasing.md](./releasing.md).
+
+> **History:** releases `1.1`–`1.6` predate this policy and were cut per-feature
+> as minors; they stand (published versions are immutable and only increase).
+> This policy governs everything from `1.6.0` onward.
+
+---
+
 ## SemVer, applied to three surfaces
 
 Modelgov follows [Semantic Versioning](https://semver.org/) (`MAJOR.MINOR.PATCH`).
-It has three independently meaningful compatibility surfaces:
+It has three independently meaningful compatibility surfaces.
+
+> The **Bump** column in the tables below is each change's **compatibility
+> class**, not the digit we always move. The MAJOR rows are the hard boundary —
+> they *always* require a major. The MINOR rows are backward-compatible; per the
+> policy above we ship them as **PATCH** by default and fold them into a MINOR
+> only as part of an announced milestone.
 
 ### 1. HTTP API
 
@@ -114,10 +152,14 @@ not a hand-editable compatibility surface.
 
 ---
 
-## Checklist to cut a stable 1.0
+## Post-1.0 hardening checklist
 
-What must be **frozen and guaranteed** before declaring 1.0. Until every box is
-checked, breaking changes remain possible under 0.x semantics.
+> **Status:** 1.0 shipped and the compatibility guarantees above are in effect,
+> but not every surface is fully *frozen* yet. This tracks what still needs to be
+> locked down; an unchecked box is a **known area to treat carefully**, not a
+> licence to break compatibility (breaking changes still require a MAJOR).
+
+What remains to be **frozen and guaranteed**:
 
 **API contract**
 
