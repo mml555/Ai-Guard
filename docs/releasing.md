@@ -106,7 +106,9 @@ Pushing a `v*` tag triggers two workflows:
 ## 7. Confirm the artifacts
 
 ```bash
-npm view @modelgov/sdk version          # and /cli, /policy-engine, create-modelgov
+for pkg in @modelgov/sdk @modelgov/cli @modelgov/policy-engine create-modelgov; do
+  echo "$pkg $(npm view "$pkg" version)"
+done
 curl -s https://pypi.org/pypi/modelgov/json | python -c 'import sys,json; print(json.load(sys.stdin)["info"]["version"])'
 gh release view vX.Y.Z --json tagName,isDraft
 ```

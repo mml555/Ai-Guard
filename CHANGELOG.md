@@ -31,6 +31,16 @@ guarantees in `docs/versioning.md` apply.
   rule, and CHANGELOG-per-change discipline; the PR template gained a
   **version-impact** section.
 
+### Fixed
+
+- **`verify-versions` now checks `packages/api/package.json`.** It was omitted
+  from the guard, so a stale API package version (which ships in the Docker
+  image) could pass `pnpm verify` and the tag guard undetected. All listed
+  version surfaces are now enforced.
+- **The release workflow gates the PyPI publish on the Python SDK tests.**
+  `release.yml`'s `pypi` job now runs `pytest` before building/publishing, so a
+  tag can no longer ship a Python package whose tests fail.
+
 ## [1.6.0] - 2026-07-09
 
 ### Added

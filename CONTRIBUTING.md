@@ -57,7 +57,7 @@ throwaway container for you (no local Postgres required).
 
 Every commit subject follows [Conventional Commits](https://www.conventionalcommits.org/):
 
-```
+```text
 type(scope): imperative subject
 ```
 
