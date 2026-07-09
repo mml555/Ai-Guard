@@ -176,4 +176,26 @@ describe("production hardening", () => {
     expect(limited.json().error.code).toBe("rate_limit_exceeded");
     await server.close();
   });
+
+  it("maps an empty JSON body to 400, not 500 (FST_ERR_CTP_EMPTY_JSON_BODY)", async () => {
+    const res = await app().inject({
+      method: "POST",
+      url: "/v1/chat",
+      headers: { authorization: "Bearer secret", "content-type": "application/json" },
+      payload: "",
+    });
+    expect(res.statusCode).toBe(400);
+    expect(res.json().error.code).not.toBe("internal_error");
+  });
+
+  it("maps a malformed JSON body to 400, not 500", async () => {
+    const res = await app().inject({
+      method: "POST",
+      url: "/v1/chat",
+      headers: { authorization: "Bearer secret", "content-type": "application/json" },
+      payload: "{ not valid json",
+    });
+    expect(res.statusCode).toBe(400);
+    expect(res.json().error.code).not.toBe("internal_error");
+  });
 });

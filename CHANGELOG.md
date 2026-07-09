@@ -15,6 +15,16 @@ guarantees in `docs/versioning.md` apply.
 
 ## [Unreleased]
 
+### Fixed
+
+- **Client errors no longer masked as 500.** A request with
+  `Content-Type: application/json` and an empty or malformed body returned
+  `500 internal_error` (the Fastify `FST_ERR_CTP_EMPTY_JSON_BODY` /
+  `_INVALID_JSON_BODY` errors fell through the error handler). Such 4xx client
+  errors are now returned as `400 invalid_request` and logged at warn, not
+  error. (Not reachable via the SDKs/console, which omit the header when there's
+  no body — surfaced by direct API clients.)
+
 ## [1.7.0] - 2026-07-09
 
 ### Added

@@ -403,10 +403,23 @@ export function buildServer(opts: BuildServerOptions): FastifyInstance {
       );
     }
 
-    req.log.error({ err }, "unhandled error");
     if (err instanceof AppError) {
+      req.log.error({ err }, "unhandled error");
       return sendError(reply, err.status, err.code, err.details, err.message);
     }
+
+    // Other Fastify client errors that carry a 4xx status — an empty or
+    // malformed JSON body (FST_ERR_CTP_EMPTY_JSON_BODY / _INVALID_JSON_BODY),
+    // unsupported media type, etc. Return the real 4xx instead of masking it as
+    // a 500. Validation / auth / rate-limit / body-size are handled above; only
+    // 5xx and status-less errors fall through to the 500 below. Client errors,
+    // so log at warn, not error (they're not our bug).
+    if (errStatus !== undefined && errStatus >= 400 && errStatus < 500) {
+      req.log.warn({ err }, "client request error");
+      return sendError(reply, errStatus, "invalid_request", {}, "Invalid request");
+    }
+
+    req.log.error({ err }, "unhandled error");
     return sendError(reply, 500, "internal_error", {}, "Internal server error");
   });
 
