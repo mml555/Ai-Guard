@@ -7,13 +7,17 @@ always server-side.
 
 ## Install
 
-From the Modelgov monorepo (workspace):
+Published on npm:
+
+```bash
+npm install @modelgov/sdk
+```
+
+From inside the Modelgov monorepo, use the workspace protocol instead:
 
 ```json
 { "dependencies": { "@modelgov/sdk": "workspace:*" } }
 ```
-
-When published to npm (future): `npm install @modelgov/sdk`.
 
 ## Create a client
 

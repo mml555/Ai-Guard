@@ -15,6 +15,28 @@ guarantees in `docs/versioning.md` apply.
 
 ## [Unreleased]
 
+### Added
+
+- **Python SDK — admin/usage API coverage + request correlation.** The client
+  gained `get_usage_transactions()` (`GET /v1/usage/transactions` — the
+  per-transaction cost rollup grouped by `correlationId`, LLM vs external cost
+  broken out) and `get_provider_health()` (`GET /v1/admin/providers/health` —
+  per-provider/model health from the LiteLLM proxy). Both require `usage:read`.
+  New typed results `TransactionsResult` / `Transaction` and
+  `ProviderHealthResult` / `ProviderModelHealth` are exported.
+- **Python SDK — `request_id` correlation.** `chat`, `chat_stream`, `embed`,
+  `explain`, and `extract_document` accept an optional `request_id` that sets the
+  `x-request-id` header. Passing the same value across related calls rolls them
+  up into one transaction in `get_usage_transactions` (the gateway reuses a
+  bounded inbound `x-request-id`, ≤128 chars, as the correlation id).
+
+### Fixed
+
+- **Docs freshness.** Corrected stale "current release `v1.3.0`" pins and the
+  `openapi-v1.3.0.json` asset reference to the current release, and removed the
+  "not yet published to npm/PyPI" note now that `@modelgov/sdk`, `create-modelgov`,
+  and `modelgov` (PyPI) are published.
+
 ## [1.5.0] - 2026-07-09
 
 ### Added
