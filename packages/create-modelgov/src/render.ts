@@ -33,6 +33,13 @@ export interface ScaffoldOptions {
   mode: DeployMode;
   safetyPreset: SafetyPreset;
   template: Template;
+  /** Override global monthly spend cap (USD). */
+  monthlyBudgetUsd?: number;
+  /**
+   * Local-dev only: route prompt-injection screening through the built-in demo
+   * model so each guarded chat uses one real provider call instead of two.
+   */
+  hybridInjection?: boolean;
 }
 
 const OLLAMA = "ollama/llama3.2:3b";
@@ -113,7 +120,13 @@ export function renderModelgovYaml(opts: ScaffoldOptions): string {
   const localOnly = t.localOnly === true;
   const providers = localOnly ? [] : opts.providers;
   const preset: SafetyPreset = localOnly ? "dev" : opts.safetyPreset;
-  const injectionModel = localOnly ? LOCAL_MODEL : primaryModel("cheap", opts.providers[0]!);
+  const useHybridInjection =
+    !localOnly && opts.hybridInjection === true && preset !== "dev";
+  const injectionModel = localOnly
+    ? LOCAL_MODEL
+    : useHybridInjection
+      ? "openai/gpt-4o-mini"
+      : primaryModel("cheap", opts.providers[0]!);
 
   const features = Object.fromEntries(
     Object.entries(t.features).map(([name, f]) => [
@@ -157,11 +170,19 @@ export function renderModelgovYaml(opts: ScaffoldOptions): string {
         }
       : {}),
     budgets: {
-      global: { monthly_usd: 500, alert_at_percent: 80, hard_stop_at_percent: 100 },
+      global: { monthly_usd: opts.monthlyBudgetUsd ?? 500, alert_at_percent: 80, hard_stop_at_percent: 100 },
       by_user_type: byUserType,
     },
     features,
-    routing: { degrade_at_percent: 80 },
+    routing: {
+      degrade_at_percent: 80,
+      retry: {
+        max_attempts: 3,
+        backoff_ms: [500, 2000, 8000],
+        retry_on: [429, 502, 503],
+        respect_retry_after: true,
+      },
+    },
     model_classes: modelClasses,
     safety: { preset, injection_model: injectionModel },
     ...(t.dataClasses

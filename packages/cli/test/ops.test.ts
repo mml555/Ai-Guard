@@ -1,5 +1,57 @@
 import { describe, expect, it } from "vitest";
-import { modeConfig, parseOpsFlags, securityConfigWarnings, assertProductionDeploy } from "../src/ops.js";
+import {
+  hasAnyProviderCredentials,
+  modeConfig,
+  parseOpsFlags,
+  securityConfigWarnings,
+  assertProductionDeploy,
+  smokePayloadFromPolicyYaml,
+} from "../src/ops.js";
+import { browserOpenCommand, buildAutoconnectConsoleUrl } from "../src/browserOpen.js";
+
+describe("smokePayloadFromPolicyYaml", () => {
+  it("uses support_chat when present", () => {
+    const yaml = `
+features:
+  support_chat:
+    model_class: cheap
+budgets:
+  by_user_type:
+    logged_in:
+      models: [cheap]
+`;
+    expect(smokePayloadFromPolicyYaml(yaml)).toEqual({
+      feature: "support_chat",
+      userType: "logged_in",
+      modelClass: "cheap",
+    });
+  });
+
+  it("falls back to the first configured feature", () => {
+    const yaml = `
+features:
+  assistant:
+    model_class: cheap
+budgets:
+  by_user_type:
+    pro:
+      models: [cheap, standard]
+`;
+    expect(smokePayloadFromPolicyYaml(yaml)).toEqual({
+      feature: "assistant",
+      userType: "pro",
+      modelClass: "cheap",
+    });
+  });
+});
+
+describe("hasAnyProviderCredentials", () => {
+  it("accepts Gemini and other non-OpenAI keys", () => {
+    expect(hasAnyProviderCredentials({ GEMINI_API_KEY: "AIza-real-key-value" })).toBe(true);
+    expect(hasAnyProviderCredentials({ OPENAI_API_KEY: "sk-..." })).toBe(false);
+    expect(hasAnyProviderCredentials({})).toBe(false);
+  });
+});
 
 describe("securityConfigWarnings", () => {
   it("warns on dev API keys and OIDC without audience", () => {
@@ -56,7 +108,7 @@ describe("securityConfigWarnings", () => {
 
 describe("parseOpsFlags", () => {
   it("defaults to simple mode", () => {
-    expect(parseOpsFlags([])).toEqual({ mode: "simple", yes: false, follow: true, strict: false });
+    expect(parseOpsFlags([])).toEqual({ mode: "simple", yes: false, follow: true, strict: false, json: false });
   });
 
   it("parses mode and yes flags", () => {
@@ -65,7 +117,12 @@ describe("parseOpsFlags", () => {
       yes: true,
       follow: false,
       strict: false,
+      json: false,
     });
+  });
+
+  it("parses --json", () => {
+    expect(parseOpsFlags(["--json"]).json).toBe(true);
   });
 
   it("parses cloud mode", () => {
@@ -82,6 +139,28 @@ describe("parseOpsFlags", () => {
 
   it("rejects unknown arguments", () => {
     expect(() => parseOpsFlags(["--bogus"])).toThrow(/Unknown ops argument/);
+  });
+});
+
+describe("buildAutoconnectConsoleUrl", () => {
+  it("builds a console URL with encoded url and token query params", () => {
+    const url = buildAutoconnectConsoleUrl("http://localhost:3090", "sk-modelgov-api-local");
+    expect(url).toBe(
+      "http://localhost:5174/login?url=http%3A%2F%2Flocalhost%3A3090&token=sk-modelgov-api-local",
+    );
+  });
+});
+
+describe("browserOpenCommand", () => {
+  const url = "http://localhost:5174/login?url=x&token=y";
+  it("uses open on macOS", () => {
+    expect(browserOpenCommand("darwin", url)).toEqual({ cmd: "open", args: [url] });
+  });
+  it("uses xdg-open on Linux", () => {
+    expect(browserOpenCommand("linux", url)).toEqual({ cmd: "xdg-open", args: [url] });
+  });
+  it("uses cmd /c start with an empty title arg on Windows", () => {
+    expect(browserOpenCommand("win32", url)).toEqual({ cmd: "cmd", args: ["/c", "start", "", url] });
   });
 });
 

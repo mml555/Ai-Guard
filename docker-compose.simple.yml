@@ -29,12 +29,39 @@ services:
     # the dev stack under everyone without a commit). Bump this intentionally.
     image: ghcr.io/berriai/litellm:main-v1.72.0-stable
     command: ["--config", "/app/config.yaml", "--port", "4000"]
+    # Pass ONLY provider credentials + the master key to this third-party image —
+    # not `env_file: .env`, which would also hand it DATABASE_URL, MODELGOV_API_KEY,
+    # and Postgres creds. The setup wizard writes provider keys into .env; compose
+    # substitutes them here (absent ones resolve to empty). Add a line when you
+    # enable a new provider that needs an env credential.
     environment:
-      OPENAI_API_KEY: ${OPENAI_API_KEY:-demo-unused}
-      ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY:-demo-unused}
       LITELLM_MASTER_KEY: ${LITELLM_MASTER_KEY:-sk-modelgov-local}
+      OPENAI_API_KEY: ${OPENAI_API_KEY:-}
+      ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY:-}
+      GEMINI_API_KEY: ${GEMINI_API_KEY:-}
+      OPENROUTER_API_KEY: ${OPENROUTER_API_KEY:-}
+      MISTRAL_API_KEY: ${MISTRAL_API_KEY:-}
+      GROQ_API_KEY: ${GROQ_API_KEY:-}
+      XAI_API_KEY: ${XAI_API_KEY:-}
+      DEEPSEEK_API_KEY: ${DEEPSEEK_API_KEY:-}
+      COHERE_API_KEY: ${COHERE_API_KEY:-}
+      AZURE_API_KEY: ${AZURE_API_KEY:-}
+      AZURE_API_BASE: ${AZURE_API_BASE:-}
+      AZURE_API_VERSION: ${AZURE_API_VERSION:-}
+      AZURE_AI_API_KEY: ${AZURE_AI_API_KEY:-}
+      AZURE_AI_API_BASE: ${AZURE_AI_API_BASE:-}
+      AWS_ACCESS_KEY_ID: ${AWS_ACCESS_KEY_ID:-}
+      AWS_SECRET_ACCESS_KEY: ${AWS_SECRET_ACCESS_KEY:-}
+      AWS_SESSION_TOKEN: ${AWS_SESSION_TOKEN:-}
+      AWS_REGION_NAME: ${AWS_REGION_NAME:-}
+      VERTEX_PROJECT: ${VERTEX_PROJECT:-}
+      VERTEX_LOCATION: ${VERTEX_LOCATION:-}
+      # Path to a mounted service-account JSON (Vertex file auth also needs the
+      # file bind-mounted into this container).
+      GOOGLE_APPLICATION_CREDENTIALS: ${GOOGLE_APPLICATION_CREDENTIALS:-}
+      GITHUB_COPILOT_TOKEN: ${GITHUB_COPILOT_TOKEN:-}
     volumes:
-      - ./litellm_config.yaml:/app/config.yaml:ro
+      - ${LITELLM_CONFIG_PATH:-./litellm_config.yaml}:/app/config.yaml:ro
     deploy:
       resources:
         limits:
@@ -77,6 +104,14 @@ services:
     build:
       context: .
       dockerfile: packages/api/Dockerfile
+    # LOCAL DEV ONLY. Running as root + the docker.sock mount below let the setup
+    # wizard restart the litellm proxy so new provider keys go live without a
+    # terminal command. docker.sock is effectively host-root, so this is scoped to
+    # this local/demo compose (bound to 127.0.0.1) and MUST NOT appear in any
+    # production compose or the Helm chart. The setup API that uses it is itself
+    # gated off when MODELGOV_PRODUCTION=true. Remove both lines to opt out — the
+    # wizard then falls back to printing `pnpm modelgov reload-providers`.
+    user: "0:0"
     depends_on:
       postgres:
         condition: service_healthy
@@ -97,8 +132,15 @@ services:
       MODELGOV_CONFIG: /app/modelgov.yaml
       PRESIDIO_ANALYZER_URL: http://presidio-analyzer:3000
       PRESIDIO_ANONYMIZER_URL: http://presidio-anonymizer:3000
+      CORS_ALLOW_ORIGINS: ${CORS_ALLOW_ORIGINS:-http://localhost:5174,http://127.0.0.1:5174}
+      POLICY_STORE_ENABLED: "true"
+      POLICY_HOT_RELOAD: "true"
+      MODELGOV_SETUP_API: "true"
+      MODELGOV_PROJECT_ROOT: /project
     volumes:
       - ./modelgov.yaml:/app/modelgov.yaml:ro
+      - ./.env:/project/.env
+      - /var/run/docker.sock:/var/run/docker.sock
     ports: ["127.0.0.1:${MODELGOV_PUBLIC_PORT:-3090}:3000"]
     healthcheck:
       # Node-based (no dependency on wget/busybox being present in the image).
@@ -114,6 +156,19 @@ services:
       resources:
         limits:
           memory: 512M
+
+  console:
+    build:
+      context: .
+      dockerfile: apps/operator-console/Dockerfile
+    depends_on:
+      api:
+        condition: service_healthy
+    ports: ["127.0.0.1:${MODELGOV_CONSOLE_PORT:-5174}:8080"]
+    deploy:
+      resources:
+        limits:
+          memory: 128M
 
 volumes:
   pgdata:
