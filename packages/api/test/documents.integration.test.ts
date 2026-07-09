@@ -29,7 +29,12 @@ const config = parseConfigObject({
     global: { monthly_usd: 1000, hard_stop_at_percent: 100 },
     by_user_type: { logged_in: { daily_usd: 1, daily_requests: 1000, models: ["cheap"] } },
   },
-  features: { doc_review: { safety: "dev", model_class: "cheap", max_tokens: 500 } },
+  features: {
+    doc_review: { safety: "dev", model_class: "cheap", max_tokens: 500 },
+    // "balanced" preset masks PII (pii: mask) — used to assert structured output
+    // is masked, not just `text`.
+    doc_review_masked: { safety: "balanced", model_class: "cheap", max_tokens: 500 },
+  },
   model_classes: { cheap: { primary: "openai/gpt-4o-mini", fallback: "anthropic/claude-haiku" } },
   safety: { preset: "dev" },
 });
@@ -217,6 +222,23 @@ describe.skipIf(!DATABASE_URL)("document extraction (integration)", () => {
     const res = await extract(a, { provider: "tesseract", model: "prebuilt-layout", document: { base64: "ZmFrZQ==" } });
     expect(res.statusCode).toBe(400);
     expect(res.json().error.code).toBe("unsupported_model");
+  });
+
+  it("masks PII in the STRUCTURED output too when the feature masks (not just text)", async () => {
+    // balanced preset ⇒ pii: mask, so the structured masking gate fires and the
+    // masking guard redacts every table cell — not only the text field.
+    const a = app({ safety: maskingGuard });
+    const res = await extract(a, {
+      provider: "azure-di",
+      model: "prebuilt-layout",
+      feature: "doc_review_masked",
+      document: { base64: "ZmFrZQ==" },
+    });
+    expect(res.statusCode).toBe(200);
+    const body = res.json();
+    expect(body.text).toBe("<MASKED>");
+    expect(body.tables[0].cells[0].content).toBe("<MASKED>"); // structured masked, no leak
+    expect(body.safety.piiMasked).toBe(true);
   });
 
   it("dedupes a retried extract via Idempotency-Key (provider called once, charged once)", async () => {

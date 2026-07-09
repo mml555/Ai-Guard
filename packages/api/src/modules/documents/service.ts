@@ -88,6 +88,47 @@ function toSource(document: DocumentBody["document"]): DocumentSource {
   throw new DocumentClientError("document must have exactly one of base64, url, or s3");
 }
 
+type StructuredOutput = Pick<DocumentSuccessBody, "tables" | "fields" | "documents">;
+
+async function maskFieldValue(f: DocumentField, mask: (s: string) => Promise<string>): Promise<DocumentField> {
+  return {
+    ...f,
+    ...(f.content !== undefined ? { content: await mask(f.content) } : {}),
+    ...(typeof f.value === "string" ? { value: await mask(f.value) } : {}),
+  };
+}
+
+/** Apply the output-safety `mask` to every textual value in the structured
+ *  output (table cells, key/value fields, prebuilt document fields), in parallel. */
+async function maskStructured(src: StructuredOutput, mask: (s: string) => Promise<string>): Promise<StructuredOutput> {
+  const out: StructuredOutput = {};
+  if (src.tables) {
+    out.tables = await Promise.all(
+      src.tables.map(async (t) => ({
+        ...t,
+        cells: await Promise.all(t.cells.map(async (c) => ({ ...c, content: await mask(c.content) }))),
+      })),
+    );
+  }
+  if (src.fields) {
+    const entries = await Promise.all(
+      Object.entries(src.fields).map(async ([k, f]) => [k, await maskFieldValue(f, mask)] as const),
+    );
+    out.fields = Object.fromEntries(entries);
+  }
+  if (src.documents) {
+    out.documents = await Promise.all(
+      src.documents.map(async (d) => ({
+        ...d,
+        fields: Object.fromEntries(
+          await Promise.all(Object.entries(d.fields).map(async ([k, f]) => [k, await maskFieldValue(f, mask)] as const)),
+        ),
+      })),
+    );
+  }
+  return out;
+}
+
 /**
  * Governed document extraction: the same policy/budget/audit/billing spine as
  * embeddings, but the cost basis is PAGES×perPageUsd (not tokens) and PII is
@@ -388,9 +429,16 @@ export async function handleDocumentExtract(
     );
   }
 
-  // ── Output PII masking on the extracted text ───────────────────────────────
+  // ── Output PII masking on the extracted text AND structured output ─────────
+  // tables/fields/documents carry the SAME extracted content as `text`, so
+  // masking `text` alone would leak PII through the structured fields.
   let text = extracted.text;
   let piiMasked = false;
+  let structured: StructuredOutput = {
+    ...(extracted.tables ? { tables: extracted.tables } : {}),
+    ...(extracted.fields ? { fields: extracted.fields } : {}),
+    ...(extracted.documents ? { documents: extracted.documents } : {}),
+  };
   try {
     const out = await deps.safety.inspectOutput(text, decision.safetyPlan);
     if (out.action === "block") {
@@ -414,6 +462,16 @@ export async function handleDocumentExtract(
     }
     text = out.content;
     piiMasked = out.piiMasked;
+    // Mask the structured output with the SAME plan. Skip when the feature's plan
+    // doesn't mask PII (pii: off) — nothing to leak, and it avoids a Presidio call
+    // per cell/field. Runs inside this try so a backend outage maps to 503 too.
+    if (decision.safetyPlan.pii !== "off" && (structured.tables || structured.fields || structured.documents)) {
+      structured = await maskStructured(structured, async (s) => {
+        const r = await deps.safety.inspectOutput(s, decision.safetyPlan);
+        if (r.piiMasked) piiMasked = true;
+        return r.action === "block" ? "" : r.content;
+      });
+    }
   } catch (err) {
     if (err instanceof SafetyServiceError) {
       deps.log?.error({ err }, "document output safety backend failure");
@@ -473,9 +531,7 @@ export async function handleDocumentExtract(
       pages: extracted.pages,
       provider: input.provider,
       model: extracted.model,
-      ...(extracted.tables ? { tables: extracted.tables } : {}),
-      ...(extracted.fields ? { fields: extracted.fields } : {}),
-      ...(extracted.documents ? { documents: extracted.documents } : {}),
+      ...structured,
       decision: responseDecision,
       reason: decision.reason,
       cost: { estimatedUsd: reservedUsd, actualUsd: actualCostUsd },
