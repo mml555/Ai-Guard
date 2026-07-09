@@ -75,7 +75,7 @@ export function registerPolicyRoutes(
     if (!auth.ok) return sendError(reply, auth.status, auth.code, {}, auth.message);
     const active = await getActiveConfigVersion(pool, request.ctx.tenantId);
     if (!active) return sendError(reply, 404, "not_found", {}, "No active policy version");
-    return reply.send(active.record);
+    return reply.send({ ...active.record, yaml: active.yaml });
   });
 
   app.post("/v1/admin/policy/versions", {

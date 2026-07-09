@@ -2,7 +2,14 @@ import { deployProfileChecks, PROVIDER_REGISTRY } from "@modelgov/policy-engine"
 import { copyFileSync, existsSync, readFileSync, unlinkSync } from "node:fs";
 import { basename, resolve } from "node:path";
 import { spawn } from "node:child_process";
+import { parse as parseYaml } from "yaml";
 import { resolveUserPath } from "./paths.js";
+
+export interface SmokeChatPayload {
+  feature: string;
+  userType: string;
+  modelClass: string;
+}
 
 export type OpsCommand =
   | "doctor"
@@ -351,9 +358,52 @@ async function doctor(mode: Mode, strict: boolean): Promise<void> {
   }
 }
 
+/** Pick a valid feature/userType/modelClass from a modelgov.yaml document. */
+export function smokePayloadFromPolicyYaml(yamlText: string): SmokeChatPayload {
+  const doc = parseYaml(yamlText) as {
+    features?: Record<string, { model_class?: string }>;
+    budgets?: { by_user_type?: Record<string, { models?: string[] }> };
+  };
+  const featureNames = Object.keys(doc.features ?? {});
+  if (featureNames.length === 0) {
+    throw new Error("Policy has no features — cannot run smoke chat");
+  }
+  const feature = featureNames.includes("support_chat") ? "support_chat" : featureNames[0]!;
+  const modelClass = doc.features?.[feature]?.model_class ?? "cheap";
+  const byUserType = doc.budgets?.by_user_type ?? {};
+  const userTypes = Object.keys(byUserType);
+  const preferred = ["logged_in", "pro", "admin", "free", "anonymous"];
+  const userType =
+    preferred.find((u) => userTypes.includes(u) && byUserType[u]?.models?.includes(modelClass))
+    ?? preferred.find((u) => userTypes.includes(u))
+    ?? userTypes[0]
+    ?? "logged_in";
+  return { feature, userType, modelClass };
+}
+
+async function resolveSmokePayload(port: number, apiKey: string): Promise<SmokeChatPayload> {
+  try {
+    const res = await fetch(`http://127.0.0.1:${port}/v1/admin/policy/active`, {
+      headers: { authorization: `Bearer ${apiKey}` },
+    });
+    if (res.ok) {
+      const body = await res.json() as { yaml?: string };
+      if (body.yaml) return smokePayloadFromPolicyYaml(body.yaml);
+    }
+  } catch {
+    // Fall back to the on-disk policy file.
+  }
+  const filePath = resolve(ROOT, "modelgov.yaml");
+  if (!existsSync(filePath)) {
+    return { feature: "support_chat", userType: "logged_in", modelClass: "cheap" };
+  }
+  return smokePayloadFromPolicyYaml(readFileSync(filePath, "utf8"));
+}
+
 async function smoke(mode: Mode, opts: { strict: boolean }): Promise<void> {
   const port = modeConfig(mode).apiPort;
   const apiKey = readEnvFile(mode === "prod" ? ".env.production" : ".env").MODELGOV_API_KEY ?? LOCAL_API_KEY;
+  const payload = await resolveSmokePayload(port, apiKey);
   const res = await fetch(`http://127.0.0.1:${port}/v1/chat`, {
     method: "POST",
     headers: {
@@ -362,9 +412,9 @@ async function smoke(mode: Mode, opts: { strict: boolean }): Promise<void> {
     },
     body: JSON.stringify({
       userId: "setup-smoke",
-      userType: "logged_in",
-      feature: "support_chat",
-      modelClass: "cheap",
+      userType: payload.userType,
+      feature: payload.feature,
+      modelClass: payload.modelClass,
       messages: [{ role: "user", content: "Say hello in one short sentence." }],
     }),
   });

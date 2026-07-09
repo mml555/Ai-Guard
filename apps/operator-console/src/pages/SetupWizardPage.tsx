@@ -457,8 +457,8 @@ export function SetupWizardPage() {
                 ))}
               </div>
               <p className="setup-callout">
-                After setup, run one command so the model proxy picks up your keys (only restarts
-                that container — not the whole stack): <code>pnpm modelgov reload-providers</code>
+                Clicking Apply will save these keys and switch the local stack to your real provider
+                automatically.
               </p>
               <SetupNav onBack={() => goBack("keys")} onNext={() => goNext("keys")} />
             </section>
@@ -588,11 +588,11 @@ export function SetupWizardPage() {
             <section className="setup-step">
               <h1 className="setup-success-title">You&apos;re all set</h1>
               <p className="setup-lead">
-                Configuration is saved and active. {useCloud || useLocal ? "One more step below, then " : ""}
-                try a test message to confirm everything works.
+                Configuration is saved and active. {useLocal ? "One more step below, then " : ""}try a
+                test message to confirm everything works.
               </p>
 
-              {(useCloud || useLocal) && nextCommand && (
+              {nextCommand && (
                 <div className="setup-terminal-card">
                   <h2>{useLocal ? "Start local models" : "Connect real providers"}</h2>
                   <p>
@@ -604,6 +604,12 @@ export function SetupWizardPage() {
                   <p className="setup-field-help">
                     Wait until services are healthy, then send a test message below.
                   </p>
+                </div>
+              )}
+
+              {useCloud && !nextCommand && (
+                <div className="setup-callout setup-callout-success">
+                  Your provider keys are live. The model proxy was restarted automatically.
                 </div>
               )}
 

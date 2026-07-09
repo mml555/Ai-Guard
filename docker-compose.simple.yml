@@ -76,6 +76,7 @@ services:
     build:
       context: .
       dockerfile: packages/api/Dockerfile
+    user: "0:0"
     depends_on:
       postgres:
         condition: service_healthy
@@ -104,6 +105,7 @@ services:
     volumes:
       - ./modelgov.yaml:/app/modelgov.yaml:ro
       - ./.env:/project/.env
+      - /var/run/docker.sock:/var/run/docker.sock
     ports: ["127.0.0.1:${MODELGOV_PUBLIC_PORT:-3090}:3000"]
     healthcheck:
       # Node-based (no dependency on wget/busybox being present in the image).

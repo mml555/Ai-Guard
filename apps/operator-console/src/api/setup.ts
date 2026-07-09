@@ -4,6 +4,7 @@ export interface SetupSecretsResult {
   ok: boolean;
   savedKeys: string[];
   litellmConfigPath?: string;
+  restarted?: boolean;
   nextCommand?: string;
   message: string;
 }

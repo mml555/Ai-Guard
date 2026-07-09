@@ -1,5 +1,49 @@
 import { describe, expect, it } from "vitest";
-import { buildAutoconnectConsoleUrl, hasAnyProviderCredentials, modeConfig, parseOpsFlags, securityConfigWarnings, assertProductionDeploy } from "../src/ops.js";
+import {
+  buildAutoconnectConsoleUrl,
+  hasAnyProviderCredentials,
+  modeConfig,
+  parseOpsFlags,
+  securityConfigWarnings,
+  assertProductionDeploy,
+  smokePayloadFromPolicyYaml,
+} from "../src/ops.js";
+
+describe("smokePayloadFromPolicyYaml", () => {
+  it("uses support_chat when present", () => {
+    const yaml = `
+features:
+  support_chat:
+    model_class: cheap
+budgets:
+  by_user_type:
+    logged_in:
+      models: [cheap]
+`;
+    expect(smokePayloadFromPolicyYaml(yaml)).toEqual({
+      feature: "support_chat",
+      userType: "logged_in",
+      modelClass: "cheap",
+    });
+  });
+
+  it("falls back to the first configured feature", () => {
+    const yaml = `
+features:
+  assistant:
+    model_class: cheap
+budgets:
+  by_user_type:
+    pro:
+      models: [cheap, standard]
+`;
+    expect(smokePayloadFromPolicyYaml(yaml)).toEqual({
+      feature: "assistant",
+      userType: "pro",
+      modelClass: "cheap",
+    });
+  });
+});
 
 describe("hasAnyProviderCredentials", () => {
   it("accepts Gemini and other non-OpenAI keys", () => {

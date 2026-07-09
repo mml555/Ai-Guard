@@ -1,3 +1,4 @@
+import { request as httpRequest } from "node:http";
 import type { FastifyInstance } from "fastify";
 import { writeFileSync } from "node:fs";
 import { resolve } from "node:path";
@@ -7,6 +8,7 @@ import type { RequestContext } from "../../plugins/requestContext";
 import { mergeEnvFile } from "./envFile";
 
 const GENERATED_LITELLM_CONFIG = "litellm_config.generated.yaml";
+const DOCKER_SOCKET_PATH = "/var/run/docker.sock";
 
 const secretsBodySchema = z.object({
   secrets: z.record(z.string(), z.string()),
@@ -25,6 +27,51 @@ export interface SetupRouteDeps {
   enabled: boolean;
   projectRoot: string;
   production: boolean;
+}
+
+async function dockerRequest<T>(method: string, path: string): Promise<T> {
+  return await new Promise<T>((resolvePromise, reject) => {
+    const req = httpRequest(
+      {
+        socketPath: DOCKER_SOCKET_PATH,
+        path,
+        method,
+        headers: { host: "docker" },
+      },
+      (res) => {
+        let body = "";
+        res.setEncoding("utf8");
+        res.on("data", (chunk) => { body += chunk; });
+        res.on("end", () => {
+          if ((res.statusCode ?? 500) >= 400) {
+            reject(new Error(body || `Docker API ${res.statusCode}`));
+            return;
+          }
+          resolvePromise((body ? JSON.parse(body) : undefined) as T);
+        });
+      },
+    );
+    req.on("error", reject);
+    req.end();
+  });
+}
+
+async function restartComposeService(project: string, service: string): Promise<boolean> {
+  try {
+    const filters = encodeURIComponent(JSON.stringify({
+      label: [
+        `com.docker.compose.project=${project}`,
+        `com.docker.compose.service=${service}`,
+      ],
+    }));
+    const containers = await dockerRequest<Array<{ Id: string }>>("GET", `/containers/json?filters=${filters}`);
+    const id = containers[0]?.Id;
+    if (!id) return false;
+    await dockerRequest("POST", `/containers/${id}/restart?t=10`);
+    return true;
+  } catch {
+    return false;
+  }
 }
 
 export function registerSetupRoutes(app: FastifyInstance, deps: SetupRouteDeps): void {
@@ -64,13 +111,20 @@ export function registerSetupRoutes(app: FastifyInstance, deps: SetupRouteDeps):
       litellmConfigPath = GENERATED_LITELLM_CONFIG;
     }
 
+    const restarted = parsed.data.useCloud
+      ? await restartComposeService("modelgov", "litellm")
+      : false;
+
     return reply.send({
       ok: true,
       savedKeys: Object.keys(filtered),
       litellmConfigPath,
-      nextCommand: parsed.data.useCloud ? "pnpm modelgov reload-providers" : undefined,
+      restarted,
+      nextCommand: parsed.data.useCloud && !restarted ? "pnpm modelgov reload-providers" : undefined,
       message: parsed.data.useCloud
-        ? "Provider keys saved. Run `pnpm modelgov reload-providers` once so the gateway uses them (restarts only the model proxy)."
+        ? (restarted
+            ? "Provider keys saved. The model proxy was restarted automatically."
+            : "Provider keys saved. Run `pnpm modelgov reload-providers` once so the model proxy uses them.")
         : "Provider keys saved.",
     });
   });
