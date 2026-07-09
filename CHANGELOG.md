@@ -15,6 +15,8 @@ guarantees in `docs/versioning.md` apply.
 
 ## [Unreleased]
 
+## [1.7.1] - 2026-07-09
+
 ### Fixed
 
 - **Client errors no longer masked as 500.** A request with
