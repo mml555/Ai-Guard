@@ -1,5 +1,6 @@
 import { copyFileSync, existsSync, readFileSync, readdirSync, rmdirSync, statSync } from "node:fs";
 import { resolve } from "node:path";
+import { parse as parseYaml } from "yaml";
 import { resolveUserPath } from "./paths.js";
 import type { Mode } from "./ops.js";
 
@@ -94,8 +95,38 @@ export function assertLitellmConfigUsable(root: string = ROOT): void {
   }
 }
 
+/**
+ * Whether the effective LiteLLM config still routes every model to the built-in
+ * demo provider (vs. a real provider connected via the setup wizard). Used so the
+ * `simple`/`full` success summary doesn't claim "demo AI" after a cloud connect
+ * has rewritten litellm_config.generated.yaml. A config counts as real if ANY
+ * model_list entry targets something other than the demo sidecar; the hybrid
+ * injection-guard entry (which stays on demo-llm) alone does not make it "real".
+ */
+export function litellmConfigServesDemo(root: string = ROOT): boolean {
+  const configured = readEnvFile(".env", root).LITELLM_CONFIG_PATH?.trim();
+  const relative = (configured && configured.length > 0 ? configured : `./${GENERATED_LITELLM_CONFIG}`).replace(/^\.\//, "");
+  const full = resolve(root, relative);
+  if (!existsSync(full) || statSync(full).isDirectory()) return true; // seeded to demo on `up`
+  let doc: { model_list?: Array<{ litellm_params?: { model?: string; api_base?: string } }> };
+  try {
+    doc = parseYaml(readFileSync(full, "utf8")) as typeof doc;
+  } catch {
+    return true; // unparseable → don't over-claim real spend
+  }
+  const entries = doc.model_list ?? [];
+  if (entries.length === 0) return true;
+  const targetsRealProvider = entries.some((e) => {
+    const model = e.litellm_params?.model ?? "";
+    const apiBase = e.litellm_params?.api_base ?? "";
+    const isDemo = model === "openai/modelgov-demo" || apiBase.includes("demo-llm");
+    return !isDemo;
+  });
+  return !targetsRealProvider;
+}
+
 /** One-line description of what the running stack is actually serving, per mode. */
-export function runningOnSummary(mode: Mode): string {
+export function runningOnSummary(mode: Mode, opts?: { servesDemo?: boolean }): string {
   switch (mode) {
     case "cloud":
       return "the gateway is running with your cloud provider keys.";
@@ -106,8 +137,11 @@ export function runningOnSummary(mode: Mode): string {
     case "prod":
       return "the gateway is running in production mode.";
     default:
-      // simple / full: bootstrapped on the built-in demo AI until you connect a
-      // real provider in the console — no key or signup needed to start.
-      return "the gateway is running on the built-in demo AI (no key needed to start).";
+      // simple / full: bootstraps on the built-in demo AI, but the setup wizard
+      // may have already connected a real provider — reflect what's actually
+      // active so the summary never claims "demo" while real spend is happening.
+      return opts?.servesDemo === false
+        ? "the gateway is running on your connected provider (real calls are billed)."
+        : "the gateway is running on the built-in demo AI (no key needed to start).";
   }
 }

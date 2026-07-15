@@ -357,6 +357,22 @@ input, textarea {
   color: #a7f3d0;
 }
 
+.setup-callout-warn {
+  border-color: rgba(251, 191, 36, 0.35);
+  background: rgba(251, 191, 36, 0.08);
+  color: #fde68a;
+}
+
+.setup-advanced-notes {
+  margin: 0.5rem 0 0;
+  padding-left: 1.1rem;
+  line-height: 1.5;
+}
+
+.setup-advanced-notes li {
+  margin-bottom: 0.4rem;
+}
+
 .setup-provider-group {
   margin-bottom: 1.25rem;
 }

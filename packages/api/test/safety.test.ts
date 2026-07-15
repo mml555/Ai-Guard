@@ -10,6 +10,7 @@ import {
   type InjectionDetector,
   type PiiGuard,
 } from "../src/services/safety";
+import { SYSTEM_PROMPT } from "../src/services/safety/injection";
 
 function plan(over: Partial<SafetyPlan> = {}): SafetyPlan {
   return {
@@ -24,6 +25,18 @@ function plan(over: Partial<SafetyPlan> = {}): SafetyPlan {
 }
 
 const USER = [{ role: "user" as const, content: "my email is a@b.com" }];
+
+describe("injection classifier ↔ demo provider coupling", () => {
+  // The zero-key local smoke chat routes injection screening through the built-in
+  // demo provider (tools/demo-llm/server.mjs), which returns "SAFE" only when the
+  // classifier's system prompt contains BOTH marker words. If this prompt is
+  // reworded to drop either, every guarded demo request fails closed — breaking
+  // `./setup`'s smoke test. This guards that contract.
+  it("system prompt keeps the INJECTION and SAFE marker words the demo keys off", () => {
+    expect(SYSTEM_PROMPT).toContain("INJECTION");
+    expect(SYSTEM_PROMPT).toContain("SAFE");
+  });
+});
 
 describe("NoopGuard", () => {
   it("allows everything unchanged", async () => {

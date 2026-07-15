@@ -8,8 +8,12 @@ services:
   litellm:
     command: ["--config", "/app/config.azure.yaml", "--port", "4000"]
     environment:
-      AZURE_API_KEY: ${AZURE_API_KEY}
-      AZURE_API_BASE: ${AZURE_API_BASE}
+      # Keep the empty-default guards the base file uses, so a raw
+      # `docker compose -f simple -f azure up` with these unset interpolates to
+      # empty (and the CLI's ensureAzureKeys catches it) instead of emitting a
+      # noisy "variable is not set" warning.
+      AZURE_API_KEY: ${AZURE_API_KEY:-}
+      AZURE_API_BASE: ${AZURE_API_BASE:-}
       AZURE_API_VERSION: ${AZURE_API_VERSION:-2024-08-01-preview}
     volumes:
       - ./litellm_config.azure.yaml:/app/config.azure.yaml:ro

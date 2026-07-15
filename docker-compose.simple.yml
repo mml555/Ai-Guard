@@ -63,9 +63,30 @@ services:
     volumes:
       # Default to the generated config (seeded from litellm_config.yaml by the
       # CLI before `up`). The setup wizard rewrites THIS same host file in place,
-      # so a plain restart applies a provider change — and the api container
-      # mounts the same file (see below) so its writes land on the host.
-      - ${LITELLM_CONFIG_PATH:-./litellm_config.generated.yaml}:/app/config.yaml:ro
+      # and the api container recreates litellm so a provider change goes live —
+      # the api mounts the same file (see below) so its writes land on the host.
+      # create_host_path:false → if the seed is missing (e.g. a raw `docker compose
+      # up` that skipped the CLI), fail loudly with "source path does not exist"
+      # instead of Docker silently creating a DIRECTORY that crash-loops LiteLLM.
+      - type: bind
+        source: ${LITELLM_CONFIG_PATH:-./litellm_config.generated.yaml}
+        target: /app/config.yaml
+        read_only: true
+        bind:
+          create_host_path: false
+    healthcheck:
+      # The litellm image ships python (no curl guaranteed). /health/liveliness is
+      # unauthenticated. start_period covers the cold-boot warmup so a slow first
+      # run isn't reported unhealthy (and the CLI's readiness wait isn't misled).
+      test:
+        - "CMD"
+        - "python"
+        - "-c"
+        - "import urllib.request,sys; sys.exit(0 if urllib.request.urlopen('http://localhost:4000/health/liveliness').status==200 else 1)"
+      interval: 5s
+      timeout: 3s
+      retries: 24
+      start_period: 30s
     deploy:
       resources:
         limits:
@@ -94,7 +115,10 @@ services:
     deploy:
       resources:
         limits:
-          memory: 1G
+          # spaCy en_core_web_lg's resident set is ~1GB; a hard 1G cgroup can
+          # OOM-kill it mid-load on some hosts (→ presidio never becomes ready and
+          # setup times out). 2G gives headroom. Override via PRESIDIO_ANALYZER_MEMORY.
+          memory: ${PRESIDIO_ANALYZER_MEMORY:-2G}
 
   presidio-anonymizer:
     # pin: update deliberately (was floating :latest)
@@ -143,13 +167,24 @@ services:
       MODELGOV_PROJECT_ROOT: /project
     volumes:
       - ./modelgov.yaml:/app/modelgov.yaml:ro
-      - ./.env:/project/.env
+      # .env holds provider secrets the wizard reads/writes; the CLI creates it
+      # before `up`. create_host_path:false → a raw `docker compose up` that
+      # skipped the CLI fails clearly instead of mounting an empty directory.
+      - type: bind
+        source: ./.env
+        target: /project/.env
+        bind:
+          create_host_path: false
       # The setup wizard writes the generated LiteLLM config to
       # $MODELGOV_PROJECT_ROOT/litellm_config.generated.yaml. Bind it to the host
       # so the write reaches the SAME file the litellm container reads (above) —
       # without this, the wizard's cloud-provider path writes into the container
       # only and the proxy never sees it. Seeded on the host by the CLI before up.
-      - ./litellm_config.generated.yaml:/project/litellm_config.generated.yaml
+      - type: bind
+        source: ./litellm_config.generated.yaml
+        target: /project/litellm_config.generated.yaml
+        bind:
+          create_host_path: false
       - /var/run/docker.sock:/var/run/docker.sock
     ports: ["127.0.0.1:${MODELGOV_PUBLIC_PORT:-3090}:3000"]
     healthcheck:

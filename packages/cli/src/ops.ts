@@ -12,6 +12,7 @@ import {
 import {
   assertLitellmConfigUsable,
   ensureGeneratedLitellmConfig,
+  litellmConfigServesDemo,
   readEnvFile,
   runningOnSummary,
 } from "./setupConfig.js";
@@ -82,7 +83,7 @@ export async function runOps(command: OpsCommand, args: string[]): Promise<void>
       await status(flags.mode);
       return;
     case "reload-providers":
-      await reloadProviders();
+      await reloadProviders(flags.mode);
       return;
     case "doctor":
       await doctor(flags.mode, flags.strict);
@@ -151,6 +152,7 @@ async function up(flags: OpsFlags, opts: { strictSmoke: boolean; json: boolean }
 
   ensureGeneratedLitellmConfig();
   assertLitellmConfigUsable();
+  warnOnCustomLitellmConfig(flags.mode);
 
   console.log(`Starting Modelgov (${flags.mode})...`);
   await dockerCompose(flags.mode, ["up", "--build", "-d"]);
@@ -191,6 +193,24 @@ function ensureEnv(mode: Mode): void {
   process.exit(0);
 }
 
+/**
+ * The demo stack (`simple`/`full`) defaults to litellm_config.generated.yaml. A
+ * leftover LITELLM_CONFIG_PATH pointing elsewhere (e.g. litellm_config.cloud.yaml
+ * from a prior run) is honored silently and can boot against a real-provider
+ * config with no keys, failing later with an opaque "not ready". Surface it.
+ */
+function warnOnCustomLitellmConfig(mode: Mode): void {
+  if (mode !== "simple" && mode !== "full") return;
+  const configured = readEnvFile(".env").LITELLM_CONFIG_PATH?.trim();
+  if (!configured) return;
+  const relative = configured.replace(/^\.\//, "");
+  if (basename(relative) === "litellm_config.generated.yaml") return;
+  console.log(
+    `warn LITELLM_CONFIG_PATH=${configured} overrides the default demo config for ${mode} mode. ` +
+      `If setup fails to become ready, unset LITELLM_CONFIG_PATH in .env to use the built-in demo provider.`,
+  );
+}
+
 function ensureProviderKeys(): void {
   if (hasAnyProviderCredentials(readEnvFile(".env"))) return;
   throw new Error(
@@ -210,7 +230,7 @@ export function hasAnyProviderCredentials(env: Record<string, string>): boolean 
   return false;
 }
 
-async function reloadProviders(): Promise<void> {
+async function reloadProviders(mode: Mode): Promise<void> {
   const env = readEnvFile(".env");
   if (!hasAnyProviderCredentials(env)) {
     throw new Error(
@@ -224,9 +244,13 @@ async function reloadProviders(): Promise<void> {
       `Missing ${relative}. Finish the setup wizard's cloud-provider step first (it writes this file), or run make start-cloud.`,
     );
   }
-  console.log("Reloading the model proxy with your provider keys...");
-  await dockerCompose("simple", ["up", "-d", "litellm", "--force-recreate"]);
-  await waitForReady(modeConfig("simple").apiPort);
+  // Force-recreate under the SAME compose files the stack is running with, so a
+  // reload after `make start-cloud`/`start-azure` keeps that overlay's litellm
+  // command + config mount instead of dropping back to the base simple config.
+  const reloadMode: Mode = mode === "prod" ? "simple" : mode;
+  console.log(`Reloading the model proxy (${reloadMode}) with your provider keys...`);
+  await dockerCompose(reloadMode, ["up", "-d", "litellm", "--force-recreate"]);
+  await waitForReady(modeConfig(reloadMode).apiPort);
   console.log("ok model proxy reloaded — real provider calls are enabled");
 }
 
@@ -448,13 +472,19 @@ function localPublicPort(defaultPort: number): number {
 }
 
 async function waitForReady(port: number): Promise<void> {
-  for (let i = 0; i < 60; i++) {
+  // 150 × 2s = 5 min. A cold boot pulls images and warms the Presidio spaCy model
+  // (en_core_web_lg) and the LiteLLM proxy — both can take a while on a slow or
+  // first-run machine — so the budget is generous. `lastChecks` is surfaced on
+  // timeout so the failure names the dependency that stalled, not just "the API".
+  let lastChecks: Record<string, string> | undefined;
+  for (let i = 0; i < 150; i++) {
     try {
       const res = await fetch(`http://127.0.0.1:${port}/ready`);
       const body = await res.json().catch(() => undefined) as {
         status?: string;
         checks?: { database?: string; litellm?: string; presidio?: string };
       } | undefined;
+      lastChecks = body?.checks as Record<string, string> | undefined;
       if (
         res.ok &&
         body?.status === "ready" &&
@@ -467,7 +497,11 @@ async function waitForReady(port: number): Promise<void> {
     }
     await sleep(2000);
   }
-  throw new Error(`API did not become ready at http://127.0.0.1:${port}/ready`);
+  const detail = lastChecks
+    ? ` Last dependency status: ${Object.entries(lastChecks).map(([k, v]) => `${k}=${v}`).join(", ")}.` +
+      ` Inspect logs with \`docker compose logs litellm presidio-analyzer\`.`
+    : ` The API never responded — inspect logs with \`docker compose logs api\`.`;
+  throw new Error(`API did not become ready at http://127.0.0.1:${port}/ready.${detail}`);
 }
 
 async function printEndpointStatus(port: number, path: "/health" | "/ready"): Promise<void> {
@@ -527,9 +561,12 @@ function printSuccess(mode: Mode, json: boolean): void {
     return;
   }
 
+  const servesDemo = (mode === "simple" || mode === "full") ? litellmConfigServesDemo() : undefined;
   console.log("");
-  console.log(`✓ Ready — ${runningOnSummary(mode)}`);
-  const usesDemoBootstrap = mode === "simple" || mode === "full";
+  console.log(`✓ Ready — ${runningOnSummary(mode, { servesDemo })}`);
+  // A simple/full stack that has already been switched to a real provider (wizard)
+  // should point the user at the dashboard, not the "connect a provider" wizard.
+  const usesDemoBootstrap = (mode === "simple" || mode === "full") && servesDemo !== false;
   const opened = maybeOpenBrowser(consoleUrl);
   if (usesDemoBootstrap) {
     // The simple/full stack boots on the built-in demo AI. The console link opens
@@ -568,9 +605,22 @@ function rerunCommand(commandOrMode: Mode | OpsCommand, mode?: Mode): string {
   return `make ${commandOrMode}${suffix}`;
 }
 
+// Known non-secret placeholders shipped in .env templates / scaffold hints. These
+// are >6 chars and contain no "..."/"REPLACE", so without an explicit denylist
+// they'd be mistaken for real credentials — e.g. `make start-cloud` on the demo
+// .env would pass the credential gate and then 401 against the provider.
+const PLACEHOLDER_SECRETS = new Set(["demo-unused", "demo-key", "changeme", "your-key-here"]);
+
 function isRealSecret(value: string | undefined): boolean {
   if (!value) return false;
-  return !value.includes("...") && !value.includes("REPLACE") && value.trim().length > 6;
+  const v = value.trim();
+  if (v.length <= 6) return false;
+  if (v.includes("...") || v.includes("REPLACE")) return false;
+  if (PLACEHOLDER_SECRETS.has(v)) return false;
+  // Scaffold hints like `<your-resource>` and `/path/to/service-account.json`.
+  if (v.includes("<") && v.includes(">")) return false;
+  if (v.startsWith("/path/to/")) return false;
+  return true;
 }
 
 async function run(command: string, args: string[]): Promise<void> {

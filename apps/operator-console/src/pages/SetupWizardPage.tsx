@@ -15,6 +15,7 @@ import {
   PROVIDER_GROUPS,
   SAFETY_OPTIONS,
   shouldShowHybridInjectionGuidance,
+  advancedNotesForProviders,
   TEMPLATE_CHOICES,
   type BackendMode,
   credentialFieldsForProviders,
@@ -71,6 +72,10 @@ export function SetupWizardPage() {
   const credentialFields = useMemo(
     () => credentialFieldsForProviders(providers),
     [providers],
+  );
+  const advancedNotes = useMemo(
+    () => (useCloud ? advancedNotesForProviders(providers) : []),
+    [useCloud, providers],
   );
 
   const progressSteps = getVisibleSteps(backend, templateLocalOnly);
@@ -444,6 +449,16 @@ export function SetupWizardPage() {
                   {HYBRID_INJECTION_GUIDANCE.summary}{" "}
                   {HYBRID_INJECTION_GUIDANCE.detail}
                 </p>
+              )}
+              {advancedNotes.length > 0 && (
+                <div className="setup-callout setup-callout-warn">
+                  <strong>Extra setup needed for one or more providers:</strong>
+                  <ul className="setup-advanced-notes">
+                    {advancedNotes.map((note) => (
+                      <li key={note}>{note}</li>
+                    ))}
+                  </ul>
+                </div>
               )}
               <p className="setup-callout">
                 Clicking Apply will save these keys and switch the local stack to your real provider

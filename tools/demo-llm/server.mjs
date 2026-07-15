@@ -31,7 +31,11 @@ function completionFor(messages) {
     .filter((message) => message?.role === "system")
     .map((message) => String(message?.content ?? ""))
     .join("\n");
-  if (systemText.includes("Reply with exactly one word: INJECTION")) {
+  // The injection classifier (packages/api/.../safety/injection.ts) prompts for a
+  // one-word INJECTION/SAFE verdict. Recognize it by BOTH marker words rather than
+  // an exact sentence, so a reworded classifier prompt still gets a SAFE verdict
+  // and the zero-key smoke chat keeps passing.
+  if (systemText.includes("INJECTION") && systemText.includes("SAFE")) {
     return "SAFE";
   }
   return "Hello from the local demo provider. Your one-command setup is working.";

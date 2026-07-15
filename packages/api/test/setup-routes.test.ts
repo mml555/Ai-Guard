@@ -156,18 +156,24 @@ describe("POST /v1/setup/secrets", () => {
 describe("docker-compose.simple.yml wizard-config invariant", () => {
   const GENERATED = "litellm_config.generated.yaml";
   const repoRoot = join(dirname(fileURLToPath(import.meta.url)), "..", "..", "..");
+  type LongVol = { type?: string; source?: string; target?: string; read_only?: boolean };
+  type Vol = string | LongVol;
   const compose = parseYaml(readFileSync(join(repoRoot, "docker-compose.simple.yml"), "utf8")) as {
-    services: Record<string, { environment?: Record<string, string>; volumes?: string[] } | undefined>;
+    services: Record<string, { environment?: Record<string, string>; volumes?: Vol[] } | undefined>;
   };
   const service = (name: string) => {
     const s = compose.services[name];
     if (!s) throw new Error(`docker-compose.simple.yml is missing the ${name} service`);
     return s;
   };
-  // Volume strings embed `${VAR:-default}` (which itself contains ":"), so match
-  // on the whole raw entry rather than splitting on ":".
-  const litellmVols = service("litellm").volumes ?? [];
-  const apiVols = service("api").volumes ?? [];
+  // Volumes may be short strings (`src:dst:mode`) or long-form objects (used with
+  // `bind.create_host_path:false`). Normalize both to a `src:dst[:ro]` string so
+  // the invariant checks below don't care which syntax a mount uses. Short strings
+  // embed `${VAR:-default}` (which contains ":"), so match on the whole entry.
+  const normalizeVol = (v: Vol): string =>
+    typeof v === "string" ? v : `${v.source ?? ""}:${v.target ?? ""}${v.read_only ? ":ro" : ""}`;
+  const litellmVols = (service("litellm").volumes ?? []).map(normalizeVol);
+  const apiVols = (service("api").volumes ?? []).map(normalizeVol);
   const projectRoot = service("api").environment?.MODELGOV_PROJECT_ROOT ?? "/project";
 
   it("mounts the generated config as litellm's proxy config by default", () => {
@@ -191,7 +197,8 @@ describe("docker-compose.simple.yml wizard-config invariant", () => {
 
   it("ties litellm's read path and the api write path to the same host file", () => {
     // Both reference ./litellm_config.generated.yaml on the host: the wizard
-    // overwrites it (via the api mount) and a plain litellm restart re-reads it.
+    // overwrites it (via the api mount) and the setup API recreates litellm so it
+    // re-reads the file with fresh provider env.
     expect(litellmVols.some((v) => v.includes(GENERATED) && v.includes("/app/config.yaml"))).toBe(true);
     expect(apiVols.some((v) => v.startsWith(`./${GENERATED}:`))).toBe(true);
   });

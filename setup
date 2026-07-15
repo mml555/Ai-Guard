@@ -79,6 +79,25 @@ elif ! port_available "$api_port" && ! modelgov_on_port "$api_port"; then
 fi
 set_env_value MODELGOV_URL "http://localhost:${api_port}"
 
+# The console publishes on 5174 by default; probe for a free port the same way as
+# the API so an occupied 5174 (e.g. a stray Vite) doesn't abort `docker compose up`
+# with an opaque bind error. Keep CORS_ALLOW_ORIGINS in step with the chosen port,
+# otherwise the browser console would be CORS-blocked by the API.
+console_port="$(env_value MODELGOV_CONSOLE_PORT)"
+if [ -z "$console_port" ]; then
+  console_port=5174
+  while ! port_available "$console_port"; do
+    console_port=$((console_port + 1))
+    if [ "$console_port" -gt 5183 ]; then
+      fail "no free console port found in 5174-5183. Stop the process using those ports or set MODELGOV_CONSOLE_PORT in .env."
+    fi
+  done
+  set_env_value MODELGOV_CONSOLE_PORT "$console_port"
+  set_env_value CORS_ALLOW_ORIGINS "http://localhost:${console_port},http://127.0.0.1:${console_port}"
+elif ! port_available "$console_port" && ! modelgov_on_port "$api_port"; then
+  fail "MODELGOV_CONSOLE_PORT=$console_port is already in use. Stop that process or change MODELGOV_CONSOLE_PORT in .env, then rerun ./setup."
+fi
+
 if [ ! -d node_modules ]; then
   pnpm install
 fi

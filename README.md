@@ -28,10 +28,13 @@ Successful setup ends with:
 
 ```text
 ok smoke chat succeeded
-API:    http://localhost:3090
-Console: http://localhost:5174/login?url=...&token=...
-Status: make status
-Stop:   make stop
+
+✓ Ready — the gateway is running on the built-in demo AI (no key needed to start).
+  Opening the console to connect your AI provider… (if it doesn't open, click:)
+
+  http://localhost:5174/login?url=...&token=...
+
+  make status · make stop
 ```
 
 ### Browser setup wizard
@@ -139,6 +142,9 @@ or any LiteLLM-supported provider.
 
 ```bash
 ./setup
+# ./setup writes the chosen API port to .env (it picks the first free port in
+# 3090-3099). Pass MODELGOV_URL through so the example targets the right one.
+MODELGOV_URL="$(grep '^MODELGOV_URL=' .env | cut -d= -f2)" \
 MODELGOV_API_KEY=sk-modelgov-api-local \
   pnpm --filter support-chat-example start "How do I reset my password?"
 ```

@@ -93,6 +93,30 @@ export const BACKEND_OPTIONS: {
   },
 ];
 
+/**
+ * Providers the one-command local stack can't fully auto-configure. The wizard
+ * still offers them, but warns up front what extra setup they need — so when the
+ * final test message fails it reads as "expected, here's the fix" rather than a
+ * bug. Keep these messages actionable and short.
+ */
+export const ADVANCED_PROVIDER_NOTES: Partial<Record<Provider, string>> = {
+  azure:
+    "Azure requires your deployment names to match the model IDs (gpt-4o-mini, gpt-4o). If your Azure deployments are named differently, edit litellm_config.generated.yaml after setup so each `model:` uses azure/<your-deployment-name>.",
+  azure_ai:
+    "Azure AI Foundry requires your deployment names to match the model IDs. Edit litellm_config.generated.yaml after setup if they differ.",
+  vertex_ai:
+    "Vertex AI needs its service-account JSON mounted into the model-proxy container, which the one-command local stack can't do for an arbitrary host path. Use a compose override or Helm secret — see docs/providers.md.",
+  github_copilot:
+    "GitHub Copilot uses an interactive OAuth device flow that can't complete inside the local proxy container. For headless use, pre-provision GITHUB_COPILOT_TOKEN (see docs/providers.md).",
+};
+
+/** Actionable setup caveats for the currently-selected providers, if any. */
+export function advancedNotesForProviders(providers: Provider[]): string[] {
+  return providers
+    .map((p) => ADVANCED_PROVIDER_NOTES[p])
+    .filter((n): n is string => Boolean(n));
+}
+
 /** Providers where tight free tiers make hybrid injection especially helpful. */
 export const FREE_TIER_INJECTION_PROVIDERS: Provider[] = ["gemini", "groq"];
 

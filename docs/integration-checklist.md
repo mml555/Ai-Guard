@@ -4,10 +4,21 @@ Add Modelgov to an existing app in about 20 minutes.
 
 ## 1. Deploy Modelgov (5 min)
 
+**Scaffold a new project** (`create-modelgov` writes `modelgov.yaml`, `.env`,
+`docker-compose.yml`, and `scripts/smoke.mjs` — no `setup` script):
+
 ```bash
-npx create-modelgov my-project   # or clone this repo
+npx create-modelgov my-project
 cd my-project
-./setup                          # creates .env if needed, starts, waits, smoke-tests
+docker compose up -d             # starts API + LiteLLM + Postgres + Presidio
+node scripts/smoke.mjs           # waits for readiness, runs a real chat smoke test
+```
+
+**Or clone this repo** for the guided one-command experience:
+
+```bash
+git clone https://github.com/mml555/modelgov && cd modelgov
+./setup                          # prereqs, .env, start, readiness wait, smoke test
 ```
 
 > The packages are published: `create-modelgov` and `@modelgov/sdk` on npm,
@@ -41,7 +52,8 @@ budgets:
       models: ["cheap", "standard"]
 ```
 
-Regenerate SDK types if your app imports them:
+Regenerate SDK types if your app imports them (from a clone of this repo — this
+is a monorepo script, not part of a scaffolded project):
 
 ```bash
 pnpm generate-sdk-types
@@ -104,15 +116,18 @@ try {
 Before shipping, explain the paths you care about:
 
 ```bash
-modelgov explain --local --userType free_user --feature support_chat --modelClass premium
-modelgov explain --local --userType paid_user --feature support_chat --modelClass standard
+npx modelgov explain --local --userType free_user --feature support_chat --modelClass premium
+npx modelgov explain --local --userType paid_user --feature support_chat --modelClass standard
 ```
 
 Or against live budget state:
 
 ```bash
-MODELGOV_API_KEY=sk-... modelgov explain --userType paid_user --feature support_chat
+MODELGOV_API_KEY=sk-... npx modelgov explain --userType paid_user --feature support_chat
 ```
+
+> `npx modelgov …` runs the published `@modelgov/cli` from any project. Inside a
+> clone of this repo, use `pnpm modelgov …` instead (it runs the workspace CLI).
 
 ## Production checklist
 

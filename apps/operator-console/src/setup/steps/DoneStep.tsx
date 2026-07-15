@@ -54,7 +54,9 @@ export function DoneStep({
 
       {useCloud && !nextCommand && (
         <div className="setup-callout setup-callout-success">
-          Your provider keys are live. The model proxy was restarted automatically.
+          {testStatus === "ok"
+            ? "Your provider keys are live — the model proxy replied below."
+            : "Provider keys saved and the model proxy was reloaded. Confirming a real reply below…"}
           {hybridGuidance && <> {hybridGuidance}</>}
         </div>
       )}

@@ -56,6 +56,15 @@ describe("hasAnyProviderCredentials", () => {
     expect(hasAnyProviderCredentials({ OPENAI_API_KEY: "sk-..." })).toBe(false);
     expect(hasAnyProviderCredentials({})).toBe(false);
   });
+
+  it("rejects shipped placeholder/demo values so `start-cloud` on the demo .env fails clearly", () => {
+    // .env.local.example ships these; without a denylist they'd read as real keys
+    // and make-start-cloud would 401 against the provider instead of prompting for
+    // a real key.
+    expect(hasAnyProviderCredentials({ OPENAI_API_KEY: "demo-unused", ANTHROPIC_API_KEY: "demo-unused" })).toBe(false);
+    expect(hasAnyProviderCredentials({ AZURE_API_BASE: "https://<your-resource>.openai.azure.com" })).toBe(false);
+    expect(hasAnyProviderCredentials({ GOOGLE_APPLICATION_CREDENTIALS: "/path/to/service-account.json" })).toBe(false);
+  });
 });
 
 describe("securityConfigWarnings", () => {

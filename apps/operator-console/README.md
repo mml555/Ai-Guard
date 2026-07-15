@@ -19,6 +19,11 @@ Set the API URL (defaults to `http://127.0.0.1:3090` when using `./setup`):
 VITE_MODELGOV_URL=http://127.0.0.1:3090 pnpm --filter @modelgov/operator-console dev
 ```
 
+> The Vite dev server binds **:5173**, but the API's default `CORS_ALLOW_ORIGINS`
+> only allows the Docker console origin (`:5174`). To use the dev server against a
+> `./setup` stack, add `http://localhost:5173` to `CORS_ALLOW_ORIGINS` in `.env`
+> and restart the API (or run the console from the container on :5174).
+
 ### First-run setup wizard (`/setup`)
 
 When the stack is started via `./setup`, the autoconnect login link redirects new

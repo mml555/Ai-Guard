@@ -47,37 +47,73 @@ export interface SetupRouteDeps {
 
 const mergeBodySchema = z.object({ yaml: z.string().min(1) });
 
-async function dockerRequest<T>(method: string, path: string): Promise<T> {
+async function dockerRequest<T>(method: string, path: string, body?: unknown): Promise<T> {
+  const payload = body === undefined ? undefined : JSON.stringify(body);
   return await new Promise<T>((resolvePromise, reject) => {
     const req = httpRequest(
       {
         socketPath: DOCKER_SOCKET_PATH,
         path,
         method,
-        headers: { host: "docker" },
+        headers: {
+          host: "docker",
+          ...(payload
+            ? { "content-type": "application/json", "content-length": Buffer.byteLength(payload) }
+            : {}),
+        },
         timeout: DOCKER_TIMEOUT_MS,
       },
       (res) => {
-        let body = "";
+        let resBody = "";
         res.setEncoding("utf8");
-        res.on("data", (chunk) => { body += chunk; });
+        res.on("data", (chunk) => { resBody += chunk; });
         res.on("end", () => {
           if ((res.statusCode ?? 500) >= 400) {
-            reject(new Error(body || `Docker API ${res.statusCode}`));
+            reject(new Error(resBody || `Docker API ${res.statusCode}`));
             return;
           }
-          resolvePromise((body ? JSON.parse(body) : undefined) as T);
+          resolvePromise((resBody ? JSON.parse(resBody) : undefined) as T);
         });
       },
     );
     // Without this, a stuck docker daemon would hang the setup request forever.
     req.on("timeout", () => req.destroy(new Error("Docker API timeout")));
     req.on("error", reject);
+    if (payload) req.write(payload);
     req.end();
   });
 }
 
-async function restartComposeService(project: string, service: string): Promise<boolean> {
+interface DockerContainerInspect {
+  Name: string;
+  Config: { Env?: string[]; Hostname?: string; [k: string]: unknown };
+  HostConfig: Record<string, unknown>;
+  NetworkSettings?: { Networks?: Record<string, { Aliases?: string[] | null }> };
+}
+
+/**
+ * Apply new provider credentials to the running litellm container.
+ *
+ * A plain Docker `restart` re-runs the SAME container, whose environment was
+ * frozen at creation time (in demo mode, `OPENAI_API_KEY=demo-unused`). Because
+ * the LiteLLM config reads keys via `os.environ/OPENAI_API_KEY`, a restart never
+ * picks up the key the wizard just wrote to `.env` — so real provider calls keep
+ * failing while the UI claims success. Only a *recreate* re-injects env.
+ *
+ * The api container can't run `docker compose`, so we recreate over the Engine
+ * API: inspect the live container, merge the new credentials over its env,
+ * then swap it out (stop → rename old aside → create replacement with the same
+ * name/image/mounts/networks + fresh env → start → remove old). If anything
+ * fails before the replacement starts, the original is renamed back and left
+ * running, and the caller falls back to printing `reload-providers`.
+ *
+ * `envOverrides` are the provider credential values just saved (already trimmed).
+ */
+async function recreateComposeService(
+  project: string,
+  service: string,
+  envOverrides: Record<string, string>,
+): Promise<boolean> {
   try {
     const filters = encodeURIComponent(JSON.stringify({
       label: [
@@ -85,10 +121,70 @@ async function restartComposeService(project: string, service: string): Promise<
         `com.docker.compose.service=${service}`,
       ],
     }));
-    const containers = await dockerRequest<Array<{ Id: string }>>("GET", `/containers/json?filters=${filters}`);
+    const containers = await dockerRequest<Array<{ Id: string }>>(
+      "GET",
+      `/containers/json?all=true&filters=${filters}`,
+    );
     const id = containers[0]?.Id;
     if (!id) return false;
-    await dockerRequest("POST", `/containers/${id}/restart?t=10`);
+
+    const info = await dockerRequest<DockerContainerInspect>("GET", `/containers/${id}/json`);
+    const name = info.Name.replace(/^\//, "");
+    const shortId = id.slice(0, 12);
+
+    // Merge the new credentials over the container's existing environment.
+    const envMap = new Map<string, string>();
+    for (const entry of info.Config.Env ?? []) {
+      const eq = entry.indexOf("=");
+      if (eq === -1) continue;
+      envMap.set(entry.slice(0, eq), entry.slice(eq + 1));
+    }
+    for (const [k, v] of Object.entries(envOverrides)) envMap.set(k, v);
+    const newEnv = [...envMap].map(([k, v]) => `${k}=${v}`);
+
+    // Preserve the compose network membership + service-name aliases (drop the
+    // container-id alias, which is regenerated). Docker's create call accepts a
+    // single network in EndpointsConfig; litellm is on the one compose network.
+    const networks = info.NetworkSettings?.Networks ?? {};
+    const endpointsConfig: Record<string, { Aliases: string[] }> = {};
+    for (const [netName, net] of Object.entries(networks)) {
+      endpointsConfig[netName] = {
+        Aliases: (net.Aliases ?? []).filter((a) => a !== shortId),
+      };
+    }
+
+    const createBody = {
+      ...info.Config,
+      // Let Docker assign a fresh hostname (the old one is the prior short id).
+      Hostname: undefined,
+      Env: newEnv,
+      HostConfig: info.HostConfig,
+      NetworkingConfig: { EndpointsConfig: endpointsConfig },
+    };
+
+    // Swap: stop + move the old container aside so the name is free, create the
+    // replacement, start it, then delete the old one. Roll the rename back on
+    // any failure so we never strand the stack without a litellm container.
+    await dockerRequest("POST", `/containers/${id}/stop?t=10`).catch(() => {});
+    const parkedName = `${name}_pre_setup`;
+    await dockerRequest("POST", `/containers/${id}/rename?name=${encodeURIComponent(parkedName)}`);
+
+    let created: { Id: string };
+    try {
+      created = await dockerRequest<{ Id: string }>(
+        "POST",
+        `/containers/create?name=${encodeURIComponent(name)}`,
+        createBody,
+      );
+    } catch (e) {
+      // Restore the original name (and leave it as-is) so the fallback path works.
+      await dockerRequest("POST", `/containers/${id}/rename?name=${encodeURIComponent(name)}`).catch(() => {});
+      await dockerRequest("POST", `/containers/${id}/start`).catch(() => {});
+      throw e;
+    }
+
+    await dockerRequest("POST", `/containers/${created.Id}/start`);
+    await dockerRequest("DELETE", `/containers/${id}?force=true`).catch(() => {});
     return true;
   } catch {
     return false;
@@ -153,8 +249,11 @@ export function registerSetupRoutes(app: FastifyInstance, deps: SetupRouteDeps):
       throw e;
     }
 
+    // Recreate (not restart) litellm so it picks up the new credentials from the
+    // env — a restart would reuse the container's demo-time environment. Falls
+    // back to the reload-providers command if the Engine API isn't reachable.
     const restarted = parsed.data.useCloud
-      ? await restartComposeService("modelgov", "litellm")
+      ? await recreateComposeService("modelgov", "litellm", filtered)
       : false;
 
     return reply.send({
@@ -165,7 +264,7 @@ export function registerSetupRoutes(app: FastifyInstance, deps: SetupRouteDeps):
       nextCommand: parsed.data.useCloud && !restarted ? "pnpm modelgov reload-providers" : undefined,
       message: parsed.data.useCloud
         ? (restarted
-            ? "Provider keys saved. The model proxy was restarted automatically."
+            ? "Provider keys saved. The model proxy was reloaded with them — verify with a test message."
             : "Provider keys saved. Run `pnpm modelgov reload-providers` once so the model proxy uses them.")
         : "Provider keys saved.",
     });
